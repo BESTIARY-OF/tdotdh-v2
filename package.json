@@ -1,0 +1,12 @@
+{
+  "name": "tdotdh-v2-monorepo",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Hardware-acceleration-ready Nonomino field guide workline",
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "test": "node --test packages/domain/test/*.test.js",
+    "check": "node --check packages/domain/src/occupancy.js && node --check packages/search-core/src/work-ticket.js && node --check packages/field-metrics/src/schema.js"
+  }
+}
