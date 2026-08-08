@@ -1,0 +1,88 @@
+{
+  "$schema": "./package-catalog.v0.schema.json",
+  "schema": "tdotdh.package-catalog.v0",
+  "catalog_id": "tdotdh-v2-monorepo",
+  "catalog_version": 0,
+  "compatibility": {
+    "semantic_baseline": "v1-field-guide-arrangement-semantics",
+    "runtime": "browser-esmodules",
+    "required_contracts": [
+      "maps-of.field-guide-arrangement.v0"
+    ],
+    "policy": "cpu-oracle-first; accelerators must preserve canonical signatures"
+  },
+  "packages": [
+    {
+      "id": "packages/domain",
+      "kind": "package",
+      "status": "implemented",
+      "capabilities": ["packed-occupancy"],
+      "requires": [],
+      "provides": ["occupancy.v0"]
+    },
+    {
+      "id": "packages/search-core",
+      "kind": "package",
+      "status": "implemented",
+      "capabilities": ["deterministic-work-tickets", "weighted-family-scheduling"],
+      "requires": ["occupancy.v0"],
+      "provides": ["work-ticket.v0"]
+    },
+    {
+      "id": "packages/field-metrics",
+      "kind": "package",
+      "status": "implemented",
+      "capabilities": ["field-validation", "geometry-metrics"],
+      "requires": ["occupancy.v0"],
+      "provides": ["field-metrics.v0"]
+    },
+    {
+      "id": "packages/search-worker",
+      "kind": "package",
+      "status": "contract-only",
+      "capabilities": ["bounded-worker-protocol", "cancellation"],
+      "requires": ["work-ticket.v0", "field-metrics.v0"],
+      "provides": ["search-events.v0"]
+    },
+    {
+      "id": "packages/persistence",
+      "kind": "package",
+      "status": "contract-only",
+      "capabilities": ["indexeddb-bank", "progress-checkpoints"],
+      "requires": ["maps-of.field-guide-arrangement.v0"],
+      "provides": ["bank-projection.v0"]
+    },
+    {
+      "id": "packages/interchange",
+      "kind": "package",
+      "status": "implemented",
+      "capabilities": ["versioned-package-catalog", "import-export-compatibility"],
+      "requires": ["maps-of.field-guide-arrangement.v0"],
+      "provides": ["tdotdh.package-catalog.v0"]
+    },
+    {
+      "id": "packages/browser-handoff",
+      "kind": "package",
+      "status": "contract-only",
+      "capabilities": ["url-state", "broadcast-observation"],
+      "requires": [],
+      "provides": ["browser-handoff.v0"]
+    },
+    {
+      "id": "apps/field-guide",
+      "kind": "app",
+      "status": "contract-only",
+      "capabilities": ["bounded-bank-projection", "preset-import-export"],
+      "requires": ["bank-projection.v0", "browser-handoff.v0"],
+      "provides": ["field-guide-ui.v0"]
+    },
+    {
+      "id": "apps/solver-worker",
+      "kind": "app",
+      "status": "contract-only",
+      "capabilities": ["worker-bundle-entrypoint"],
+      "requires": ["search-events.v0"],
+      "provides": ["solver-worker-entrypoint.v0"]
+    }
+  ]
+}
