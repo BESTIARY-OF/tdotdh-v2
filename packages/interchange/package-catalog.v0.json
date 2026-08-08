@@ -39,7 +39,7 @@
     {
       "id": "packages/search-worker",
       "kind": "package",
-      "status": "contract-only",
+      "status": "implemented",
       "capabilities": ["bounded-worker-protocol", "cancellation"],
       "requires": ["work-ticket.v0", "field-metrics.v0"],
       "provides": ["search-events.v0"]
