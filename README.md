@@ -30,3 +30,7 @@ on the critical path; broader package work runs as disjoint sidecars and returns
 through one serial integration gate.
 
 The source-of-truth v1 handoff remains in [BESTIARY-OF/tdotdh-field-guide](https://github.com/BESTIARY-OF/tdotdh-field-guide), with the instance pack in [MAPS-OF/SEDLEC-00Q](https://github.com/MAPS-OF/SEDLEC-00Q).
+
+The original `tdotdh-v2-monorepo-8be3840.zip` scaffold remains at the repository
+root as a downloadable baseline; the source tree below is the continued v2
+workline.
