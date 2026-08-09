@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TDOTDH v2 Field Guide Preview</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">TDOTDH / V2 WORKLINE</p>
+        <h1>Nonomino field guide</h1>
+      </div>
+      <div class="badge" id="runtime-badge">CPU oracle ready</div>
+    </header>
+
+    <main class="layout">
+      <section class="hero panel">
+        <div>
+          <p class="eyebrow">HUMAN REVIEW PREVIEW</p>
+          <h2>Canonical flatland first. Acceleration when it proves parity.</h2>
+          <p class="lede">This is a separate v2 browser surface. It consumes the versioned contracts without touching the v1 application or port 5173.</p>
+        </div>
+        <button id="search-button" type="button">Run CPU search sample</button>
+      </section>
+
+      <section class="grid panel" aria-label="Field preview">
+        <div class="field-wrap">
+          <div class="section-label">CANONICAL FLATLAND / 16 × 15</div>
+          <div id="field" class="field" role="img" aria-label="Sample flatland arrangement"></div>
+        </div>
+        <aside class="metrics">
+          <div class="metric"><span>Family</span><strong>F-0RHDG0U</strong></div>
+          <div class="metric"><span>Search mode</span><strong id="mode">depth</strong></div>
+          <div class="metric"><span>Arrangement</span><strong id="arrangement-count">01</strong></div>
+          <div class="metric"><span>Signature</span><code id="signature">waiting</code></div>
+        </aside>
+      </section>
+
+      <section class="status-grid">
+        <article class="status-card"><span class="dot green"></span><div><strong>CPU oracle</strong><p>Available as the correctness baseline.</p></div></article>
+        <article class="status-card"><span class="dot amber"></span><div><strong>Compute shader</strong><p id="compute-status">Unavailable; no backend is claimed.</p></div></article>
+        <article class="status-card"><span class="dot blue"></span><div><strong>Renderer boundary</strong><p>Flatland is live; future manifold targets remain metadata-only.</p></div></article>
+      </section>
+
+      <section class="panel targets">
+        <div class="section-label">FUTURE DISPLAY TARGETS</div>
+        <div class="target-list" id="targets"></div>
+      </section>
+    </main>
+
+    <footer>v2 preview · separate from v1 · port 5174 recommended</footer>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
