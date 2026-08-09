@@ -9,7 +9,7 @@ const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; ch
 
 createServer((request, response) => {
   const requestPath = request.url?.split('?')[0] || '/';
-  const requested = requestPath === '/' ? '/apps/field-guide/index.html' : requestPath;
+  const requested = requestPath === '/' ? '/apps/field-guide/product/index.html' : requestPath;
   const file = normalize(join(root, requested.replace(/^[/\\]+/, '')));
   if (!file.startsWith(root + sep)) { response.writeHead(403); response.end('Forbidden'); return; }
   if (!existsSync(file)) { response.writeHead(404); response.end('Not found'); return; }

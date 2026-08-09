@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Nonomino Field Guide</title>
+    <meta name="description" content="An interactive space-filling solver for a selected set of 9-area TDOTDH permutations." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/apps/field-guide/product/styles.css?v=20260809-product1" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+          <div>
+            <p class="eyebrow">TDOTDH / 09 × 15</p>
+            <h1>Nonomino field guide</h1>
+          </div>
+        </div>
+        <nav class="top-nav" aria-label="Primary navigation">
+          <button class="nav-item active" id="solverNav" type="button">Solver <span class="nav-count">01</span></button>
+          <button class="nav-item" id="atlasNav" type="button">Atlas <span class="nav-count" id="atlasNavCount">00</span></button>
+          <button class="nav-item" id="methodNav" type="button">Method</button>
+        </nav>
+        <div class="top-actions">
+          <span class="status-dot"></span><span>Local search</span><span id="v2RuntimeStatus" class="v2-runtime-status">V2 product · initializing</span>
+          <button class="icon-button" id="helpButton" aria-label="About this solver" type="button">?</button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="sidebar left-rail">
+          <div class="rail-heading">
+            <div><p class="eyebrow" id="presetName">The Opinionated Set</p><h2><span id="presetPieceCount">15</span> pieces</h2></div>
+            <span class="mono-label">100 UNIQUE</span>
+          </div>
+          <div class="sidebar-tabs" role="tablist" aria-label="Field guide navigation">
+            <button class="sidebar-tab active" id="piecesTab" type="button" role="tab" aria-selected="true">Pieces</button>
+            <button class="sidebar-tab" id="familiesTab" type="button" role="tab" aria-selected="false">Families <span id="familyCount">00</span></button>
+          </div>
+          <div class="sidebar-panel" id="piecesPanel">
+          <div class="piece-list" id="pieceList" aria-label="Selected pieces"></div>
+          <div class="legend-card">
+            <div class="legend-title"><span class="legend-icon">✦</span> Orientation lock</div>
+            <p>#8 is X-flipped. #40 is X + Y flipped (180°). #43 is X-flipped. No other rotations.</p>
+          </div>
+          </div>
+          <div class="sidebar-panel families-panel" id="familiesPanel" hidden>
+            <div class="family-controls">
+              <label class="family-sort-label" for="familySort">Sort <select id="familySort" class="family-sort"><option value="best">Best overall</option><option value="coast">Least coastline</option><option value="density">Densest field</option><option value="central">Most central</option><option value="enclosure">Strongest enclosure</option><option value="arrangements">Most arrangements</option></select></label>
+              <label class="family-sort-label" for="familyBandFilter">Band <select id="familyBandFilter" class="family-sort"><option value="">All neighbor bands</option></select></label>
+              <button class="filter-toggle" id="preferenceToggle" type="button" aria-pressed="false">Preference: off</button>
+              <label class="preference-mode-label" for="preferenceMode">Matches <select id="preferenceMode" class="preference-mode"><option value="rank">rank first</option><option value="only">only</option></select></label>
+            </div>
+            <div class="search-steering" aria-label="Search steering">
+              <div class="search-steering-section">
+                <span class="search-steering-heading">Placement hints</span>
+                <label class="search-hint-toggle"><input id="searchHints" type="checkbox"> Use saved directions</label>
+              </div>
+              <div class="search-steering-section">
+                <span class="search-steering-heading">Family exploration</span>
+                <label class="search-strategy-label" for="searchStrategy">Explore <select id="searchStrategy" class="search-strategy"><option value="breadth">family breadth</option><option value="balanced">balanced</option><option value="depth">family depth</option></select></label>
+                <small class="family-steering-note" id="familySteeringNote">ignored during breadth</small>
+                <label class="search-strategy-label" for="neighborTarget">Neighbors <select id="neighborTarget" class="search-strategy"><option value="">any count</option><option value="4">exactly 4</option><option value="5">exactly 5</option><option value="6">exactly 6</option><option value="7">exactly 7</option><option value="8">exactly 8</option><option value="9">exactly 9</option><option value="10">exactly 10</option><option value="11">exactly 11</option></select></label>
+              </div>
+              <div class="search-steering-section">
+                <span class="search-steering-heading">Field character · rank steering</span>
+                <label class="search-strategy-label" for="coastBias">Coast <select id="coastBias" class="search-strategy"><option value="0">off</option><option value="1">1× gentle</option><option value="2">2× strong</option><option value="3">3×</option><option value="4">4×</option><option value="5">5× max</option></select></label>
+                <label class="search-strategy-label" for="gravityBias">Gravity <select id="gravityBias" class="search-strategy"><option value="0">off</option><option value="1">1× gentle</option><option value="2">2× strong</option><option value="3">3×</option><option value="4">4×</option><option value="5">5× max</option></select></label>
+                <label class="search-strategy-label" for="inletBias">Inlet avoidance <select id="inletBias" class="search-strategy"><option value="0">off</option><option value="1">1× gentle</option><option value="2">2× strong</option><option value="3">3×</option><option value="4">4×</option><option value="5">5× max</option></select></label>
+                <small class="family-steering-note">soft ranking only; valid fields remain valid</small>
+              </div>
+            </div>
+            <p class="panel-hint" id="familyFilterHint">Choose a centroid seed to browse its arrangements.</p>
+            <div class="family-tabs family-sidebar-list" id="familyTabs" aria-label="Centroid seed families"></div>
+          </div>
+        </aside>
+
+        <section class="solver-stage" id="solverStage" aria-label="Nonomino solver">
+          <div class="stage-header">
+            <div>
+              <p class="eyebrow accent" id="arrangementLabel">Variable field <span class="divider">/</span> source-locked</p>
+              <h2 id="stageTitle">Search the open field.</h2>
+              <p class="stage-subtitle" id="stageSubtitle">No rectangle is prescribed. Find a dense connected packing with zero internal holes and the selected centroid away from every coast.</p>
+            </div>
+            <div class="stage-header-actions">
+              <button class="ghost-button" id="resetButton" type="button">Reset</button>
+              <button class="primary-button" id="solveButton" type="button"><span class="spark">✦</span> Find a new arrangement</button>
+            </div>
+          </div>
+
+          <div class="board-wrap">
+            <div class="board-meta board-meta-left"><span class="live-dot"></span><span id="searchStatus">Ready to search</span></div>
+            <div class="board-meta board-meta-right"><span>FIELD</span><strong id="fieldSize">—</strong><span class="meta-separator"></span><span>CELLS</span><strong>135</strong></div>
+            <div class="board-frame">
+              <div class="board-axis axis-top"><span>01</span><span>05</span><span>10</span><span>15</span></div>
+              <div class="board-axis axis-side"><span>A</span><span>C</span><span>E</span><span>G</span><span>I</span></div>
+              <div id="board" class="board" role="img" aria-label="Variable field waiting for a verified arrangement"></div>
+            </div>
+            <div class="board-footer"><span><span class="footer-key center-key"></span> field center square</span><span><span class="footer-key coast-key"></span> coast boundary</span><span class="footer-note">Every square accounted for</span></div>
+          </div>
+
+          <div class="stats-row">
+            <div class="stat-card"><span class="stat-label">COVERAGE</span><strong id="coverageStat">—</strong><span class="stat-detail" id="coverageDetail">135 squares total</span></div>
+            <div class="stat-card"><span class="stat-label">INTERNAL HOLES</span><strong id="holesStat">—</strong><span class="stat-detail" id="holesDetail">awaiting a verified field</span></div>
+            <div class="stat-card"><span class="stat-label">CENTROID</span><strong id="centroidLabel">#03</strong><span class="stat-detail" id="centroidDetail">protected anchor</span></div>
+            <div class="stat-card"><span class="stat-label">SEARCH NODES</span><strong id="nodeCount">—</strong><span class="stat-detail">variable-field search</span></div>
+            <div class="stat-card"><span class="stat-label">COASTLINE</span><strong id="coastStat">—</strong><span class="stat-detail" id="coastDetail">lower is better</span></div>
+          </div>
+
+        </section>
+
+        <section class="nav-view atlas-view" id="atlasView" hidden aria-label="Atlas of discovered seed families">
+          <div class="nav-view-header">
+            <div><p class="eyebrow accent">Observed phase space</p><h2>Atlas of the field.</h2><p class="nav-view-subtitle">A two-dimensional projection of the families actually discovered so far—not a claim that the full combinatorial space is two-dimensional.</p></div>
+            <div class="atlas-summary" id="atlasSummary"></div>
+          </div>
+          <div class="atlas-projection-card">
+            <div class="projection-heading"><div><span class="eyebrow">Family projection</span><strong>Centroid neighborhood × coastline</strong></div><small>Each marker is a unique seed family. Larger markers contain more banked arrangements.</small></div>
+            <div class="atlas-plot" id="atlasPlot"><div class="plot-empty">Capture arrangements to populate the observed phase map.</div></div>
+            <div class="projection-axis projection-axis-x"><span>fewer adjacent shapes</span><span>more adjacent shapes</span></div>
+            <div class="projection-axis projection-axis-y"><span>less coastline</span><span>more coastline</span></div>
+          </div>
+          <div class="atlas-family-grid" id="atlasFamilyGrid"></div>
+        </section>
+
+        <section class="nav-view method-view" id="methodView" hidden aria-label="Search method">
+          <div class="nav-view-header"><div><p class="eyebrow accent">Search method</p><h2>How the field grows.</h2><p class="nav-view-subtitle">The solver searches a high-dimensional tree, then exposes a few honest projections so the process can be inspected without pretending it is a flat map.</p></div></div>
+          <div class="method-grid">
+            <article class="method-card method-card-wide preset-editor-card"><span class="method-index">00 / PRESET</span><div class="preset-editor-heading"><div><h3 id="presetEditorTitle">The Opinionated Set</h3><p id="presetEditorId">SEDLEC-00Q_ISLAND-001</p></div><span class="preset-fork-badge">fork on change</span></div><div class="preset-editor-meta"><span>Centroid</span><select id="presetCentroid" aria-label="Centroid permutation"></select><span>Modified</span><strong id="presetModifiedCount">3 / 3</strong></div><div class="preset-piece-editor" id="presetPieceEditor"></div><p class="method-bound-note">Permutation numbers remain the source identities. A transform changes placement orientation only. Editing the centroid or any transform forks a new preset and starts a separate search bank.</p></article>
+            <article class="method-card method-card-wide"><span class="method-index">01 / TREE</span><h3>What is actually high-dimensional?</h3><p>Every node is a partial field: which pieces have been placed, their translations, the order they arrived, the remaining frontier, and the centroid-adjacent contact geometry. Two nodes can share a family seed while having completely different outer coastlines.</p><div class="method-flow"><span>centroid</span><b>→</b><span>contact seed</span><b>→</b><span>partial field</span><b>→</b><span>complete arrangement</span></div></article>
+            <article class="method-card"><span class="method-index">02 / BEAM</span><h3>What the search keeps</h3><p>The worker grows connected candidates around the selected centroid. It retains a bounded beam, branches only from the current frontier, rejects holes, and reports progress by depth. Breadth mode reserves beam space for distinct unseen family seeds.</p><div class="method-metrics" id="methodTelemetry"></div></article>
+            <article class="method-card"><span class="method-index">03 / HINTS</span><h3>What saved directions do</h3><p>Direction hints are optional steering, separate from family exploration. A strict edge-extension test assigns each piece one dominant cardinal direction. When enabled, completed candidates with more matching hints rank ahead of otherwise valid candidates.</p></article>
+            <article class="method-card method-card-wide"><span class="method-index">04 / PROJECTION</span><h3>How to read the Atlas</h3><p>The Atlas places observed families by the number of shapes directly touching the centroid and their best coastline. The marker contains the exact centroid-adjacent thumbnail and family ID. This is a useful phase-space projection, but it does not include rejected nodes that were never captured.</p><div class="legend-inline"><span><i class="legend-dot legend-dot-family"></i>seed family</span><span><i class="legend-dot legend-dot-arrangements"></i>marker size = arrangements</span><span><i class="legend-dot legend-dot-coast"></i>vertical position = coastline</span></div><p class="method-bound-note"><strong>Loose finite bounds:</strong> The selected centroid exposes a finite set of orthogonal exterior slots. The current worker’s 24 × 16 field cap also gives a deliberately loose outer-piece placement bound before overlap, connectivity, hole, and packing constraints.</p></article>
+          </div>
+        </section>
+
+        <aside class="sidebar right-rail">
+          <section class="right-panel" id="inspectorPanel">
+            <div class="rail-heading inspector-heading"><div><p class="eyebrow">Piece inspector</p><h2 id="inspectorTitle">#03 / centroid</h2></div><span class="selected-chip">SELECTED</span></div>
+            <div class="inspector-preview" id="inspectorPreview"></div>
+            <div class="inspector-copy"><p id="inspectorText">The anchor piece. Its cells stay clear of the outside boundary, making the entire field feel like it grows around a quiet center.</p></div>
+            <div class="detail-list">
+              <div><span>Area</span><strong>09 squares</strong></div>
+              <div><span>Source</span><strong>TDOTDH catalog</strong></div>
+              <div><span>Motion</span><strong id="inspectorMotion">fixed</strong></div>
+            </div>
+            <div class="piece-color-settings" id="pieceColorSettings" hidden></div>
+            <div class="placement-preference" id="placementPreference" hidden></div>
+            <div class="method-note"><span class="method-number">01</span><div><strong>Open-field search</strong><p>The solver grows a connected field around the selected centroid. Its bounding box is a result, not a constraint.</p></div></div>
+          </section>
+          <section class="right-panel arrangements-panel" id="arrangementPanel" hidden>
+            <div class="section-heading arrangement-heading"><div><p class="eyebrow">Selected seed</p><h3>Arrangements <span id="snapshotCount">00</span></h3></div><div class="arrangement-heading-actions"><label class="arrangement-sort-label" for="arrangementSort">Sort <select id="arrangementSort" class="arrangement-sort"><option value="best">Best overall</option><option value="hints">Saved direction matches</option><option value="coast">Least coastline</option><option value="density">Densest field</option><option value="enclosure">Strongest enclosure</option><option value="compact">Smallest bounding box</option><option value="radial">Lowest radial spread</option><option value="central">Centroid closest to field center</option><option value="square">Center square closest to centroid</option><option value="inlets">Least inlet / peninsula risk</option></select></label></div></div>
+            <div class="family-detail" id="familyDetail"></div>
+            <div class="snapshot-list" id="snapshotList"></div>
+          </section>
+        </aside>
+      </main>
+
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+      <dialog id="helpDialog"><button class="dialog-close" id="closeDialog" type="button">×</button><p class="eyebrow accent">About the field guide</p><h2>Pack 15 nonominoes into one clean field.</h2><p>This solver uses the original 9-area TDOTDH representatives and a variable-size connected field. It only captures arrangements that pass the no-hole and off-coast centroid checks.</p></dialog>
+    </div>
+    <script type="module" src="/apps/field-guide/product/v2-runtime.js?v=20260809-product1"></script>
+    <script src="/apps/field-guide/product/app.js?v=20260809-product1"></script>
+  </body>
+</html>
