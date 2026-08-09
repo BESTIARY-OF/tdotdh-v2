@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const productDirectory = resolve(testDirectory, "..", "product");
-const productFiles = ["index.html", "styles.css", "app.js", "v2-runtime.js", "search-worker.js"];
+const productFiles = ["index.html", "styles.css", "app.js", "v2-runtime.js", "v2-search-worker.js", "search-worker.js"];
 
 async function assertRegularFile(relativePath) {
   const filePath = resolve(productDirectory, relativePath);
@@ -31,6 +31,8 @@ for (const assetPattern of absoluteProductAssets) {
 
 const workerPath = "/apps/field-guide/product/search-worker.js";
 assert.match(productApp, /new Worker\('\/apps\/field-guide\/product\/search-worker\.js(?:\?[^']*)?'\)/);
+const runtime = await readFile(resolve(productDirectory, "v2-runtime.js"), "utf8");
+assert.match(runtime, /new Worker\(workerUrl, \{ type: 'module' \}\)/);
 
 console.log(JSON.stringify({
   productFiles: productFiles.length,
