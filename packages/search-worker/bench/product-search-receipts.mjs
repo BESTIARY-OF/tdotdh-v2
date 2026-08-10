@@ -4,6 +4,7 @@ import { cpuEvaluateFrontierMetrics } from '../../../packages/search-core/src/we
 import { cpuEvaluateFieldMetrics } from '../../../packages/search-core/src/webgpu-field-metrics.js';
 import { cpuTransitionLabeledFrontierStates } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 import { cpuFrontierTopology } from '../../../packages/search-core/src/webgpu-frontier-topology.js';
+import { cpuGenerateFrontierTargetBatch } from '../../../packages/search-core/src/webgpu-frontier-target-generator.js';
 
 globalThis.postMessage = () => {};
 
@@ -53,6 +54,20 @@ function createBenchFrontierState() {
   };
 }
 
+function createBenchFrontierTargetGenerator() {
+  const receipt = { batches: 0, candidates: 0 };
+  return {
+    receipt,
+    availability: async () => ({ status: 'available', backend: 'benchmark' }),
+    generateBatch: async inputs => {
+      receipt.batches += 1;
+      const result = cpuGenerateFrontierTargetBatch(inputs);
+      receipt.candidates += result.candidateCount;
+      return { ...result, backend: 'benchmark', parity: 'verified' };
+    },
+  };
+}
+
 function createBenchFieldMetrics() {
   const receipt = { batches: 0, candidates: 0 };
   return {
@@ -85,9 +100,10 @@ async function run(mode, options = {}) {
   const frontierMetrics = createBenchFrontierMetrics();
   const fieldMetrics = createBenchFieldMetrics();
   const frontierState = createBenchFrontierState();
+  const frontierTargetGenerator = createBenchFrontierTargetGenerator();
   const frontierTopology = createBenchFrontierTopology();
   const started = performance.now();
-  const result = await search(pieces, [], { searchStrategy: mode, candidatePrefilter, frontierMetrics, fieldMetrics, frontierState, frontierTopology, ...options });
+  const result = await search(pieces, [], { searchStrategy: mode, candidatePrefilter, frontierMetrics, fieldMetrics, frontierState, frontierTargetGenerator, frontierTopology, ...options });
   return {
     mode,
     elapsedMs: Number((performance.now() - started).toFixed(2)),
@@ -98,6 +114,7 @@ async function run(mode, options = {}) {
     frontierMetrics: frontierMetrics.receipt,
     fieldMetrics: fieldMetrics.receipt,
     frontierState: frontierState.receipt,
+    frontierTargetGeneration: frontierTargetGenerator.receipt,
     frontierTopology: frontierTopology.receipt,
     result,
   };

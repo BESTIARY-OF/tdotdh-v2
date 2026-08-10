@@ -31,11 +31,19 @@ state. The worker also exposes a protocol-native
 cursor-selected candidates, canonical signatures, and resumable receipts.
 
 When WebGPU is available, frontier generation is issued as one flattened batch
-for all remaining pieces in a beam state. The batch shader emits deterministic
-origins and validity masks, and the CPU oracle compares every item before the
-candidates re-enter target selection. This removes the prior one-piece-at-a-time
-dispatch pattern from the GPU path while preserving CPU fallback and cursor
-semantics.
+for all retained beam states and their remaining pieces, chunked only at the
+adapter's storage safety limit. The batch shader emits deterministic origins
+and validity masks, and the CPU oracle compares every item before the candidates
+re-enter target selection. This removes the prior one-state-at-a-time dispatch
+pattern from the GPU path while preserving CPU fallback and cursor semantics.
+
+The target-aware frontier contract is the preferred breadth/depth path: it
+enumerates only target-contact × piece-source pairs, performs occupancy,
+bounds, and position-lock checks in the compute shader, and returns candidates
+already keyed to the target cell. This avoids generating every field-cell
+direction and then rediscovering the selected target on the CPU. The older
+all-frontier generator remains available for recursive compatibility and
+fallback.
 
 The branch-ranking boundary is also parity-gated. Candidate scores and stable
 ties are submitted to a bounded bitonic WebGPU workgroup (up to 128 rows), and

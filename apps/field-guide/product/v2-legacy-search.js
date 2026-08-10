@@ -6,13 +6,15 @@ const NODE_LIMIT = 40000;
 const BEAM_LIMIT = 72;
 const BRANCH_LIMIT = 30;
 
-import { createFrontierMaskFromCells } from '../../../packages/search-core/src/webgpu-frontier-validator.js';
 import { createFrontierEvaluationCandidate } from '../../../packages/search-core/src/webgpu-frontier-evaluator.js';
+import { createFrontierMaskFromCells } from '../../../packages/search-core/src/webgpu-frontier-validator.js';
 import { createFrontierMetricsCandidate } from '../../../packages/search-core/src/webgpu-frontier-metrics.js';
 import { createFieldMetricsCandidate } from '../../../packages/search-core/src/webgpu-field-metrics.js';
 import { createLabeledFrontierStateCandidate } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 import { canonicalSignatureFromLabeledFrontierState } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 import { DEFAULT_FRONTIER_GRID } from '../../../packages/search-core/src/webgpu-frontier-topology.js';
+import { MAX_FRONTIER_GENERATION_CANDIDATES } from '../../../packages/search-core/src/webgpu-frontier-generator.js';
+import { MAX_FRONTIER_TARGET_GENERATION_CANDIDATES } from '../../../packages/search-core/src/webgpu-frontier-target-generator.js';
 
 function key(x, y) { return `${x},${y}`; }
 function adjacent(p) { return [{ x: p.x + 1, y: p.y }, { x: p.x - 1, y: p.y }, { x: p.x, y: p.y + 1 }, { x: p.x, y: p.y - 1 }]; }
@@ -151,6 +153,121 @@ async function generateFrontierTranslationsBatch(pieces, state, bounds, frontier
     byId.set(piece.id, [...translations.values()]);
   }
   return new Map(pieces.map(piece => [piece.id, byId.get(piece.id) || []]));
+}
+async function generateFrontierTranslationsAcrossBeam(plans, frontierGenerator, onGeneration = () => {}, availabilityStatus = null) {
+  const generated = plans.map(() => new Map());
+  if (!plans.length) return generated;
+  if (availabilityStatus && availabilityStatus.status !== 'available') {
+    for (const [planIndex, plan] of plans.entries()) generated[planIndex] = await generateFrontierTranslationsBatch(plan.state.remaining, plan.state, plan.state.bounds, frontierGenerator, () => {}, availabilityStatus);
+    onGeneration({ status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', candidateCount: 0, batches: 0, batch: 'beam-fallback' });
+    return generated;
+  }
+  if (!frontierGenerator?.generateBatch) {
+    let lastReceipt = { status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', candidateCount: 0 };
+    for (const [planIndex, plan] of plans.entries()) generated[planIndex] = await generateFrontierTranslationsBatch(plan.state.remaining, plan.state, plan.state.bounds, frontierGenerator, receipt => { lastReceipt = receipt; }, availabilityStatus);
+    onGeneration({ ...lastReceipt, batches: plans.length, batch: 'beam-fallback' });
+    return generated;
+  }
+  const planGroups = [];
+  for (const [planIndex, plan] of plans.entries()) {
+    const fieldCells = [...plan.state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
+    let group = { inputs: [], refs: [], candidateCount: 0 };
+    for (const piece of plan.state.remaining) {
+      const input = { pieceId: `${planIndex}:${piece.id}`, fieldCells, pieceCells: applyLock(piece), bounds: plan.state.bounds }, count = fieldCells.length * 4 * input.pieceCells.length;
+      if (group.inputs.length && group.candidateCount + count > MAX_FRONTIER_GENERATION_CANDIDATES) { planGroups.push(group); group = { inputs: [], refs: [], candidateCount: 0 }; }
+      group.inputs.push(input); group.refs.push({ planIndex, piece }); group.candidateCount += count;
+    }
+    if (group.inputs.length) planGroups.push(group);
+  }
+  const chunks = [];
+  for (const group of planGroups) {
+    const previous = chunks[chunks.length - 1];
+    if (previous && previous.candidateCount + group.candidateCount <= MAX_FRONTIER_GENERATION_CANDIDATES) {
+      previous.inputs.push(...group.inputs); previous.refs.push(...group.refs); previous.candidateCount += group.candidateCount;
+    } else chunks.push({ inputs: [...group.inputs], refs: [...group.refs], candidateCount: group.candidateCount });
+  }
+  const items = [];
+  let totalCandidateCount = 0, batches = 0, backend = 'compute-shader', parity = 'verified';
+  for (const chunk of chunks) {
+    const result = await frontierGenerator.generateBatch(chunk.inputs);
+    if (result?.backend) backend = result.backend;
+    if (result?.status === 'completed' && Array.isArray(result.items) && result.items.length === chunk.inputs.length) {
+      result.items.forEach((item, offset) => items.push({ item, ref: chunk.refs[offset] }));
+    } else {
+      parity = 'oracle';
+      for (const ref of chunk.refs) generated[ref.planIndex].set(ref.piece.id, candidateTranslations(ref.piece, plans[ref.planIndex].state.field, plans[ref.planIndex].state.bounds));
+    }
+    totalCandidateCount += Number(result?.candidateCount) || chunk.candidateCount; batches += 1;
+  }
+  for (const { item, ref } of items) {
+    const piece = ref.piece, translations = new Map();
+    (item.origins || []).forEach((origin, index) => {
+      if (item.validity?.[index] !== 1 || !origin || !Number.isSafeInteger(origin.x) || !Number.isSafeInteger(origin.y)) return;
+      const cells = placedCells(piece, origin), originKey = `${origin.x},${origin.y}`;
+      if (!translations.has(originKey)) translations.set(originKey, { id: piece.id, origin, cells });
+    });
+    generated[ref.planIndex].set(piece.id, [...translations.values()]);
+  }
+  const inputCount = planGroups.reduce((sum, group) => sum + group.inputs.length, 0);
+  onGeneration({ status: items.length === inputCount ? 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? parity : 'oracle', candidateCount: totalCandidateCount, batches, batch: 'beam' });
+  return generated;
+}
+async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTargetGenerator, positionLocks, seedOrigin, onGeneration = () => {}, availabilityStatus = null) {
+  const generated = plans.map(() => new Map());
+  if (!plans.length) return generated;
+  if (!frontierTargetGenerator?.generateBatch) {
+    for (const [planIndex, plan] of plans.entries()) {
+      const byTarget = new Map();
+      for (const target of plan.targetPool) for (const piece of plan.state.remaining) for (const candidate of candidateTranslationsForTarget(piece, plan.state.field, plan.state.bounds, target, positionLocks, seedOrigin)) {
+        const targetKey = key(target.x, target.y), entries = byTarget.get(targetKey) || [];
+        entries.push({ piece, candidate }); byTarget.set(targetKey, entries);
+      }
+      generated[planIndex] = byTarget;
+    }
+    onGeneration({ status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', candidateCount: 0, batches: plans.length, batch: 'beam-fallback' });
+    return generated;
+  }
+  const planGroups = [];
+  for (const [planIndex, plan] of plans.entries()) {
+    const fieldCells = [...plan.state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; }), targetCells = plan.targetPool;
+    let group = { inputs: [], refs: [], candidateCount: 0 };
+    for (const piece of plan.state.remaining) {
+      const lock = positionLocks[piece.id], lockedOrigin = lock ? { x: seedOrigin.x + Number(lock.dx), y: seedOrigin.y + Number(lock.dy) } : null;
+      const input = { pieceId: `${planIndex}:${piece.id}`, fieldCells, targetCells, pieceCells: applyLock(piece), bounds: plan.state.bounds, lockedOrigin }, count = targetCells.length * input.pieceCells.length;
+      if (group.inputs.length && group.candidateCount + count > MAX_FRONTIER_TARGET_GENERATION_CANDIDATES) { planGroups.push(group); group = { inputs: [], refs: [], candidateCount: 0 }; }
+      group.inputs.push(input); group.refs.push({ planIndex, plan, piece }); group.candidateCount += count;
+    }
+    if (group.inputs.length) planGroups.push(group);
+  }
+  const chunks = [];
+  for (const group of planGroups) {
+    const previous = chunks[chunks.length - 1];
+    if (previous && previous.candidateCount + group.candidateCount <= MAX_FRONTIER_TARGET_GENERATION_CANDIDATES) { previous.inputs.push(...group.inputs); previous.refs.push(...group.refs); previous.candidateCount += group.candidateCount; }
+    else chunks.push({ inputs: [...group.inputs], refs: [...group.refs], candidateCount: group.candidateCount });
+  }
+  const items = [];
+  let totalCandidateCount = 0, batches = 0, backend = 'compute-shader';
+  for (const chunk of chunks) {
+    const result = await frontierTargetGenerator.generateBatch(chunk.inputs);
+    if (result?.backend) backend = result.backend;
+    if (result?.status === 'completed' && Array.isArray(result.items) && result.items.length === chunk.inputs.length) result.items.forEach((item, offset) => items.push({ item, ref: chunk.refs[offset] }));
+    else for (const ref of chunk.refs) for (const target of ref.plan.targetPool) for (const candidate of candidateTranslationsForTarget(ref.piece, ref.plan.state.field, ref.plan.state.bounds, target, positionLocks, seedOrigin)) { const targetKey = key(target.x, target.y), entries = generated[ref.planIndex].get(targetKey) || []; entries.push({ piece: ref.piece, candidate }); generated[ref.planIndex].set(targetKey, entries); }
+    totalCandidateCount += Number(result?.candidateCount) || chunk.candidateCount; batches += 1;
+  }
+  for (const { item, ref } of items) {
+    const byTarget = generated[ref.planIndex] || new Map(), piece = ref.piece, pieceCount = Number(item.pieceCount) || applyLock(piece).length;
+    for (let index = 0; index < (item.origins || []).length; index++) {
+      if (item.validity?.[index] !== 1) continue;
+      const target = ref.plan.targetPool[Math.floor(index / pieceCount)], origin = item.origins[index];
+      if (!target || !origin || !Number.isSafeInteger(origin.x) || !Number.isSafeInteger(origin.y)) continue;
+      const targetKey = key(target.x, target.y), entries = byTarget.get(targetKey) || [];
+      entries.push({ piece, candidate: { id: piece.id, origin, cells: placedCells(piece, origin) } }); byTarget.set(targetKey, entries);
+    }
+    generated[ref.planIndex] = byTarget;
+  }
+  const inputCount = planGroups.reduce((sum, group) => sum + group.inputs.length, 0);
+  onGeneration({ status: items.length === inputCount ? 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? 'verified' : 'oracle', candidateCount: totalCandidateCount, batches, batch: 'beam' });
+  return generated;
 }
 function candidateTranslationsForTarget(piece, field, bounds, target, positionLocks = {}, centroidOrigin = null) {
   const shape = applyLock(piece), translations = new Map(), lock = positionLocks[piece.id], lockedOrigin = lock && centroidOrigin ? { x: centroidOrigin.x + Number(lock.dx), y: centroidOrigin.y + Number(lock.dy) } : null;
@@ -621,6 +738,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const candidatePrefilter = options.candidatePrefilter;
   const frontierEvaluator = options.frontierEvaluator;
   const frontierGenerator = options.frontierGenerator;
+  const frontierTargetGenerator = options.frontierTargetGenerator;
   const frontierMetrics = options.frontierMetrics;
   const fieldMetricsAdapter = options.fieldMetrics;
   const frontierState = options.frontierState;
@@ -628,7 +746,9 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const frontierRanker = options.frontierRanker;
   const frontierTopologyAvailabilityReceipt = frontierTopology?.availability ? await frontierTopology.availability() : null;
   const frontierGeneratorStatus = frontierGenerator?.availability ? await frontierGenerator.availability() : null;
-  let prefilterReceipt = { status: 'cpu-oracle' }, frontierReceipt = { status: 'cpu-oracle' }, frontierGenerationReceipt = { status: 'cpu-oracle' }, frontierMetricsReceipt = { status: 'cpu-oracle' }, fieldMetricsReceipt = { status: 'cpu-oracle' }, frontierStateReceipt = { status: 'cpu-oracle' }, frontierTopologyReceipt = { status: 'cpu-oracle' }, frontierRankerReceipt = { status: 'cpu-oracle' };
+  const frontierTargetGeneratorStatus = frontierTargetGenerator?.availability ? await frontierTargetGenerator.availability() : null;
+  let prefilterReceipt = { status: 'cpu-oracle' }, frontierReceipt = { status: 'cpu-oracle' }, frontierGenerationReceipt = { status: 'cpu-oracle' }, frontierTargetGenerationReceipt = { status: 'cpu-oracle' }, frontierMetricsReceipt = { status: 'cpu-oracle' }, fieldMetricsReceipt = { status: 'cpu-oracle' }, frontierStateReceipt = { status: 'cpu-oracle' }, frontierTopologyReceipt = { status: 'cpu-oracle' }, frontierRankerReceipt = { status: 'cpu-oracle' };
+  if (frontierTargetGeneratorStatus?.status !== 'available' && frontierTargetGeneratorStatus) frontierTargetGenerationReceipt = { status: 'fallback', reason: frontierTargetGeneratorStatus.reason || 'frontier-target-generator-unavailable' };
   if (frontierTopologyAvailabilityReceipt?.status !== 'available' && frontierTopologyAvailabilityReceipt) frontierTopologyReceipt = { status: 'fallback', reason: frontierTopologyAvailabilityReceipt.reason || 'frontier-topology-unavailable' };
   async function filterCandidates(entries) {
     if (!candidatePrefilter?.prefilter || entries.length === 0) return entries;
@@ -660,7 +780,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const seed = { placements: [seedPlacement], field: new Set(seedCells.map(c => key(c.x, c.y))), remaining: pieces.filter(p => p.id !== centroidId), bounds: fieldMetrics([seedPlacement], centroidId), hintMatches: 0 }, seedBranches = searchStrategy === 'breadth' ? await lockedSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, centroidRing, positionLocks, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; }) : targetFamily ? await targetSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, targetSeed, positionLocks, random, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; }) : [];
   if (seedBranches.length) {
     const lockedResult = await searchLockedSeedBranches(pieces, seedBranches, knownFamilies, centroidId, targetNeighborCount, Boolean(targetFamily), knownSignatures, searchHints, positionPreferences, random, quality, candidatePrefilter, receipt => { prefilterReceipt = receipt; }, options.frontierValidator, frontierEvaluator, frontierGenerator, frontierGeneratorStatus, receipt => { frontierReceipt = receipt; }, receipt => { frontierGenerationReceipt = receipt; }, isCancelled, options.frontierMetrics, receipt => { frontierMetricsReceipt = receipt; }, options.frontierState, receipt => { frontierStateReceipt = receipt; }, frontierTopology, receipt => { frontierTopologyReceipt = receipt; }, fieldMetricsAdapter);
-    return { ...lockedResult, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierRanker: frontierRankerReceipt };
+    return { ...lockedResult, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierRanker: frontierRankerReceipt };
   }
   const beam = [seed];
   let nodes = 0, fallback = null, bestHintResult = null;
@@ -671,10 +791,10 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     const gpuStateBuckets = new Map();
     const cpuStateKeys = new Set();
     const beamJobs = [];
+    const beamPlans = [];
     for (const state of beam) {
       if (isCancelled()) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt };
       if (nodes >= NODE_LIMIT) break;
-      let selectedTarget = null, selectedOptions = null;
       const openCentroid = [...centroidRing].filter(ringKey => !state.field.has(ringKey));
       const frontier = new Map();
       for (const cellKey of state.field) {
@@ -682,24 +802,32 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         for (const next of adjacent({ x, y })) if (!state.field.has(key(next.x, next.y))) frontier.set(key(next.x, next.y), next);
       }
       const ringTargets = openCentroid.map(ringKey => frontier.get(ringKey)).filter(Boolean), targetPool = ringTargets.length ? ringTargets : [...frontier.values()];
-      const useGeneratedFrontier = frontierGeneratorStatus?.status === 'available';
-      const generatedByPiece = useGeneratedFrontier ? new Map() : null;
-      if (useGeneratedFrontier) {
-        const generated = await generateFrontierTranslationsBatch(state.remaining, state, state.bounds, frontierGenerator, receipt => { frontierGenerationReceipt = receipt; }, frontierGeneratorStatus);
-        for (const [pieceId, translations] of generated) generatedByPiece.set(pieceId, translations);
-      }
-      else if (frontierGenerator?.generate && frontierGenerationReceipt.status === 'cpu-oracle') frontierGenerationReceipt = { status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', candidateCount: 0 };
-      for (const target of targetPool) {
+      if (targetPool.length) beamPlans.push({ state, targetPool });
+    }
+    const useTargetGeneratedFrontier = frontierTargetGeneratorStatus?.status === 'available';
+    const generatedByTargetBeam = useTargetGeneratedFrontier
+      ? await generateFrontierTargetTranslationsAcrossBeam(beamPlans, frontierTargetGenerator, positionLocks, seedOrigin, receipt => { frontierTargetGenerationReceipt = receipt; }, frontierTargetGeneratorStatus)
+      : null;
+    const useGeneratedFrontier = !useTargetGeneratedFrontier && frontierGeneratorStatus?.status === 'available';
+    const generatedByBeam = useGeneratedFrontier
+      ? await generateFrontierTranslationsAcrossBeam(beamPlans, frontierGenerator, receipt => { frontierGenerationReceipt = receipt; }, frontierGeneratorStatus)
+      : null;
+    if (!useGeneratedFrontier && frontierGenerator?.generate && frontierGenerationReceipt.status === 'cpu-oracle') frontierGenerationReceipt = { status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', candidateCount: 0 };
+    for (const [planIndex, plan] of beamPlans.entries()) {
+      const state = plan.state, generatedByPiece = generatedByBeam?.[planIndex] || null, generatedByTarget = generatedByTargetBeam?.[planIndex] || null;
+      let selectedOptions = null;
+      for (const target of plan.targetPool) {
         const options = [];
         for (const piece of state.remaining) {
+          if (useTargetGeneratedFrontier) { options.push(...(generatedByTarget.get(key(target.x, target.y)) || []).filter(entry => entry.piece.id === piece.id)); continue; }
           const generated = useGeneratedFrontier ? (generatedByPiece.get(piece.id) || []) : candidateTranslationsForTarget(piece, state.field, state.bounds, target, positionLocks, seedOrigin);
           if (!useGeneratedFrontier) { for (const candidate of generated) options.push({ piece, candidate }); continue; }
           const targetCandidates = new Set(candidateTranslationsForTarget(piece, state.field, state.bounds, target, positionLocks, seedOrigin).map(candidate => `${candidate.origin.x},${candidate.origin.y}`));
           for (const candidate of generated) if (targetCandidates.has(`${candidate.origin.x},${candidate.origin.y}`)) options.push({ piece, candidate });
         }
-        if (options.length && (!selectedOptions || options.length < selectedOptions.length)) { selectedTarget = target; selectedOptions = options; }
+        if (options.length && (!selectedOptions || options.length < selectedOptions.length)) selectedOptions = options;
       }
-      if (!selectedTarget) continue;
+      if (!selectedOptions) continue;
       selectedOptions = await filterCandidates(selectedOptions);
       if (selectedOptions.length) beamJobs.push({ state, entries: selectedOptions });
     }
@@ -799,7 +927,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       }
     }
     if (acceptedMetrics.area === pieceCount * AREA && acceptedMetrics.holes === 0 && !acceptedMetrics.centroidEdgeCoast && acceptedMetrics.connected && !knownSignatures.has(cpuSignature)) {
-      const result = { type: 'done', placements: state.placements, metrics: { width: metrics.width, height: metrics.height, area: metrics.area, holes: metrics.holes, centroidCoast: metrics.centroidCoast, centroidEdgeCoast: metrics.centroidEdgeCoast, centroidCornerCoast: metrics.centroidCornerCoast, enclosure: metrics.enclosure, centroidFamily: metrics.centroidFamily, centroidFamilyId: metrics.centroidFamilyId, centroidSeed: metrics.centroidSeed, centroidNeighborCount: metrics.centroidNeighborCount, perimeter: metrics.perimeter, density: metrics.density, centerOffset: metrics.centerOffset, centroidSquareOffset: metrics.centroidSquareOffset, centerSquareDistance: metrics.centerSquareDistance, radialVariance: metrics.radialVariance, gravityVariance: metrics.gravityVariance, gravityOffset: metrics.gravityOffset, gravityTension: metrics.gravityTension, inletCells: metrics.inletCells, inletEdges: metrics.inletEdges, inletRisk: metrics.inletRisk, peninsulaDepth: metrics.peninsulaDepth, nestedPeninsulaDepth: metrics.nestedPeninsulaDepth, terminalChains: metrics.terminalChains, score: metrics.score }, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierRanker: frontierRankerReceipt };
+      const result = { type: 'done', placements: state.placements, metrics: { width: metrics.width, height: metrics.height, area: metrics.area, holes: metrics.holes, centroidCoast: metrics.centroidCoast, centroidEdgeCoast: metrics.centroidEdgeCoast, centroidCornerCoast: metrics.centroidCornerCoast, enclosure: metrics.enclosure, centroidFamily: metrics.centroidFamily, centroidFamilyId: metrics.centroidFamilyId, centroidSeed: metrics.centroidSeed, centroidNeighborCount: metrics.centroidNeighborCount, perimeter: metrics.perimeter, density: metrics.density, centerOffset: metrics.centerOffset, centroidSquareOffset: metrics.centroidSquareOffset, centerSquareDistance: metrics.centerSquareDistance, radialVariance: metrics.radialVariance, gravityVariance: metrics.gravityVariance, gravityOffset: metrics.gravityOffset, gravityTension: metrics.gravityTension, inletCells: metrics.inletCells, inletEdges: metrics.inletEdges, inletRisk: metrics.inletRisk, peninsulaDepth: metrics.peninsulaDepth, nestedPeninsulaDepth: metrics.nestedPeninsulaDepth, terminalChains: metrics.terminalChains, score: metrics.score }, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierRanker: frontierRankerReceipt };
       if (targetFamily && metrics.centroidFamilyId === targetFamily && !metrics.centroidCornerCoast && (targetNeighborCount == null || metrics.centroidNeighborCount === targetNeighborCount)) return result;
       if (!metrics.centroidCornerCoast) {
         if (!searchHints && targetNeighborCount == null) return result;
@@ -811,7 +939,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     }
   }
   }
-  return bestHintResult || fallback || { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierRanker: frontierRankerReceipt };
+  return bestHintResult || fallback || { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierRanker: frontierRankerReceipt };
 }
 
 export { search };

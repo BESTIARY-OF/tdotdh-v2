@@ -23,6 +23,19 @@ The v2 search worker now exposes `tdotdh.webgpu-field-metrics.v0`.
   transitions at 14 breadth and 14 depth batches instead of 760 and 828,
   respectively. This is a dispatch-efficiency receipt, not a hardware speed
   claim.
+- Frontier-origin generation now follows the same beam-wide boundary: all
+  retained states and remaining pieces are submitted through `generateBatch`,
+  split only when the adapter's 16,384-candidate contract limit requires it.
+  The focused product receipt verifies the beam batch path and unchanged
+  SEDLEC placements/metrics against the per-state CPU path.
+- A target-aware generator contract now narrows that work to target-contact ×
+  piece-source pairs. It computes occupancy, bounds, and position-lock validity
+  on the GPU and returns target-keyed candidates; the CPU oracle remains the
+  exact parity gate. This removes the old all-field-direction enumeration from
+  the preferred breadth/depth route. The SEDLEC CPU-oracle receipt observed
+  81 batches / 1,170,369 candidates for breadth and 87 batches / 1,243,035
+  candidates for depth, while preserving 3,376 / 3,443 search nodes and
+  successful placements. The CPU harness is not a GPU timing claim.
 
 Focused receipts pass with `node packages/search-core/test/webgpu-field-metrics.test.js`,
 `node apps/field-guide/test/v2-search-receipt.test.js`, and `npm run check`.

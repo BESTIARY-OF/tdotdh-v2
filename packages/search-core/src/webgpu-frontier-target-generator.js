@@ -1,0 +1,231 @@
+import { probeWebGpuCapabilities } from './webgpu-capability-probe.js';
+import { DEFAULT_FRONTIER_GRID } from './webgpu-frontier-validator.js';
+import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
+
+export const WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA = 'tdotdh.webgpu-frontier-target-generator.v0';
+export const MAX_FRONTIER_TARGET_GENERATION_CANDIDATES = 16384;
+
+const SHADER = `
+struct Params {
+  batchCount: u32,
+  totalCandidateCount: u32,
+  gridWidth: u32,
+  gridHeight: u32,
+  originX: i32,
+  originY: i32,
+  reserved0: u32,
+  reserved1: u32,
+};
+struct Meta {
+  targetCount: u32,
+  targetOffset: u32,
+  pieceOffset: u32,
+  pieceCount: u32,
+  fieldMaskOffset: u32,
+  candidateOffset: u32,
+  minX: i32,
+  maxX: i32,
+  minY: i32,
+  maxY: i32,
+  lockX: i32,
+  lockY: i32,
+  lockEnabled: u32,
+  reserved: u32,
+};
+@group(0) @binding(0) var<storage, read> targetCells: array<i32>;
+@group(0) @binding(1) var<storage, read> pieceCells: array<i32>;
+@group(0) @binding(2) var<storage, read> fieldMasks: array<u32>;
+@group(0) @binding(3) var<storage, read> metas: array<Meta>;
+@group(0) @binding(4) var<storage, read_write> origins: array<i32>;
+@group(0) @binding(5) var<storage, read_write> validity: array<u32>;
+@group(0) @binding(6) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= params.totalCandidateCount) { return; }
+  var selected = false;
+  var targetOffset: u32 = 0u;
+  var pieceOffset: u32 = 0u;
+  var fieldMaskOffset: u32 = 0u;
+  var targetCount: u32 = 0u;
+  var pieceCount: u32 = 0u;
+  var candidateOffset: u32 = 0u;
+  var minX: i32 = 0;
+  var maxX: i32 = 0;
+  var minY: i32 = 0;
+  var maxY: i32 = 0;
+  var lockX: i32 = 0;
+  var lockY: i32 = 0;
+  var lockEnabled: u32 = 0u;
+  for (var batchIndex: u32 = 0u; batchIndex < params.batchCount; batchIndex++) {
+    let meta = metas[batchIndex];
+    if (!selected && id.x >= meta.candidateOffset && id.x < meta.candidateOffset + meta.targetCount * meta.pieceCount) {
+      selected = true;
+      targetOffset = meta.targetOffset;
+      pieceOffset = meta.pieceOffset;
+      fieldMaskOffset = meta.fieldMaskOffset;
+      targetCount = meta.targetCount;
+      pieceCount = meta.pieceCount;
+      candidateOffset = meta.candidateOffset;
+      minX = meta.minX; maxX = meta.maxX; minY = meta.minY; maxY = meta.maxY;
+      lockX = meta.lockX; lockY = meta.lockY; lockEnabled = meta.lockEnabled;
+    }
+  }
+  if (!selected) { return; }
+  let local = id.x - candidateOffset;
+  let targetIndex = local / pieceCount;
+  let sourceIndex = local % pieceCount;
+  let targetBase = (targetOffset + targetIndex) * 2u;
+  let sourceBase = pieceOffset + sourceIndex * 2u;
+  let originX = targetCells[targetBase] - pieceCells[sourceBase];
+  let originY = targetCells[targetBase + 1u] - pieceCells[sourceBase + 1u];
+  var valid = true;
+  if (lockEnabled != 0u && (originX != lockX || originY != lockY)) { valid = false; }
+  var nextMinX = minX;
+  var nextMaxX = maxX;
+  var nextMinY = minY;
+  var nextMaxY = maxY;
+  for (var pieceIndex: u32 = 0u; pieceIndex < pieceCount; pieceIndex++) {
+    let base = pieceOffset + pieceIndex * 2u;
+    let x = originX + pieceCells[base];
+    let y = originY + pieceCells[base + 1u];
+    if (x < params.originX || x >= params.originX + i32(params.gridWidth) || y < params.originY || y >= params.originY + i32(params.gridHeight)) { valid = false; }
+    if (x < nextMinX) { nextMinX = x; }
+    if (x > nextMaxX) { nextMaxX = x; }
+    if (y < nextMinY) { nextMinY = y; }
+    if (y > nextMaxY) { nextMaxY = y; }
+    if (x >= params.originX && x < params.originX + i32(params.gridWidth) && y >= params.originY && y < params.originY + i32(params.gridHeight)) {
+      let bit = u32(y - params.originY) * params.gridWidth + u32(x - params.originX);
+      if ((fieldMasks[fieldMaskOffset + bit / 32u] & (1u << (bit % 32u))) != 0u) { valid = false; }
+    }
+  }
+  if (nextMaxX - nextMinX + 1 > 24 || nextMaxY - nextMinY + 1 > 16) { valid = false; }
+  origins[id.x * 2u] = originX;
+  origins[id.x * 2u + 1u] = originY;
+  validity[id.x] = select(0u, 1u, valid);
+}`;
+
+function normalizeGrid(grid = DEFAULT_FRONTIER_GRID) {
+  const value = { ...DEFAULT_FRONTIER_GRID, ...grid };
+  for (const key of ['width', 'height']) if (!Number.isSafeInteger(value[key]) || value[key] <= 0 || value[key] > 128) throw new TypeError(`grid.${key} must be a positive safe integer at most 128`);
+  for (const key of ['originX', 'originY']) if (!Number.isSafeInteger(value[key])) throw new TypeError(`grid.${key} must be a safe integer`);
+  return Object.freeze({ width: value.width, height: value.height, originX: value.originX, originY: value.originY, wordCount: Math.ceil((value.width * value.height) / 32) });
+}
+
+function coordinate(value, label) { if (!Number.isSafeInteger(value)) throw new TypeError(`${label} must be a safe integer`); return value; }
+function normalizeCells(value, label, maximum) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > maximum) throw new TypeError(`${label} must contain 1-${maximum} cells`);
+  return value.map((cell, index) => ({ x: coordinate(cell?.x, `${label}[${index}].x`), y: coordinate(cell?.y, `${label}[${index}].y`) }));
+}
+function normalizeBounds(value = {}) {
+  const bounds = { minX: Number(value.minX), maxX: Number(value.maxX), minY: Number(value.minY), maxY: Number(value.maxY) };
+  for (const key of ['minX', 'maxX', 'minY', 'maxY']) if (!Number.isSafeInteger(bounds[key])) throw new TypeError(`bounds.${key} must be a safe integer`);
+  if (bounds.minX > bounds.maxX || bounds.minY > bounds.maxY) throw new TypeError('bounds must have ordered limits');
+  return Object.freeze(bounds);
+}
+function normalizeLock(value) {
+  if (value == null) return Object.freeze({ enabled: 0, x: 0, y: 0 });
+  return Object.freeze({ enabled: 1, x: coordinate(value.x, 'lockedOrigin.x'), y: coordinate(value.y, 'lockedOrigin.y') });
+}
+function normalizeInput(input, grid) {
+  const fieldCells = normalizeCells(input?.fieldCells, 'fieldCells', 1024), targetCells = normalizeCells(input?.targetCells, 'targetCells', 1024), pieceCells = normalizeCells(input?.pieceCells, 'pieceCells', 64), bounds = normalizeBounds(input?.bounds), lock = normalizeLock(input?.lockedOrigin);
+  const candidateCount = targetCells.length * pieceCells.length;
+  if (candidateCount > MAX_FRONTIER_TARGET_GENERATION_CANDIDATES) throw new RangeError(`frontier target generation exceeds ${MAX_FRONTIER_TARGET_GENERATION_CANDIDATES} candidates`);
+  return Object.freeze({ fieldCells, targetCells, pieceCells, bounds, lock, candidateCount, grid });
+}
+function normalizeBatchInput(inputs, grid) {
+  if (!Array.isArray(inputs) || inputs.length === 0) throw new TypeError('frontier target generation batch must contain at least one input');
+  let candidateOffset = 0;
+  const items = inputs.map((input, index) => {
+    const normalized = normalizeInput(input, grid), item = Object.freeze({ ...normalized, pieceId: input?.pieceId ?? index, candidateOffset });
+    candidateOffset += normalized.candidateCount;
+    return item;
+  });
+  if (candidateOffset > MAX_FRONTIER_TARGET_GENERATION_CANDIDATES) throw new RangeError(`frontier target generation batch exceeds ${MAX_FRONTIER_TARGET_GENERATION_CANDIDATES} candidates`);
+  return Object.freeze({ items: Object.freeze(items), candidateCount: candidateOffset });
+}
+function inGrid(x, y, grid) { return x >= grid.originX && x < grid.originX + grid.width && y >= grid.originY && y < grid.originY + grid.height; }
+function flattenCells(cells) { const flat = new Int32Array(cells.length * 2); cells.forEach((cell, index) => { flat[index * 2] = cell.x; flat[index * 2 + 1] = cell.y; }); return flat; }
+function createMask(cells, grid) { const mask = new Uint32Array(grid.wordCount); for (const cell of cells) if (inGrid(cell.x, cell.y, grid)) { const bit = (cell.y - grid.originY) * grid.width + (cell.x - grid.originX); mask[Math.floor(bit / 32)] |= 1 << (bit % 32); } return mask; }
+function cpuCandidate(normalized, targetIndex, sourceIndex) {
+  const target = normalized.targetCells[targetIndex], source = normalized.pieceCells[sourceIndex], origin = { x: target.x - source.x, y: target.y - source.y }, field = new Set(normalized.fieldCells.map(cell => `${cell.x},${cell.y}`));
+  let valid = normalized.lock.enabled === 0 || (origin.x === normalized.lock.x && origin.y === normalized.lock.y);
+  let minX = normalized.bounds.minX, maxX = normalized.bounds.maxX, minY = normalized.bounds.minY, maxY = normalized.bounds.maxY;
+  for (const cell of normalized.pieceCells) {
+    const x = origin.x + cell.x, y = origin.y + cell.y;
+    if (!inGrid(x, y, normalized.grid) || field.has(`${x},${y}`)) valid = false;
+    minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+  }
+  if (maxX - minX + 1 > 24 || maxY - minY + 1 > 16) valid = false;
+  return { origin, valid: valid ? 1 : 0 };
+}
+export function cpuGenerateFrontierTargetCandidates(input, grid = DEFAULT_FRONTIER_GRID) {
+  const normalizedGrid = normalizeGrid(grid), normalized = normalizeInput(input, normalizedGrid), origins = [], validity = [];
+  for (let targetIndex = 0; targetIndex < normalized.targetCells.length; targetIndex += 1) for (let sourceIndex = 0; sourceIndex < normalized.pieceCells.length; sourceIndex += 1) {
+    const result = cpuCandidate(normalized, targetIndex, sourceIndex); origins.push(result.origin); validity.push(result.valid);
+  }
+  return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'cpu-oracle', targetCount: normalized.targetCells.length, pieceCount: normalized.pieceCells.length, origins, validity, acceptedIndices: validity.flatMap((value, index) => value ? [index] : []), candidateCount: normalized.candidateCount, parity: 'oracle' });
+}
+export function cpuGenerateFrontierTargetBatch(inputs, grid = DEFAULT_FRONTIER_GRID) {
+  const normalizedGrid = normalizeGrid(grid), normalized = normalizeBatchInput(inputs, normalizedGrid);
+  return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'cpu-oracle', parity: 'oracle', candidateCount: normalized.candidateCount, items: Object.freeze(normalized.items.map(item => Object.freeze({ pieceId: item.pieceId, targetCount: item.targetCells.length, pieceCount: item.pieceCells.length, ...cpuGenerateFrontierTargetCandidates(item, normalizedGrid) }))) });
+}
+
+function flattenMasks(items, grid) { const flat = new Uint32Array(items.length * grid.wordCount); items.forEach((item, index) => flat.set(createMask(item.fieldCells || [], grid), index * grid.wordCount)); return flat; }
+function flattenItemCells(items, property) { const offsets = []; let offset = 0; const flat = []; for (const item of items) { offsets.push(offset); for (const cell of item[property]) flat.push(cell.x, cell.y); offset += item[property].length; } return { offsets, values: Int32Array.from(flat) }; }
+async function runGpuBatch(device, normalized, grid, shaderSource) {
+  const targetValues = flattenItemCells(normalized.items, 'targetCells'), pieceValues = flattenItemCells(normalized.items, 'pieceCells'), fieldMasks = flattenMasks(normalized.items, grid), metaValues = [];
+  normalized.items.forEach(item => metaValues.push(item.targetCells.length, targetValues.offsets[normalized.items.indexOf(item)], pieceValues.offsets[normalized.items.indexOf(item)], item.pieceCells.length, normalized.items.indexOf(item) * grid.wordCount, item.candidateOffset, item.bounds.minX, item.bounds.maxX, item.bounds.minY, item.bounds.maxY, item.lock.x, item.lock.y, item.lock.enabled, 0));
+  const originBytes = Math.max(4, normalized.candidateCount * 2 * 4), countBytes = Math.max(4, normalized.candidateCount * 4), targetBytes = Math.max(4, targetValues.values.byteLength), pieceBytes = Math.max(4, pieceValues.values.byteLength), maskBytes = Math.max(4, fieldMasks.byteLength), metaBytes = Math.max(4, metaValues.length * 4);
+  const buffers = {
+    targets: device.createBuffer({ size: targetBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+    pieces: device.createBuffer({ size: pieceBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+    masks: device.createBuffer({ size: maskBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+    metas: device.createBuffer({ size: metaBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+    origins: device.createBuffer({ size: originBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
+    validity: device.createBuffer({ size: countBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
+    params: device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }),
+    originsReadback: device.createBuffer({ size: originBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
+    validityReadback: device.createBuffer({ size: countBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
+  };
+  try {
+    device.queue.writeBuffer(buffers.targets, 0, targetValues.values); device.queue.writeBuffer(buffers.pieces, 0, pieceValues.values); device.queue.writeBuffer(buffers.masks, 0, fieldMasks); device.queue.writeBuffer(buffers.metas, 0, Int32Array.from(metaValues)); device.queue.writeBuffer(buffers.params, 0, new Int32Array([normalized.items.length, normalized.candidateCount, grid.width, grid.height, grid.originX, grid.originY, 0, 0]));
+    const module = device.createShaderModule({ code: shaderSource }), pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } }), bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [0, 1, 2, 3, 4, 5, 6].map((binding, index) => ({ binding, resource: { buffer: [buffers.targets, buffers.pieces, buffers.masks, buffers.metas, buffers.origins, buffers.validity, buffers.params][index] } })) });
+    const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(normalized.candidateCount / 64)); pass.end(); encoder.copyBufferToBuffer(buffers.origins, 0, buffers.originsReadback, 0, originBytes); encoder.copyBufferToBuffer(buffers.validity, 0, buffers.validityReadback, 0, countBytes); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
+    await buffers.originsReadback.mapAsync(GPUMapMode.READ); const rawOrigins = Array.from(new Int32Array(buffers.originsReadback.getMappedRange().slice(0, normalized.candidateCount * 2 * 4))); buffers.originsReadback.unmap(); await buffers.validityReadback.mapAsync(GPUMapMode.READ); const validity = Array.from(new Uint32Array(buffers.validityReadback.getMappedRange().slice(0, normalized.candidateCount * 4))); buffers.validityReadback.unmap();
+    return normalized.items.map(item => { const start = item.candidateOffset, origins = Array.from({ length: item.candidateCount }, (_, index) => ({ x: rawOrigins[(start + index) * 2], y: rawOrigins[(start + index) * 2 + 1] })), itemValidity = validity.slice(start, start + item.candidateCount); return { pieceId: item.pieceId, targetCount: item.targetCells.length, pieceCount: item.pieceCells.length, origins, validity: itemValidity, candidateCount: item.candidateCount }; });
+  } finally { Object.values(buffers).forEach(buffer => buffer.destroy()); }
+}
+function unavailable(reason, grid) { return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: String(reason), grid }); }
+
+export function createWebGpuFrontierTargetGenerator({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 65536 }, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
+  if (typeof shaderSource !== 'string' || !shaderSource.trim()) throw new TypeError('shaderSource must be a non-empty string');
+  const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits }; let availabilityPromise = null;
+  const availability = async () => {
+    if (!availabilityPromise) availabilityPromise = probeWebGpuCapabilities({ gpu, requiredLimits: limits }).then(probe => probe.adapterAvailable && probe.requiredLimitsSatisfied ? Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'available', backend: 'webgpu', grid: normalizedGrid }) : unavailable(probe.adapterAvailable ? 'webgpu-required-limits-unsatisfied' : 'webgpu-adapter-unavailable', normalizedGrid));
+    return availabilityPromise;
+  };
+  return Object.freeze({
+    availability,
+    async generate(input) {
+      const normalized = normalizeBatchInput([input], normalizedGrid), cpu = cpuGenerateFrontierTargetBatch([input], normalizedGrid), status = await availability();
+      if (status.status !== 'available') return Object.freeze({ ...status, targetCount: cpu.items[0].targetCount, pieceCount: cpu.items[0].pieceCount, origins: cpu.items[0].origins, validity: cpu.items[0].validity, acceptedIndices: cpu.items[0].acceptedIndices, candidateCount: cpu.candidateCount });
+      try {
+        const result = (await runGpuBatch(await deviceCache.getDevice(), normalized, normalizedGrid, shaderSource))[0], expected = cpu.items[0], parity = JSON.stringify(result.origins) === JSON.stringify(expected.origins) && JSON.stringify(result.validity) === JSON.stringify(expected.validity);
+        if (!parity) return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'rejected', backend: 'webgpu', reason: 'oracle-parity-mismatch', targetCount: expected.targetCount, pieceCount: expected.pieceCount, origins: expected.origins, validity: expected.validity, acceptedIndices: expected.acceptedIndices, candidateCount: expected.candidateCount });
+        return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'verified', targetCount: result.targetCount, pieceCount: result.pieceCount, origins: result.origins, validity: result.validity, acceptedIndices: result.validity.flatMap((value, index) => value ? [index] : []), candidateCount: result.candidateCount });
+      } catch (error) { deviceCache.reset(); return Object.freeze({ ...status, status: 'unavailable', reason: `webgpu-execution-failed:${error?.message || String(error)}`, targetCount: cpu.items[0].targetCount, pieceCount: cpu.items[0].pieceCount, origins: cpu.items[0].origins, validity: cpu.items[0].validity, acceptedIndices: cpu.items[0].acceptedIndices, candidateCount: cpu.candidateCount }); }
+    },
+    async generateBatch(inputs) {
+      const normalized = normalizeBatchInput(inputs, normalizedGrid), cpu = cpuGenerateFrontierTargetBatch(inputs, normalizedGrid), status = await availability();
+      if (status.status !== 'available') return Object.freeze({ ...status, candidateCount: normalized.candidateCount, items: cpu.items });
+      try {
+        const result = await runGpuBatch(await deviceCache.getDevice(), normalized, normalizedGrid, shaderSource), parity = result.length === cpu.items.length && result.every((item, index) => JSON.stringify(item.origins) === JSON.stringify(cpu.items[index].origins) && JSON.stringify(item.validity) === JSON.stringify(cpu.items[index].validity));
+        if (!parity) return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'rejected', backend: 'webgpu', reason: 'oracle-parity-mismatch', candidateCount: normalized.candidateCount, items: cpu.items });
+        return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'verified', batch: 'verified', candidateCount: normalized.candidateCount, items: result });
+      } catch (error) { deviceCache.reset(); return Object.freeze({ ...status, status: 'unavailable', reason: `webgpu-batch-execution-failed:${error?.message || String(error)}`, candidateCount: normalized.candidateCount, items: cpu.items }); }
+    },
+  });
+}
+
+export { SHADER as DEFAULT_SHADER };
