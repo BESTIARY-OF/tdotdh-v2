@@ -31,7 +31,7 @@ function digest(entries) {
 function equalEntries(left, right) { return JSON.stringify(left) === JSON.stringify(right); }
 function webGpuStatus(runtime = globalThis) {
   const gpu = runtime?.navigator?.gpu;
-  return gpu ? { status: 'available', backend: 'webgpu', ownership: 'external-executor-required' } : { status: 'unavailable', backend: 'webgpu', reason: 'navigator.gpu-unavailable' };
+  return gpu ? { status: 'unavailable', backend: 'webgpu', reason: 'webgpu-execution-not-probed', ownership: 'external-executor-required' } : { status: 'unavailable', backend: 'webgpu', reason: 'navigator.gpu-unavailable' };
 }
 
 export class PersistentFrontierBufferError extends Error {

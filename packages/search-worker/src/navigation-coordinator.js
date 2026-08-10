@@ -6,6 +6,7 @@ const NAVIGATION_STAGE_KEYS = Object.freeze([
   'frontierTargetPool',
   'frontierTargetGeneration',
   'frontierGeneration',
+  'navigationPlan',
   'frontierMetrics',
   'fieldMetrics',
   'frontier',

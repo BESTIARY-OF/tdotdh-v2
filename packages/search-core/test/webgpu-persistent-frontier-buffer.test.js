@@ -19,5 +19,6 @@ assert.throws(() => buffer.acceptGpuCompactionResult({ ...handoff, kind: 'gpu-co
 const applied = buffer.acceptGpuCompactionResult({ ...handoff, kind: 'gpu-compaction-result', inputDigest: handoff.input.digest, entries: oracle.entries });
 assert.equal(applied.parity, 'verified');
 assert.equal(buffer.size, 2);
-assert.equal(webGpuStatus({ navigator: { gpu: {} } }).status, 'available');
+assert.equal(webGpuStatus({ navigator: { gpu: {} } }).status, 'unavailable');
+assert.equal(webGpuStatus({ navigator: { gpu: {} } }).reason, 'webgpu-execution-not-probed');
 console.log('WebGPU persistent frontier buffer tests passed');
