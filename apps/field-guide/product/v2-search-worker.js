@@ -17,6 +17,7 @@ import { createWebGpuResidentFrontierState } from '../../../packages/search-core
 import { createWebGpuFrontierCandidateRecords } from '../../../packages/search-core/src/webgpu-frontier-candidate-records.js';
 import { createWebGpuFrontierScorer } from '../../../packages/search-core/src/webgpu-frontier-scorer.js';
 import { createWebGpuDeviceCache } from '../../../packages/search-core/src/webgpu-device-cache.js';
+import { probeWebGpuExecutionCapabilities } from '../../../packages/search-core/src/webgpu-execution-probe.js';
 import { createNavigationCoordinator } from '../../../packages/search-worker/src/navigation-coordinator.js';
 import { search } from './v2-legacy-search.js?v=20260810-gpu25';
 
@@ -40,6 +41,7 @@ const frontierDeduplicator = createWebGpuFrontierDeduplicator({ gpu: globalThis.
 async function runProductSearch(request, context) {
   const steering = request.steering || {};
   residentFrontierState.reset();
+  const gpuExecution = await probeWebGpuExecutionCapabilities({ gpu: globalThis.navigator?.gpu, requiredLimits: { maxStorageBufferBindingSize: 33554432 }, deviceCache });
   const navigation = createNavigationCoordinator({ ticket: request.ticket, cursor: request.cursor });
   const frontierNavigator = createWebGpuFrontierNavigator({ stateAdapter: residentFrontierState, ticket: request.ticket, cursor: request.cursor, isCancelled: context.isCancelled });
   const result = await search(request.pieces, steering.knownCentroidFamilies || [], {
@@ -74,6 +76,7 @@ async function runProductSearch(request, context) {
   });
   return {
     ...result,
+    gpuExecution,
     navigation: navigation.complete(result),
     placements: Array.isArray(result?.placements) ? result.placements : [],
     hasPlacement: Array.isArray(result?.placements) && result.placements.length > 0,

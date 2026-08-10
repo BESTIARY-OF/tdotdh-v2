@@ -57,6 +57,8 @@ await worker.terminate();
 
 assert.ok(events.some(event => event.type === 'started'));
 assert.equal(result.protocolOperation, 'product-search');
+assert.equal(result.gpuExecution.deviceAvailable, false);
+assert.equal(result.gpuExecution.reason, 'webgpu-adapter-unavailable');
 assert.equal(result.navigation.schema, 'tdotdh.navigation-coordinator.v0');
 assert.equal(result.navigation.ticket.threadId, 0);
 assert.equal(result.navigation.canonicalReplay, result.placements.length ? 'verified' : 'not-run');
