@@ -585,11 +585,11 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       const gpuEvaluatorScore = Number.isFinite(candidate.gpuScore) ? candidate.gpuScore / 1000000 : null;
       const gpuTopologyScore = Number.isFinite(gpuTopology?.perimeter) ? gpuTopology.perimeter / 1000 : null;
       const geometryScore = gpuGeometryScore ?? gpuEvaluatorScore ?? gpuTopologyScore ?? (openCentroid * 40 + (nextBounds.maxX - nextBounds.minX + 1) * (nextBounds.maxY - nextBounds.minY + 1) - contact * 2.4 - centroidContact * 2 - ringCoverage * 8);
-        return { piece, candidate, gpuState, score: geometryScore + targetBonus + noveltyBonus + neighborTargetBonus + hintBonus + qualityPenalty + random() * 12, nextBounds, hintMatches };
+        return { piece, candidate, gpuState, metrics: candidateMetrics, score: geometryScore + targetBonus + noveltyBonus + neighborTargetBonus + hintBonus + qualityPenalty + random() * 12, nextBounds, hintMatches };
       }).filter(Boolean);
       const ranked = await rankFrontierOptions(rankedCandidates, frontierRanker, receipt => { frontierRankerReceipt = receipt; });
       for (const option of ranked) {
-        const placements = [...state.placements, option.candidate], metrics = fieldMetrics(placements, centroidId), field = new Set(state.field); option.candidate.cells.forEach(c => field.add(key(c.x, c.y)));
+        const placements = [...state.placements, option.candidate], metrics = option.metrics, field = new Set(state.field); option.candidate.cells.forEach(c => field.add(key(c.x, c.y)));
         if (metrics.holes > 0) continue;
         if (option.gpuState?.stateKey && stateKeys.has(option.gpuState.stateKey)) continue;
         if (option.gpuState?.stateKey) stateKeys.add(option.gpuState.stateKey);
