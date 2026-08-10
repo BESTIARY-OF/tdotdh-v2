@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
-import { createFieldMetricsCandidate, cpuEvaluateFieldMetrics, createWebGpuFieldMetrics, WEBGPU_FIELD_METRICS_SCHEMA } from '../src/webgpu-field-metrics.js';
+import { createFieldMetricsCandidate, cpuEvaluateFieldMetrics, createWebGpuFieldMetrics, DEFAULT_SHADER, WEBGPU_FIELD_METRICS_SCHEMA } from '../src/webgpu-field-metrics.js';
+
+assert.match(DEFAULT_SHADER, /for \(var y: i32 = params\.originY;[\s\S]*?\) \{\s+for \(var x: i32 = params\.originX;[\s\S]*?\) \{/);
+assert.match(DEFAULT_SHADER, /for \(var dx: i32 = -1;[\s\S]*?\) \{\s+for \(var dy: i32 = -1;[\s\S]*?\) \{\s+if \(/);
+assert.match(DEFAULT_SHADER, /if \(area == 0\) \{ minX = 0; maxX = 0; minY = 0; maxY = 0; \}/);
 
 const occupiedCells = [
   { x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 0 },
