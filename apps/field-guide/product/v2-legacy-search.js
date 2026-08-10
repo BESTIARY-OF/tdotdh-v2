@@ -304,6 +304,22 @@ async function evaluateFrontierState(entries, state, frontierState, onState = ()
   return entries;
 }
 
+async function evaluateFrontierTopology(entries, state, centroidId, frontierTopology, onTopology = () => {}) {
+  if (!frontierTopology?.evaluateBatch && !frontierTopology?.evaluate) return entries;
+  try {
+    const parentCells = [...state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
+    const centroidCells = state.placements.find(placement => placement.id === centroidId)?.cells || [];
+    const inputs = entries.map(entry => ({ parentMask: createFrontierMaskFromCells(parentCells), candidateMask: createFrontierMaskFromCells(entry.candidate.cells), centroidMask: createFrontierMaskFromCells(centroidCells) }));
+    const result = frontierTopology.evaluateBatch ? await frontierTopology.evaluateBatch(inputs) : { status: 'completed', parity: 'verified', backend: 'compute-shader', results: await Promise.all(inputs.map(input => frontierTopology.evaluate(input))) };
+    if (result?.status === 'completed' && result.parity === 'verified' && Array.isArray(result.results) && result.results.length === entries.length) {
+      onTopology({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: entries.length });
+      return entries.map((entry, index) => ({ ...entry, gpuTopology: result.results[index]?.metrics || null }));
+    }
+    onTopology({ status: 'fallback', reason: result?.reason || 'frontier-topology-batch-unavailable' });
+  } catch (error) { onTopology({ status: 'fallback', reason: `frontier-topology-batch-failed:${error.message}` }); }
+  return entries;
+}
+
 async function evaluateFrontierOptions(entries, state, centroidId, frontierEvaluator, frontierValidator, onFrontier = () => {}) {
   if (!entries.length) return entries;
   try {
@@ -482,8 +498,9 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       selectedOptions = await evaluateFrontierGeometry(selectedOptions, state, centroidId, frontierMetrics, receipt => { frontierMetricsReceipt = receipt; });
       selectedOptions = await evaluateFrontierOptions(selectedOptions, state, centroidId, frontierEvaluator, options.frontierValidator, receipt => { frontierReceipt = receipt; });
       selectedOptions = await evaluateFrontierState(selectedOptions, state, frontierState, receipt => { frontierStateReceipt = receipt; });
+      selectedOptions = await evaluateFrontierTopology(selectedOptions, state, centroidId, frontierTopology, receipt => { frontierTopologyReceipt = receipt; });
       if (!selectedOptions.length) continue;
-      const ranked = selectedOptions.map(({ piece, candidate, gpuGeometry, gpuState }) => {
+      const ranked = selectedOptions.map(({ piece, candidate, gpuGeometry, gpuState, gpuTopology }) => {
         const nextBounds = { minX: Math.min(state.bounds.minX, ...candidate.cells.map(c => c.x)), maxX: Math.max(state.bounds.maxX, ...candidate.cells.map(c => c.x)), minY: Math.min(state.bounds.minY, ...candidate.cells.map(c => c.y)), maxY: Math.max(state.bounds.maxY, ...candidate.cells.map(c => c.y)) };
         const contact = candidate.cells.reduce((n, c) => n + adjacent(c).filter(a => state.field.has(key(a.x, a.y))).length, 0), centroidContact = candidate.cells.reduce((n, c) => n + adjacent8(c).filter(a => seedSet.has(key(a.x, a.y))).length, 0), ringCoverage = candidate.cells.reduce((n, c) => n + (centroidRing.has(key(c.x, c.y)) ? 1 : 0), 0), openCentroid = [...centroidRing].filter(ringKey => !state.field.has(ringKey) && !candidate.cells.some(c => key(c.x, c.y) === ringKey)).length;
         nodes++;
@@ -496,8 +513,9 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         const neighborTargetBonus = targetNeighborCount == null ? 0 : (candidateMetrics.centroidNeighborCount === targetNeighborCount ? -600 : Math.abs(candidateMetrics.centroidNeighborCount - targetNeighborCount) * 80);
         const qualityPenalty = searchQualityPenalty(candidateMetrics, quality) / 100000;
         const gpuGeometryScore = Number.isFinite(gpuGeometry?.[5]) ? gpuGeometry[5] / 1000 : null;
-        const gpuEvaluatorScore = Number.isFinite(candidate.gpuScore) ? candidate.gpuScore / 1000000 : null;
-        const geometryScore = gpuGeometryScore ?? gpuEvaluatorScore ?? (openCentroid * 40 + (nextBounds.maxX - nextBounds.minX + 1) * (nextBounds.maxY - nextBounds.minY + 1) - contact * 2.4 - centroidContact * 2 - ringCoverage * 8);
+      const gpuEvaluatorScore = Number.isFinite(candidate.gpuScore) ? candidate.gpuScore / 1000000 : null;
+      const gpuTopologyScore = Number.isFinite(gpuTopology?.perimeter) ? gpuTopology.perimeter / 1000 : null;
+      const geometryScore = gpuGeometryScore ?? gpuEvaluatorScore ?? gpuTopologyScore ?? (openCentroid * 40 + (nextBounds.maxX - nextBounds.minX + 1) * (nextBounds.maxY - nextBounds.minY + 1) - contact * 2.4 - centroidContact * 2 - ringCoverage * 8);
         return { piece, candidate, gpuState, score: geometryScore + targetBonus + noveltyBonus + neighborTargetBonus + hintBonus + qualityPenalty + random() * 12, nextBounds, hintMatches };
       }).filter(Boolean).sort((a, b) => a.score - b.score).slice(0, BRANCH_LIMIT);
       for (const option of ranked) {

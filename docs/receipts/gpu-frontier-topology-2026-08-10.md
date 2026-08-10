@@ -15,6 +15,11 @@ and hole count must match the CPU oracle exactly before the receipt is marked
 mismatch returns an explicit CPU fallback/rejection and never changes SEDLEC
 acceptance semantics.
 
+The adapter also exposes `evaluateBatch` for frontier navigation. The product
+uses that contract to submit candidate frontiers in one GPU-oriented call when
+WebGPU is available; CPU-oracle and benchmark adapters short-circuit the batch
+path so they do not pay a false acceleration penalty.
+
 Verification:
 
 - `node packages/search-core/test/webgpu-frontier-topology.test.js`

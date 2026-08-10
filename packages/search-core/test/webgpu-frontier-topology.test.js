@@ -51,4 +51,10 @@ assert.equal(rejected.status, 'rejected');
 assert.equal(rejected.reason, 'topology-parity-mismatch');
 assert.deepEqual(rejected.metrics, expected.metrics);
 
+const batch = await createWebGpuFrontierTopology({ accelerator: async () => expectedReduction }).evaluateBatch([input, input]);
+assert.equal(batch.status, 'completed');
+assert.equal(batch.parity, 'verified');
+assert.equal(batch.candidateCount, 2);
+assert.equal(batch.results.length, 2);
+
 console.log('WebGPU frontier topology tests passed');

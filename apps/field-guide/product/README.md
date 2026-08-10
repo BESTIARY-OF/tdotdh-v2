@@ -21,7 +21,9 @@ topology acceptance now has a final parity-gated GPU occupancy reduction; its
 certain perimeter/coast metrics remain CPU-oracle-derived inside that adapter,
 while component labels and empty-region flood labels now drive parity-gated
 hole/connectivity reduction. Ordered deduplication,
-cancellation/control flow, and persistence remain CPU-owned, while final
+When the adapter is available, candidate frontiers are submitted through its
+batch topology contract for GPU ranking; unavailable adapters return before
+doing per-candidate topology work. Cancellation/control flow, and persistence remain CPU-owned, while final
 canonical signature generation is parity-checked from the GPU-derived labeled
 state. The worker also exposes a protocol-native
 `frontier-batch` operation with

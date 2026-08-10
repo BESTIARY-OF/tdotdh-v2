@@ -378,19 +378,18 @@ export function cpuTopologyReduction(input, grid = DEFAULT_FRONTIER_GRID) {
 export function createWebGpuFrontierTopology({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 65536 }, shaderSource = SHADER, accelerator = null } = {}) {
   const normalizedGrid = normalizeGrid(grid);
   if (typeof shaderSource !== 'string' || !shaderSource.trim()) throw new TypeError('shaderSource must be a non-empty string');
-  return Object.freeze({
-    async availability() {
+  const availability = async () => {
       if (typeof accelerator === 'function') return Object.freeze({ schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA, status: 'available', backend: 'webgpu' });
       const probe = await probeWebGpuCapabilities({ gpu, requiredLimits });
       return probe.adapterAvailable && probe.requiredLimitsSatisfied
         ? Object.freeze({ schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA, status: 'available', backend: 'webgpu' })
         : unavailable(probe.adapterAvailable ? 'webgpu-required-limits-unsatisfied' : 'webgpu-adapter-unavailable', null);
-    },
-    async evaluate(input) {
+  };
+  const evaluate = async input => {
       const cpu = cpuFrontierTopology(input, normalizedGrid);
       const normalized = normalizeInput(input, normalizedGrid);
-      const availability = await this.availability();
-      if (availability.status !== 'available') return unavailable(availability.reason, cpu.metrics);
+      const availabilityReceipt = await availability();
+      if (availabilityReceipt.status !== 'available') return unavailable(availabilityReceipt.reason, cpu.metrics);
       let accelerated;
       try {
         accelerated = typeof accelerator === 'function'
@@ -405,8 +404,23 @@ export function createWebGpuFrontierTopology({ gpu = globalThis.navigator?.gpu, 
       }
       const metrics = Object.freeze({ ...cpu.metrics, holes: accelerated.holes, connected: accelerated.occupiedComponentCount <= 1 });
       return Object.freeze({ schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'verified', occupiedMask: cpu.occupiedMask, metrics, accelerator: { backend: 'webgpu', status: 'verified', area: accelerated.area, occupiedComponentCount: accelerated.occupiedComponentCount, holes: accelerated.holes } });
-    },
-  });
+  };
+  const evaluateBatch = async inputs => {
+    if (!Array.isArray(inputs) || !inputs.length) throw new TypeError('topology inputs must be a non-empty array');
+    const availabilityReceipt = await availability();
+    if (availabilityReceipt.status !== 'available') return Object.freeze({ schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA, status: 'fallback', backend: 'cpu-oracle', reason: availabilityReceipt.reason, candidateCount: inputs.length, results: [] });
+    const results = await Promise.all(inputs.map(input => evaluate(input)));
+    const verified = results.every(result => result?.status === 'completed' && result.parity === 'verified');
+    return Object.freeze({
+      schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA,
+      status: verified ? 'completed' : 'fallback',
+      backend: verified ? 'webgpu' : 'cpu-oracle',
+      parity: verified ? 'verified' : 'fallback',
+      candidateCount: results.length,
+      results,
+    });
+  };
+  return Object.freeze({ availability, evaluate, evaluateBatch });
 }
 
 export { DEFAULT_FRONTIER_GRID };
