@@ -21,6 +21,18 @@ const cpuWorker = new Worker(workerUrl, { type: 'module' });
 const gpuScorer = createWebGpuCandidateScorer();
 const gpuCandidatePrefilter = createWebGpuCandidatePrefilter();
 
+async function runCandidateParity(candidates) {
+  const cpu = cpuCandidatePrefilter(candidates);
+  const gpu = await gpuCandidatePrefilter.prefilter(candidates);
+  const parity = gpu.status === 'completed' && JSON.stringify(gpu.validity) === JSON.stringify(cpu.validity);
+  return Object.freeze({
+    status: parity ? 'parity-verified' : gpu.status === 'unavailable' ? 'unavailable' : 'parity-failed',
+    cpu,
+    gpu,
+    parity,
+  });
+}
+
 window.__TDOTDH_V2_RUNTIME__ = Object.freeze({
   product: 'nonomino-field-guide',
   dataPack: 'SEDLEC-00Q_ISLAND-001',
@@ -29,6 +41,7 @@ window.__TDOTDH_V2_RUNTIME__ = Object.freeze({
   cpuWorker,
   gpuScorer,
   gpuCandidatePrefilter,
+  runCandidateParity,
   rendererAdapter,
   workerUrl: workerUrl.href,
   rendererRequest: cells => createRendererRequest({ geometry, cells }),

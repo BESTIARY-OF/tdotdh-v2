@@ -33,6 +33,8 @@ const workerPath = "/apps/field-guide/product/search-worker.js";
 assert.match(productApp, /new Worker\('\/apps\/field-guide\/product\/search-worker\.js(?:\?[^']*)?'\)/);
 const runtime = await readFile(resolve(productDirectory, "v2-runtime.js"), "utf8");
 assert.match(runtime, /new Worker\(workerUrl, \{ type: 'module' \}\)/);
+assert.match(runtime, /async function runCandidateParity\(candidates\)/);
+assert.match(runtime, /status: parity \? 'parity-verified'/);
 
 console.log(JSON.stringify({
   productFiles: productFiles.length,
