@@ -225,12 +225,12 @@ function targetSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedS
 function completedResult(placements, metrics, nodes) {
   return { type: 'done', placements, metrics: { width: metrics.width, height: metrics.height, area: metrics.area, holes: metrics.holes, centroidCoast: metrics.centroidCoast, centroidEdgeCoast: metrics.centroidEdgeCoast, centroidCornerCoast: metrics.centroidCornerCoast, enclosure: metrics.enclosure, centroidFamily: metrics.centroidFamily, centroidFamilyId: metrics.centroidFamilyId, centroidSeed: metrics.centroidSeed, centroidNeighborCount: metrics.centroidNeighborCount, perimeter: metrics.perimeter, density: metrics.density, centerOffset: metrics.centerOffset, centroidSquareOffset: metrics.centroidSquareOffset, centerSquareDistance: metrics.centerSquareDistance, radialVariance: metrics.radialVariance, gravityVariance: metrics.gravityVariance, gravityOffset: metrics.gravityOffset, gravityTension: metrics.gravityTension, inletCells: metrics.inletCells, inletEdges: metrics.inletEdges, inletRisk: metrics.inletRisk, peninsulaDepth: metrics.peninsulaDepth, nestedPeninsulaDepth: metrics.nestedPeninsulaDepth, terminalChains: metrics.terminalChains, score: metrics.score }, nodes };
 }
-function searchLockedSeedBranches(pieces, branches, knownFamilies, centroidId, targetNeighborCount, allowKnownFamily = false, knownSignatures = new Set(), searchHints = false, positionPreferences = {}, random = Math.random, quality = {}) {
+async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroidId, targetNeighborCount, allowKnownFamily = false, knownSignatures = new Set(), searchHints = false, positionPreferences = {}, random = Math.random, quality = {}, candidatePrefilter = null, onPrefilter = () => {}) {
   const unknownBranches = (allowKnownFamily ? branches : branches.filter(branch => !knownFamilies.has(branch.centroidFamilyId))).sort(() => random() - .5);
   let nodes = 0;
   for (const branch of unknownBranches) {
     const branchBudget = Math.max(1, Math.floor(NODE_LIMIT / Math.max(1, unknownBranches.length))), branchStart = nodes;
-    function complete(state) {
+    async function complete(state) {
       if (nodes - branchStart >= branchBudget) return null;
       nodes++;
       if (!state.remaining.length) {
@@ -240,11 +240,20 @@ function searchLockedSeedBranches(pieces, branches, knownFamilies, centroidId, t
       }
       const choices = [];
       for (const piece of state.remaining) {
-        const options = candidateTranslations(piece, state.field, state.bounds).map(candidate => {
+        let options = candidateTranslations(piece, state.field, state.bounds).map(candidate => {
           const placements = [...state.placements, candidate], metrics = fieldMetrics(placements, centroidId);
           const hint = searchHints && positionPreferences[piece.id] ? pieceDirections(placements, piece.id, centroidId).includes(positionPreferences[piece.id]) : false;
           return metrics.holes === 0 ? { candidate, metrics, hintMatches: (state.hintMatches || 0) + (hint ? 1 : 0) } : null;
         }).filter(Boolean);
+        if (typeof candidatePrefilter === 'function' && options.length) {
+          const result = await candidatePrefilter(options.map(option => [option.candidate]));
+          if (result?.status === 'completed' && Array.isArray(result.validity) && result.validity.length === options.length) {
+            onPrefilter({ status: 'used', backend: result.backend || 'compute-shader', candidateCount: options.length });
+            options = options.filter((option, index) => result.validity[index] === 1);
+          } else {
+            onPrefilter({ status: 'fallback', reason: result?.reason || 'prefilter-unavailable' });
+          }
+        }
         if (!options.length) return null;
         choices.push({ piece, options });
       }
@@ -253,13 +262,13 @@ function searchLockedSeedBranches(pieces, branches, knownFamilies, centroidId, t
       choice.options.sort((a, b) => b.hintMatches - a.hintMatches || b.metrics.density - a.metrics.density || searchQualityScore(a.metrics, quality) - searchQualityScore(b.metrics, quality) || random() - .5);
       for (const option of choice.options) {
         const placements = [...state.placements, option.candidate], field = new Set(state.field); option.candidate.cells.forEach(cell => field.add(key(cell.x, cell.y)));
-        const result = complete({ placements, field, remaining: state.remaining.filter(piece => piece.id !== choice.piece.id), bounds: option.metrics, hintMatches: option.hintMatches });
+        const result = await complete({ placements, field, remaining: state.remaining.filter(piece => piece.id !== choice.piece.id), bounds: option.metrics, hintMatches: option.hintMatches });
         if (result) return result;
         if (nodes - branchStart >= branchBudget) return null;
       }
       return null;
     }
-    const result = complete(branch);
+    const result = await complete(branch);
     if (result) return result;
   }
   return { type: 'done', placements: null, metrics: null, nodes };
@@ -294,8 +303,8 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const seedSet = new Set(seedCells.map(c => key(c.x, c.y))), centroidRing = new Set(); seedCells.forEach(cell => adjacent(cell).forEach(next => { if (!seedSet.has(key(next.x, next.y))) centroidRing.add(key(next.x, next.y)); }));
   const seed = { placements: [seedPlacement], field: new Set(seedCells.map(c => key(c.x, c.y))), remaining: pieces.filter(p => p.id !== centroidId), bounds: fieldMetrics([seedPlacement], centroidId), hintMatches: 0 }, seedBranches = searchStrategy === 'breadth' ? lockedSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, centroidRing, positionLocks) : targetFamily ? targetSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, targetSeed, positionLocks, random) : [];
   if (seedBranches.length) {
-    prefilterReceipt = { status: 'not-used', reason: 'locked-seed-branch-path' };
-    return { ...searchLockedSeedBranches(pieces, seedBranches, knownFamilies, centroidId, targetNeighborCount, Boolean(targetFamily), knownSignatures, searchHints, positionPreferences, random, quality), prefilter: prefilterReceipt };
+    const lockedResult = await searchLockedSeedBranches(pieces, seedBranches, knownFamilies, centroidId, targetNeighborCount, Boolean(targetFamily), knownSignatures, searchHints, positionPreferences, random, quality, candidatePrefilter, receipt => { prefilterReceipt = receipt; });
+    return { ...lockedResult, prefilter: prefilterReceipt };
   }
   const beam = [seed];
   let nodes = 0, fallback = null, bestHintResult = null;
