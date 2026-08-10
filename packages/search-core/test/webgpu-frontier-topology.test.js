@@ -44,7 +44,7 @@ const expected = cpuFrontierTopology(input);
 const expectedReduction = cpuTopologyReduction(input);
 const verified = await createWebGpuFrontierTopology({ accelerator: async () => expectedReduction }).evaluate(input);
 assert.equal(verified.status, 'completed');
-assert.equal(verified.parity, 'verified');
+assert.equal(verified.parity, 'labels-verified');
 
 const rejected = await createWebGpuFrontierTopology({ accelerator: async ({ occupiedMask }) => ({ occupiedMask: [...occupiedMask], area: 1 }) }).evaluate(input);
 assert.equal(rejected.status, 'rejected');

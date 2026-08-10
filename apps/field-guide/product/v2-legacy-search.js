@@ -354,7 +354,7 @@ async function evaluateFinalTopology(state, centroidId, frontierTopology, onTopo
     const centroidCells = state.placements.find(placement => placement.id === centroidId)?.cells || [];
     const emptyMask = new Uint32Array(Math.ceil(DEFAULT_FRONTIER_GRID.width * DEFAULT_FRONTIER_GRID.height / 32));
     const result = await frontierTopology.evaluate({ parentMask: emptyMask, candidateMask: createFrontierMaskFromCells(cells), centroidMask: centroidCells.length ? createFrontierMaskFromCells(centroidCells) : emptyMask });
-    if (result?.status === 'completed' && result.parity === 'verified' && result.metrics) {
+    if (result?.status === 'completed' && ['verified', 'labels-verified'].includes(result.parity) && result.metrics) {
       onTopology({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, metrics: result.metrics });
       return result.metrics;
     }

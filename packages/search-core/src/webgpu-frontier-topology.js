@@ -50,13 +50,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= params.cellCount) { return; }
   let x = i32(id.x % params.width);
   let y = i32(id.x / params.width);
-  let active = occupiedAt(id.x);
   var label = currentLabels[id.x];
   if (label == 0u) { nextLabels[id.x] = 0u; return; }
-  if ((occupiedAt(id.x) && labelAt(x + 1, y) != 0u) || (!occupiedAt(id.x) && labelAt(x + 1, y) != 0u)) { label = min(label, labelAt(x + 1, y)); }
-  if ((occupiedAt(id.x) && labelAt(x - 1, y) != 0u) || (!occupiedAt(id.x) && labelAt(x - 1, y) != 0u)) { label = min(label, labelAt(x - 1, y)); }
-  if ((occupiedAt(id.x) && labelAt(x, y + 1) != 0u) || (!occupiedAt(id.x) && labelAt(x, y + 1) != 0u)) { label = min(label, labelAt(x, y + 1)); }
-  if ((occupiedAt(id.x) && labelAt(x, y - 1) != 0u) || (!occupiedAt(id.x) && labelAt(x, y - 1) != 0u)) { label = min(label, labelAt(x, y - 1)); }
+  if (labelAt(x + 1, y) != 0u) { label = min(label, labelAt(x + 1, y)); }
+  if (labelAt(x - 1, y) != 0u) { label = min(label, labelAt(x - 1, y)); }
+  if (labelAt(x, y + 1) != 0u) { label = min(label, labelAt(x, y + 1)); }
+  if (labelAt(x, y - 1) != 0u) { label = min(label, labelAt(x, y - 1)); }
   nextLabels[id.x] = label;
 }`;
 
@@ -279,7 +278,7 @@ async function runWebGpuReduction(gpu, normalized, grid, shaderSource, requiredL
   const parentBuffer = device.createBuffer({ size: byteLength, usage: usage.STORAGE | usage.COPY_DST });
   const candidateBuffer = device.createBuffer({ size: byteLength, usage: usage.STORAGE | usage.COPY_DST });
   const occupiedBuffer = device.createBuffer({ size: byteLength, usage: usage.STORAGE | usage.COPY_SRC });
-  const areaBuffer = device.createBuffer({ size: 4, usage: usage.STORAGE | usage.COPY_SRC });
+  const areaBuffer = device.createBuffer({ size: 4, usage: usage.STORAGE | usage.COPY_SRC | usage.COPY_DST });
   const paramsBuffer = device.createBuffer({ size: 16, usage: usage.UNIFORM | usage.COPY_DST });
   const occupiedReadback = device.createBuffer({ size: byteLength, usage: usage.MAP_READ | usage.COPY_DST });
   const areaReadback = device.createBuffer({ size: 4, usage: usage.MAP_READ | usage.COPY_DST });
@@ -324,21 +323,21 @@ async function runWebGpuReduction(gpu, normalized, grid, shaderSource, requiredL
       device.queue.writeBuffer(labelBuffers[1], 0, new Uint32Array(initial.length));
       device.queue.writeBuffer(labelParams, 0, new Uint32Array([grid.width * grid.height, grid.width, grid.height, 0]));
       let current = 0;
-      for (let pass = 0; pass < grid.width * grid.height; pass += 1) {
-        const encoder = device.createCommandEncoder();
+      const encoder = device.createCommandEncoder();
+      for (let pass = 0; pass < grid.width + grid.height; pass += 1) {
         const compute = encoder.beginComputePass();
         const bindGroup = device.createBindGroup({ layout: labelPipeline.getBindGroupLayout(0), entries: [
           { binding: 0, resource: { buffer: occupiedBuffer } }, { binding: 1, resource: { buffer: labelBuffers[current] } },
           { binding: 2, resource: { buffer: labelBuffers[1 - current] } }, { binding: 3, resource: { buffer: labelParams } },
         ] });
         compute.setPipeline(labelPipeline); compute.setBindGroup(0, bindGroup); compute.dispatchWorkgroups(Math.ceil((grid.width * grid.height) / 64)); compute.end();
-        device.queue.submit([encoder.finish()]);
         current = 1 - current;
       }
-      await device.queue.onSubmittedWorkDone();
-      const encoder = device.createCommandEncoder();
-      encoder.copyBufferToBuffer(labelBuffers[current], 0, labelReadbacks[0], 0, labelByteLength);
       device.queue.submit([encoder.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      const copyEncoder = device.createCommandEncoder();
+      copyEncoder.copyBufferToBuffer(labelBuffers[current], 0, labelReadbacks[0], 0, labelByteLength);
+      device.queue.submit([copyEncoder.finish()]);
       await device.queue.onSubmittedWorkDone();
       await labelReadbacks[0].mapAsync(mapMode.READ);
       const labels = new Uint32Array(labelReadbacks[0].getMappedRange().slice(0));
@@ -402,15 +401,15 @@ export function createWebGpuFrontierTopology({ gpu = globalThis.navigator?.gpu, 
       if (!sameMask(accelerated?.occupiedMask, cpuReduction.occupiedMask) || accelerated?.area !== cpuReduction.area || !sameMask(accelerated?.occupiedLabels, cpuReduction.occupiedLabels) || !sameMask(accelerated?.emptyLabels, cpuReduction.emptyLabels) || accelerated?.occupiedComponentCount !== cpuReduction.occupiedComponentCount || accelerated?.holes !== cpuReduction.holes) {
         return Object.freeze({ schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA, status: 'rejected', backend: 'cpu-oracle', reason: 'topology-parity-mismatch', metrics: cpu.metrics, accelerator: { backend: 'webgpu', status: 'rejected' } });
       }
-      const metrics = Object.freeze({ ...cpu.metrics, holes: accelerated.holes, connected: accelerated.occupiedComponentCount <= 1 });
-      return Object.freeze({ schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'verified', occupiedMask: cpu.occupiedMask, metrics, accelerator: { backend: 'webgpu', status: 'verified', area: accelerated.area, occupiedComponentCount: accelerated.occupiedComponentCount, holes: accelerated.holes } });
+      const metrics = Object.freeze({ ...cpu.metrics, holes: accelerated.holes, connected: accelerated.occupiedComponentCount === 1 });
+      return Object.freeze({ schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'labels-verified', metricsBackend: 'cpu-oracle-plus-gpu-labels', occupiedMask: cpu.occupiedMask, metrics, accelerator: { backend: 'webgpu', status: 'verified', area: accelerated.area, occupiedComponentCount: accelerated.occupiedComponentCount, holes: accelerated.holes } });
   };
   const evaluateBatch = async inputs => {
     if (!Array.isArray(inputs) || !inputs.length) throw new TypeError('topology inputs must be a non-empty array');
     const availabilityReceipt = await availability();
     if (availabilityReceipt.status !== 'available') return Object.freeze({ schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA, status: 'fallback', backend: 'cpu-oracle', reason: availabilityReceipt.reason, candidateCount: inputs.length, results: [] });
     const results = await Promise.all(inputs.map(input => evaluate(input)));
-    const verified = results.every(result => result?.status === 'completed' && result.parity === 'verified');
+    const verified = results.every(result => result?.status === 'completed' && ['verified', 'labels-verified'].includes(result.parity));
     return Object.freeze({
       schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA,
       status: verified ? 'completed' : 'fallback',

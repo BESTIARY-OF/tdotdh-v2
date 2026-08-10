@@ -4,14 +4,14 @@ The product's final-arrangement path now calls
 `tdotdh.webgpu-frontier-topology.v0`. The adapter forms the complete occupancy
 union on the accelerator and performs a parallel word-level area reduction.
 The returned occupancy mask and area must match the CPU oracle exactly before
-the receipt is marked `parity: verified` and used for final acceptance.
+the receipt is accepted as the occupancy parity gate.
 
 The same adapter runs iterative min-label propagation for occupied components
 and empty regions. Connected-component and hole counts are derived from those
 GPU labels, while perimeter, centroid edge/corner coast, and bounding-box area
 remain CPU-oracle metrics. Occupancy, area, both label arrays, component count,
 and hole count must match the CPU oracle exactly before the receipt is marked
-`parity: verified` and used for final acceptance. A device failure or parity
+`parity: labels-verified` and used for the GPU-derived label metrics. A device failure or parity
 mismatch returns an explicit CPU fallback/rejection and never changes SEDLEC
 acceptance semantics.
 

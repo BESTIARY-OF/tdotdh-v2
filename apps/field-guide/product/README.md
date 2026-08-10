@@ -18,7 +18,8 @@ conflated.
 When WebGPU is available and exact parity holds, the product uses those GPU results
 to rank the next beam; otherwise each slice reports an explicit CPU fallback. Full
 topology acceptance now has a final parity-gated GPU occupancy reduction; its
-certain perimeter/coast metrics remain CPU-oracle-derived inside that adapter,
+Perimeter, centroid edge/corner coast, and bounding-box area remain
+CPU-oracle-derived inside that adapter,
 while component labels and empty-region flood labels now drive parity-gated
 hole/connectivity reduction. Ordered deduplication,
 When the adapter is available, candidate frontiers are submitted through its
