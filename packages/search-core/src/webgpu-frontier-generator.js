@@ -71,28 +71,55 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 validity[id.x] = select(0u, 1u, valid);
 }`;
 
-const COMPACTION_SHADER = `
+const COMPACTION_SCAN_SHADER = `
+struct Params { candidateCount: u32, groupCount: u32, reserved0: u32, reserved1: u32, };
+@group(0) @binding(0) var<storage, read> validity: array<u32>;
+@group(0) @binding(1) var<storage, read_write> prefixes: array<u32>;
+@group(0) @binding(2) var<storage, read_write> groupTotals: array<u32>;
+@group(0) @binding(3) var<uniform> params: Params;
+var<workgroup> scan: array<u32, 64>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>, @builtin(workgroup_id) group: vec3<u32>) {
+  let lane = local.x;
+  let index = id.x;
+  var current: u32 = 0u;
+  if (index < params.candidateCount) { current = validity[index]; }
+  scan[lane] = current;
+  workgroupBarrier();
+  var offset = 1u;
+  loop {
+    if (offset >= 64u) { break; }
+    let addend = select(0u, scan[lane - offset], lane >= offset);
+    workgroupBarrier();
+    scan[lane] = scan[lane] + addend;
+    workgroupBarrier();
+    offset = offset * 2u;
+  }
+  let total = scan[63u];
+  let inclusive = scan[lane];
+  workgroupBarrier();
+  scan[lane] = inclusive - current;
+  if (index < params.candidateCount) { prefixes[index] = scan[lane]; }
+  if (lane == 0u) { groupTotals[group.x] = total; }
+}`;
+
+const COMPACTION_WRITE_SHADER = `
 struct Params { candidateCount: u32, reserved0: u32, reserved1: u32, reserved2: u32, };
 @group(0) @binding(0) var<storage, read> origins: array<i32>;
 @group(0) @binding(1) var<storage, read> validity: array<u32>;
-@group(0) @binding(2) var<storage, read_write> compactedOrigins: array<i32>;
-@group(0) @binding(3) var<storage, read_write> compactedCount: array<u32>;
-@group(0) @binding(4) var<uniform> params: Params;
+@group(0) @binding(2) var<storage, read> prefixes: array<u32>;
+@group(0) @binding(3) var<storage, read> groupOffsets: array<u32>;
+@group(0) @binding(4) var<storage, read_write> compactedOrigins: array<i32>;
+@group(0) @binding(5) var<uniform> params: Params;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= params.candidateCount) { return; }
-  var prefix: u32 = 0u;
-  for (var index: u32 = 0u; index < id.x; index++) { if (validity[index] != 0u) { prefix += 1u; } }
-  if (validity[id.x] != 0u) {
-    compactedOrigins[prefix * 2u] = origins[id.x * 2u];
-    compactedOrigins[prefix * 2u + 1u] = origins[id.x * 2u + 1u];
-  }
-  if (id.x == 0u) {
-    var total: u32 = 0u;
-    for (var index: u32 = 0u; index < params.candidateCount; index++) { if (validity[index] != 0u) { total += 1u; } }
-    compactedCount[0] = total;
-  }
+  if (validity[id.x] == 0u) { return; }
+  let outputIndex = groupOffsets[id.x / 64u] + prefixes[id.x];
+  compactedOrigins[outputIndex * 2u] = origins[id.x * 2u];
+  compactedOrigins[outputIndex * 2u + 1u] = origins[id.x * 2u + 1u];
 }`;
 
 const BATCH_SHADER = `
@@ -246,19 +273,23 @@ export function cpuGenerateFrontierBatch(inputs, grid = DEFAULT_FRONTIER_GRID) {
 
 async function runGpu(device, normalized, grid, shaderSource) {
   const fieldCells = flattenCells(normalized.fieldCells), pieceCells = flattenCells(normalized.pieceCells), fieldMask = createMask(normalized.fieldCells, grid);
-  const count = normalized.candidateCount, originBytes = Math.max(4, count * 2 * 4), countBytes = Math.max(4, count * 4), fieldBytes = Math.max(4, fieldCells.byteLength), pieceBytes = Math.max(4, pieceCells.byteLength), maskBytes = Math.max(4, fieldMask.byteLength);
+  const count = normalized.candidateCount, groupCount = Math.max(1, Math.ceil(count / 64)), originBytes = Math.max(4, count * 2 * 4), countBytes = Math.max(4, count * 4), groupBytes = Math.max(4, groupCount * 4), fieldBytes = Math.max(4, fieldCells.byteLength), pieceBytes = Math.max(4, pieceCells.byteLength), maskBytes = Math.max(4, fieldMask.byteLength);
   const fieldBuffer = device.createBuffer({ size: fieldBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   const pieceBuffer = device.createBuffer({ size: pieceBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   const maskBuffer = device.createBuffer({ size: maskBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   const originsBuffer = device.createBuffer({ size: originBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
   const validityBuffer = device.createBuffer({ size: countBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  const prefixesBuffer = device.createBuffer({ size: countBytes, usage: GPUBufferUsage.STORAGE });
+  const groupTotalsBuffer = device.createBuffer({ size: groupBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  const groupOffsetsBuffer = device.createBuffer({ size: groupBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   const compactedOriginsBuffer = device.createBuffer({ size: originBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-  const compactedCountBuffer = device.createBuffer({ size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
   const paramsBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const scanParamsBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const writeParamsBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const originsReadback = device.createBuffer({ size: originBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
   const validityReadback = device.createBuffer({ size: countBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  const groupTotalsReadback = device.createBuffer({ size: groupBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
   const compactedOriginsReadback = device.createBuffer({ size: originBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-  const compactedCountReadback = device.createBuffer({ size: 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
   try {
     device.queue.writeBuffer(fieldBuffer, 0, fieldCells); device.queue.writeBuffer(pieceBuffer, 0, pieceCells); device.queue.writeBuffer(maskBuffer, 0, fieldMask);
     const params = new Int32Array([normalized.fieldCells.length, normalized.pieceCells.length, grid.width, grid.height, grid.originX, grid.originY, normalized.bounds.minX, normalized.bounds.maxX, normalized.bounds.minY, normalized.bounds.maxY, 24, 16]);
@@ -267,15 +298,27 @@ async function runGpu(device, normalized, grid, shaderSource) {
     const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
       { binding: 0, resource: { buffer: fieldBuffer } }, { binding: 1, resource: { buffer: pieceBuffer } }, { binding: 2, resource: { buffer: maskBuffer } }, { binding: 3, resource: { buffer: originsBuffer } }, { binding: 4, resource: { buffer: validityBuffer } }, { binding: 5, resource: { buffer: paramsBuffer } },
     ] });
-    const compactionModule = device.createShaderModule({ code: COMPACTION_SHADER }), compactionPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: compactionModule, entryPoint: 'main' } });
-    const compactionBindGroup = device.createBindGroup({ layout: compactionPipeline.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: { buffer: originsBuffer } }, { binding: 1, resource: { buffer: validityBuffer } }, { binding: 2, resource: { buffer: compactedOriginsBuffer } }, { binding: 3, resource: { buffer: compactedCountBuffer } }, { binding: 4, resource: { buffer: paramsBuffer } },
+    const generationEncoder = device.createCommandEncoder(), generationPass = generationEncoder.beginComputePass(); generationPass.setPipeline(pipeline); generationPass.setBindGroup(0, bindGroup); generationPass.dispatchWorkgroups(Math.ceil(count / 64)); generationPass.end(); device.queue.submit([generationEncoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+
+    device.queue.writeBuffer(scanParamsBuffer, 0, new Uint32Array([count, groupCount, 0, 0]));
+    const scanModule = device.createShaderModule({ code: COMPACTION_SCAN_SHADER }), scanPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: scanModule, entryPoint: 'main' } });
+    const scanBindGroup = device.createBindGroup({ layout: scanPipeline.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: { buffer: validityBuffer } }, { binding: 1, resource: { buffer: prefixesBuffer } }, { binding: 2, resource: { buffer: groupTotalsBuffer } }, { binding: 3, resource: { buffer: scanParamsBuffer } },
     ] });
-    const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end(); const compactionPass = encoder.beginComputePass(); compactionPass.setPipeline(compactionPipeline); compactionPass.setBindGroup(0, compactionBindGroup); compactionPass.dispatchWorkgroups(Math.ceil(count / 64)); compactionPass.end(); encoder.copyBufferToBuffer(originsBuffer, 0, originsReadback, 0, originBytes); encoder.copyBufferToBuffer(validityBuffer, 0, validityReadback, 0, countBytes); encoder.copyBufferToBuffer(compactedOriginsBuffer, 0, compactedOriginsReadback, 0, originBytes); encoder.copyBufferToBuffer(compactedCountBuffer, 0, compactedCountReadback, 0, 4); device.queue.submit([encoder.finish()]);
+    const scanEncoder = device.createCommandEncoder(), scanPass = scanEncoder.beginComputePass(); scanPass.setPipeline(scanPipeline); scanPass.setBindGroup(0, scanBindGroup); scanPass.dispatchWorkgroups(groupCount); scanPass.end(); scanEncoder.copyBufferToBuffer(groupTotalsBuffer, 0, groupTotalsReadback, 0, groupBytes); device.queue.submit([scanEncoder.finish()]);
+    await device.queue.onSubmittedWorkDone(); await groupTotalsReadback.mapAsync(GPUMapMode.READ); const groupTotals = Array.from(new Uint32Array(groupTotalsReadback.getMappedRange().slice(0, groupCount * 4))); groupTotalsReadback.unmap();
+    const groupOffsets = new Uint32Array(groupCount); let compactedCount = 0; for (let index = 0; index < groupCount; index += 1) { groupOffsets[index] = compactedCount; compactedCount += groupTotals[index]; }
+    device.queue.writeBuffer(groupOffsetsBuffer, 0, groupOffsets); device.queue.writeBuffer(writeParamsBuffer, 0, new Uint32Array([count, 0, 0, 0]));
+    const writeModule = device.createShaderModule({ code: COMPACTION_WRITE_SHADER }), writePipeline = device.createComputePipeline({ layout: 'auto', compute: { module: writeModule, entryPoint: 'main' } });
+    const writeBindGroup = device.createBindGroup({ layout: writePipeline.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: { buffer: originsBuffer } }, { binding: 1, resource: { buffer: validityBuffer } }, { binding: 2, resource: { buffer: prefixesBuffer } }, { binding: 3, resource: { buffer: groupOffsetsBuffer } }, { binding: 4, resource: { buffer: compactedOriginsBuffer } }, { binding: 5, resource: { buffer: writeParamsBuffer } },
+    ] });
+    const writeEncoder = device.createCommandEncoder(), writePass = writeEncoder.beginComputePass(); writePass.setPipeline(writePipeline); writePass.setBindGroup(0, writeBindGroup); writePass.dispatchWorkgroups(Math.ceil(count / 64)); writePass.end(); const compactedBytes = Math.max(4, compactedCount * 2 * 4); writeEncoder.copyBufferToBuffer(compactedOriginsBuffer, 0, compactedOriginsReadback, 0, compactedBytes); writeEncoder.copyBufferToBuffer(originsBuffer, 0, originsReadback, 0, originBytes); writeEncoder.copyBufferToBuffer(validityBuffer, 0, validityReadback, 0, countBytes); device.queue.submit([writeEncoder.finish()]);
     await device.queue.onSubmittedWorkDone(); await originsReadback.mapAsync(GPUMapMode.READ); const rawOrigins = Array.from(new Int32Array(originsReadback.getMappedRange().slice(0, count * 2 * 4))); originsReadback.unmap(); await validityReadback.mapAsync(GPUMapMode.READ); const validity = Array.from(new Uint32Array(validityReadback.getMappedRange().slice(0, count * 4))); validityReadback.unmap();
-    await compactedCountReadback.mapAsync(GPUMapMode.READ); const compactedCount = new Uint32Array(compactedCountReadback.getMappedRange().slice(0, 4))[0]; compactedCountReadback.unmap(); await compactedOriginsReadback.mapAsync(GPUMapMode.READ); const rawCompactedOrigins = Array.from(new Int32Array(compactedOriginsReadback.getMappedRange().slice(0, compactedCount * 2 * 4))); compactedOriginsReadback.unmap();
+    await compactedOriginsReadback.mapAsync(GPUMapMode.READ); const rawCompactedOrigins = Array.from(new Int32Array(compactedOriginsReadback.getMappedRange().slice(0, compactedCount * 2 * 4))); compactedOriginsReadback.unmap();
     return { origins: Array.from({ length: count }, (_, index) => ({ x: rawOrigins[index * 2], y: rawOrigins[index * 2 + 1] })), validity, compactedOrigins: Array.from({ length: compactedCount }, (_, index) => ({ x: rawCompactedOrigins[index * 2], y: rawCompactedOrigins[index * 2 + 1] })), compactedCount };
-  } finally { for (const buffer of [fieldBuffer, pieceBuffer, maskBuffer, originsBuffer, validityBuffer, compactedOriginsBuffer, compactedCountBuffer, paramsBuffer, originsReadback, validityReadback, compactedOriginsReadback, compactedCountReadback]) buffer.destroy(); }
+  } finally { for (const buffer of [fieldBuffer, pieceBuffer, maskBuffer, originsBuffer, validityBuffer, prefixesBuffer, groupTotalsBuffer, groupOffsetsBuffer, compactedOriginsBuffer, paramsBuffer, scanParamsBuffer, writeParamsBuffer, originsReadback, validityReadback, groupTotalsReadback, compactedOriginsReadback]) buffer.destroy(); }
 }
 
 async function runGpuBatch(device, normalized, grid, shaderSource) {
