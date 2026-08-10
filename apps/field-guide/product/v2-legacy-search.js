@@ -806,8 +806,7 @@ async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroi
       }
       const targetKeys = targetPool ? new Set([...targetPool.frontierCells, ...targetPool.ringCells].map(cell => key(cell.x, cell.y))) : null;
       const touchesGpuTargetPool = candidate => !targetKeys || candidate.cells.some(cell => targetKeys.has(key(cell.x, cell.y)));
-      const choices = [], stateEngine = frontierNavigator || frontierState;
-      stateEngine?.beginLayer?.();
+      const choices = [];
       for (const piece of state.remaining) {
         let options = (await generateFrontierTranslations(piece, state, state.bounds, frontierGenerator, onGeneration, frontierGeneratorStatus, frontierCandidateRecords)).map(candidate => ({ piece, candidate }));
         if (targetKeys) options = options.filter(entry => touchesGpuTargetPool(entry.candidate));
@@ -827,12 +826,16 @@ async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroi
           }
         }
         options = await evaluateFrontierGeometry(options, state, centroidId, frontierMetrics, onMetrics);
-        if (!options.length) { stateEngine?.commitLayer?.(); return null; }
         choices.push({ piece, options });
       }
+      for (const choice of choices) {
+        choice.options = await evaluateFrontierOptions(choice.options, state, centroidId, frontierEvaluator, frontierValidator, onFrontier);
+        if (!choice.options.length) return null;
+      }
+      const stateEngine = frontierNavigator || frontierState;
+      stateEngine?.beginLayer?.();
       await evaluateFrontierStateAcrossBeam(choices.map(choice => ({ state, entries: choice.options })), stateEngine, onState);
       stateEngine?.commitLayer?.();
-      for (const choice of choices) choice.options = await evaluateFrontierOptions(choice.options, state, centroidId, frontierEvaluator, frontierValidator, onFrontier);
       choices.sort((a, b) => a.options.length - b.options.length);
       const choice = choices[0];
       choice.options.sort((a, b) => b.hintMatches - a.hintMatches || b.metrics.density - a.metrics.density || searchQualityScore(a.metrics, quality) - searchQualityScore(b.metrics, quality) || random() - .5);
