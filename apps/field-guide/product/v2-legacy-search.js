@@ -345,6 +345,29 @@ async function evaluateFrontierGeometry(entries, state, centroidId, frontierMetr
   return entries;
 }
 
+async function evaluateFrontierGeometryAcrossBeam(jobs, centroidId, frontierMetrics, onMetrics = () => {}) {
+  if (!frontierMetrics?.evaluate || !jobs.length) return jobs;
+  try {
+    const pending = [];
+    for (const [jobIndex, job] of jobs.entries()) {
+      const parentCells = [...job.state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
+      const centroidCells = job.state.placements.find(placement => placement.id === centroidId)?.cells || [];
+      const centroidRing = new Map();
+      for (const cell of centroidCells) for (const next of adjacent(cell)) if (!centroidCells.some(other => other.x === next.x && other.y === next.y)) centroidRing.set(key(next.x, next.y), next);
+      for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, entry, candidate: createFrontierMetricsCandidate({ parentCells, candidateCells: entry.candidate.cells, centroidCells, ringCells: [...centroidRing.values()], bounds: job.state.bounds }) });
+    }
+    if (!pending.length) return jobs;
+    const result = await frontierMetrics.evaluate(pending.map(item => item.candidate));
+    if (result?.status === 'completed' && result.parity === 'verified' && Array.isArray(result.metrics) && result.metrics.length === pending.length) {
+      for (const [index, item] of pending.entries()) jobs[item.jobIndex].entries[item.entryIndex] = { ...item.entry, gpuGeometry: result.metrics[index] };
+      onMetrics({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: pending.length, batch: 'beam' });
+      return jobs;
+    }
+    onMetrics({ status: 'fallback', reason: result?.reason || 'frontier-metrics-unavailable', candidateCount: pending.length, batch: 'beam' });
+  } catch (error) { onMetrics({ status: 'fallback', reason: `frontier-metrics-failed:${error.message}`, batch: 'beam' }); }
+  return jobs;
+}
+
 async function evaluateFieldAggregates(entries, state, centroidId, fieldMetricsAdapter, onMetrics = () => {}) {
   if (!fieldMetricsAdapter?.evaluate || !entries.length) return entries;
   try {
@@ -420,6 +443,31 @@ async function evaluateFrontierState(entries, state, frontierState, onState = ()
     onState({ status: 'fallback', reason: result?.reason || 'frontier-state-unavailable' });
   } catch (error) { onState({ status: 'fallback', reason: `frontier-state-failed:${error.message}` }); }
   return entries;
+}
+
+async function evaluateFrontierStateAcrossBeam(jobs, frontierState, onState = () => {}) {
+  if (!jobs.length || !jobs.some(job => job.entries.length)) return jobs;
+  if (!frontierState?.transition) return jobs;
+  try {
+    const pending = [];
+    for (const [jobIndex, job] of jobs.entries()) {
+      const pieceIds = [...new Set([...job.state.placements.map(placement => placement.id), ...job.state.remaining.map(piece => piece.id)])].sort((a, b) => a - b);
+      for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, entry, candidate: createLabeledFrontierStateCandidate({ parentPlacements: job.state.placements, candidate: { id: entry.piece.id, cells: entry.candidate.cells }, pieceIds, remainingIds: job.state.remaining.filter(piece => piece.id !== entry.piece.id).map(piece => piece.id) }) });
+    }
+    if (!pending.length) return jobs;
+    const result = await frontierState.transition(pending.map(item => item.candidate));
+    if (result?.status === 'completed' && result.parity === 'verified' && Array.isArray(result.absoluteHashes) && result.absoluteHashes.length === pending.length) {
+      const wordCount = Number(result.wordCount) || 0, labelsPerCandidate = result.pieceIds.length * wordCount;
+      for (const [index, item] of pending.entries()) {
+        const labelStart = index * labelsPerCandidate;
+        jobs[item.jobIndex].entries[item.entryIndex] = { ...item.entry, gpuState: { absoluteHash: result.absoluteHashes[index], canonicalHash: result.canonicalHashes[index], nextLabels: result.nextLabels.slice(labelStart, labelStart + labelsPerCandidate), canonicalLabels: result.canonicalLabels.slice(labelStart, labelStart + labelsPerCandidate), pieceIds: result.pieceIds, wordCount, remainingMask: Array.from(item.candidate.remainingMask) } };
+      }
+      onState({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: pending.length, batch: 'beam' });
+      return jobs;
+    }
+    onState({ status: 'fallback', reason: result?.reason || 'frontier-state-unavailable', candidateCount: pending.length, batch: 'beam' });
+  } catch (error) { onState({ status: 'fallback', reason: `frontier-state-failed:${error.message}`, batch: 'beam' }); }
+  return jobs;
 }
 
 async function evaluateFrontierTopology(entries, state, centroidId, frontierTopology, onTopology = () => {}, knownAvailability = null) {
@@ -653,15 +701,15 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       }
       if (!selectedTarget) continue;
       selectedOptions = await filterCandidates(selectedOptions);
-      selectedOptions = await evaluateFrontierGeometry(selectedOptions, state, centroidId, frontierMetrics, receipt => { frontierMetricsReceipt = receipt; });
       if (selectedOptions.length) beamJobs.push({ state, entries: selectedOptions });
     }
+    await evaluateFrontierGeometryAcrossBeam(beamJobs, centroidId, frontierMetrics, receipt => { frontierMetricsReceipt = receipt; });
     await evaluateFieldAggregatesAcrossBeam(beamJobs, centroidId, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; });
+    for (const job of beamJobs) job.entries = await evaluateFrontierOptions(job.entries, job.state, centroidId, frontierEvaluator, options.frontierValidator, receipt => { frontierReceipt = receipt; });
+    await evaluateFrontierStateAcrossBeam(beamJobs, frontierState, receipt => { frontierStateReceipt = receipt; });
     for (const job of beamJobs) {
       const state = job.state;
       let selectedOptions = job.entries;
-      selectedOptions = await evaluateFrontierOptions(selectedOptions, state, centroidId, frontierEvaluator, options.frontierValidator, receipt => { frontierReceipt = receipt; });
-      selectedOptions = await evaluateFrontierState(selectedOptions, state, frontierState, receipt => { frontierStateReceipt = receipt; });
       selectedOptions = await evaluateFrontierTopology(selectedOptions, state, centroidId, frontierTopology, receipt => { frontierTopologyReceipt = receipt; }, frontierTopologyAvailabilityReceipt);
       if (!selectedOptions.length) continue;
       const rankedCandidates = selectedOptions.map(({ piece, candidate, gpuGeometry, gpuFieldMetrics, gpuState, gpuTopology }) => {

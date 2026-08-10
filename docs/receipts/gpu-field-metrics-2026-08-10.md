@@ -19,8 +19,10 @@ The v2 search worker now exposes `tdotdh.webgpu-field-metrics.v0`.
 - Beam-depth orchestration flattens field candidates across retained states:
   the CPU-backed receipt observed 14 aggregate batches for 3,376 breadth
   candidates and 14 for 3,443 depth candidates, versus one dispatch per state
-  before this boundary. This is a dispatch-efficiency receipt, not a hardware
-  speed claim.
+  before this boundary. The same receipt now batches labeled frontier-state
+  transitions at 14 breadth and 14 depth batches instead of 760 and 828,
+  respectively. This is a dispatch-efficiency receipt, not a hardware speed
+  claim.
 
 Focused receipts pass with `node packages/search-core/test/webgpu-field-metrics.test.js`,
 `node apps/field-guide/test/v2-search-receipt.test.js`, and `npm run check`.
