@@ -18,8 +18,9 @@ conflated.
 When WebGPU is available and exact parity holds, the product uses those GPU results
 to rank the next beam; otherwise each slice reports an explicit CPU fallback. Full
 topology acceptance now has a final parity-gated GPU occupancy reduction; its
-hole/connectivity reduction remains CPU-oracle-derived inside that adapter until
-component-label and hole-flood passes are verified. Ordered deduplication,
+certain perimeter/coast metrics remain CPU-oracle-derived inside that adapter,
+while component labels and empty-region flood labels now drive parity-gated
+hole/connectivity reduction. Ordered deduplication,
 cancellation/control flow, and persistence remain CPU-owned, while final
 canonical signature generation is parity-checked from the GPU-derived labeled
 state. The worker also exposes a protocol-native

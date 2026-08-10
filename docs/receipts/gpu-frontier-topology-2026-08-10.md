@@ -6,12 +6,14 @@ union on the accelerator and performs a parallel word-level area reduction.
 The returned occupancy mask and area must match the CPU oracle exactly before
 the receipt is marked `parity: verified` and used for final acceptance.
 
-The same adapter reports the CPU-oracle topology metrics needed by the existing
-product contract: perimeter, holes, 4-neighbor connectivity, centroid edge and
-corner coast, and bounding-box area. This is intentionally explicit: GPU union
-and area are accelerated today, while component labeling and hole flooding are
-the next GPU topology slice. A device failure or parity mismatch returns an
-explicit CPU fallback/rejection and never changes SEDLEC acceptance semantics.
+The same adapter runs iterative min-label propagation for occupied components
+and empty regions. Connected-component and hole counts are derived from those
+GPU labels, while perimeter, centroid edge/corner coast, and bounding-box area
+remain CPU-oracle metrics. Occupancy, area, both label arrays, component count,
+and hole count must match the CPU oracle exactly before the receipt is marked
+`parity: verified` and used for final acceptance. A device failure or parity
+mismatch returns an explicit CPU fallback/rejection and never changes SEDLEC
+acceptance semantics.
 
 Verification:
 

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { cpuFrontierTopology, createWebGpuFrontierTopology, DEFAULT_FRONTIER_GRID, WEBGPU_FRONTIER_TOPOLOGY_SCHEMA } from '../src/webgpu-frontier-topology.js';
+import { cpuFrontierTopology, cpuTopologyReduction, createWebGpuFrontierTopology, DEFAULT_FRONTIER_GRID, WEBGPU_FRONTIER_TOPOLOGY_SCHEMA } from '../src/webgpu-frontier-topology.js';
 
 function maskFor(cells) {
   const mask = new Uint32Array(Math.ceil((DEFAULT_FRONTIER_GRID.width * DEFAULT_FRONTIER_GRID.height) / 32));
@@ -41,7 +41,8 @@ assert.equal(fallback.metrics.area, 2);
 
 const input = { parentMask: maskFor([{ x: 0, y: 0 }]), candidateMask: maskFor([{ x: 1, y: 0 }]) };
 const expected = cpuFrontierTopology(input);
-const verified = await createWebGpuFrontierTopology({ accelerator: async ({ occupiedMask }) => ({ occupiedMask: [...occupiedMask], area: 2 }) }).evaluate(input);
+const expectedReduction = cpuTopologyReduction(input);
+const verified = await createWebGpuFrontierTopology({ accelerator: async () => expectedReduction }).evaluate(input);
 assert.equal(verified.status, 'completed');
 assert.equal(verified.parity, 'verified');
 
