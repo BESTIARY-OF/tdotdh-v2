@@ -72,6 +72,8 @@ export function createWebGpuFrontierNavigator({ stateAdapter, ticket, cursor = {
     checkpoint,
     cancel,
     reset,
+    beginLayer() { return stateAdapter.beginLayer ? stateAdapter.beginLayer() : Object.freeze({ schema: WEBGPU_FRONTIER_NAVIGATOR_SCHEMA, status: 'layer-open', epoch: active?.epoch || 0 }); },
+    commitLayer() { return stateAdapter.commitLayer ? stateAdapter.commitLayer() : Object.freeze({ schema: WEBGPU_FRONTIER_NAVIGATOR_SCHEMA, status: 'layer-committed', epoch: active?.epoch || 0 }); },
     async availability() { return stateAdapter.availability ? stateAdapter.availability() : Object.freeze({ status: 'available', backend: 'webgpu' }); },
     async expand(candidates, { cursor: nextCursor = latestCursor } = {}) {
       const normalizedCursor = observeCursor(nextCursor), ordinal = batchOrdinal++, batchTicket = ticketCopy(stableTicket, ordinal);

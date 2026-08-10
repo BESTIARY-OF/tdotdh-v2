@@ -46,6 +46,13 @@ commit. The next GPU-first seam is direct parent-label references from the
 next beam into the resident epoch, so canonical label arrays are read back
 only for replay/acceptance rather than as the normal inter-layer transport.
 
+That seam is now covered by a fake-device receipt: the resident pool allocates
+its double-buffered label storage once, accepts a second transition by parent
+slot, preserves absolute/canonical hash parity, and commits the new epoch only
+at the layer boundary. The real product worker uses the resident adapter when
+the device satisfies its storage limit; otherwise it returns the CPU oracle
+payload with an explicit unavailable receipt.
+
 ## Live product acceptance
 
 - Preview: `http://127.0.0.1:5174/`

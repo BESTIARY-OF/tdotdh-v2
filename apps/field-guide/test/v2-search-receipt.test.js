@@ -92,6 +92,18 @@ const sharedOptions = {
   navigationTicket: { presetFingerprint: 'test-preset', familyId: 'open', pass: 0, threadId: 0 },
   navigationCursor: { depth: 0, nodeOffset: 0, rootChoice: 0 },
 };
+let residentExpansionCalls = 0, residentParentReferences = 0, residentEpoch = 0;
+const residentNavigator = {
+  beginLayer() { return { status: 'layer-open' }; },
+  commitLayer() { return { status: 'layer-committed' }; },
+  expand: async candidates => {
+    residentExpansionCalls += 1;
+    residentParentReferences += candidates.filter(candidate => candidate.parentStateIndex != null).length;
+    const result = cpuTransitionLabeledFrontierStates(candidates);
+    residentEpoch += 1;
+    return { ...result, backend: 'resident-test-webgpu', parity: 'verified', persistent: true, resident: true, residentEpoch, residentStateIndices: candidates.map((_, index) => index), navigator: { status: 'resident', epoch: residentEpoch } };
+  },
+};
 const singleResult = await search(pieces, [], { ...sharedOptions, frontierGenerator: singleFrontierGenerator });
 const result = await search(pieces, [], { ...sharedOptions, frontierGenerator });
 const targetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator });
@@ -124,6 +136,8 @@ const lockedResult = await search(lockedPieces, [], {
   frontierGenerator: singleFrontierGenerator,
   frontierTargetPool: lockedTargetPool,
 });
+const residentBaseline = await search(lockedPieces, [], { ...sharedOptions, searchStrategy: 'breadth', frontierGenerator });
+const residentResult = await search(lockedPieces, [], { ...sharedOptions, searchStrategy: 'breadth', frontierGenerator, frontierNavigator: residentNavigator });
 
 assert.equal(result.type, 'done');
 assert.deepEqual(singleResult.prefilter, { status: 'used', backend: 'test-compute-shader', candidateCount: 6 });
@@ -157,6 +171,12 @@ assert.equal(depthResult.frontierCompactor.parity, 'verified');
 assert.equal(breadthResult.frontierCompactor.status, 'used');
 assert.equal(breadthResult.frontierCompactor.batch, 'breadth-quota');
 assert.equal(breadthResult.frontierCompactor.backend, 'test-frontier-compactor');
+assert.ok(residentExpansionCalls > 0);
+assert.ok(residentParentReferences > 0, 'later beam layers must submit resident parent references');
+assert.equal(residentResult.frontierState.resident, true);
+assert.equal(residentResult.frontierState.backend, 'resident-test-webgpu');
+assert.deepEqual(residentResult.placements, residentBaseline.placements);
+assert.deepEqual(residentResult.metrics, residentBaseline.metrics);
 assert.ok(frontierDeduplicatorCalls > 0);
 assert.equal(targetPoolResult.frontierDedup.status, 'used');
 assert.equal(targetPoolResult.frontierDedup.backend, 'test-frontier-deduplicator');

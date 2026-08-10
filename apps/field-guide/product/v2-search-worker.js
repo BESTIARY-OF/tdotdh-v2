@@ -13,6 +13,7 @@ import { createWebGpuFrontierRanker } from '../../../packages/search-core/src/we
 import { createWebGpuPersistentFrontierCompactor } from '../../../packages/search-core/src/webgpu-frontier-compactor.js';
 import { createWebGpuFrontierDeduplicator } from '../../../packages/search-core/src/webgpu-frontier-deduplicator.js';
 import { createWebGpuFrontierNavigator } from '../../../packages/search-core/src/webgpu-frontier-navigator.js';
+import { createWebGpuResidentFrontierState } from '../../../packages/search-core/src/webgpu-resident-frontier-state.js';
 import { createWebGpuDeviceCache } from '../../../packages/search-core/src/webgpu-device-cache.js';
 import { createNavigationCoordinator } from '../../../packages/search-worker/src/navigation-coordinator.js';
 import { search } from './v2-legacy-search.js';
@@ -27,14 +28,16 @@ const frontierTargetPool = createWebGpuFrontierTargetPool({ gpu: globalThis.navi
 const frontierMetrics = createWebGpuFrontierMetrics({ gpu: globalThis.navigator?.gpu, deviceCache });
 const fieldMetrics = createWebGpuFieldMetrics({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierState = createWebGpuLabeledFrontierState({ gpu: globalThis.navigator?.gpu, deviceCache });
+const residentFrontierState = createWebGpuResidentFrontierState({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierTopology = createWebGpuFrontierTopology({ gpu: globalThis.navigator?.gpu });
 const frontierRanker = createWebGpuFrontierRanker({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierCompactor = createWebGpuPersistentFrontierCompactor({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierDeduplicator = createWebGpuFrontierDeduplicator({ gpu: globalThis.navigator?.gpu, deviceCache });
 async function runProductSearch(request, context) {
   const steering = request.steering || {};
+  residentFrontierState.reset();
   const navigation = createNavigationCoordinator({ ticket: request.ticket, cursor: request.cursor });
-  const frontierNavigator = createWebGpuFrontierNavigator({ stateAdapter: frontierState, ticket: request.ticket, cursor: request.cursor, isCancelled: context.isCancelled });
+  const frontierNavigator = createWebGpuFrontierNavigator({ stateAdapter: residentFrontierState, ticket: request.ticket, cursor: request.cursor, isCancelled: context.isCancelled });
   const result = await search(request.pieces, steering.knownCentroidFamilies || [], {
     ...steering,
     knownSignatures: request.knownSignatureHints,

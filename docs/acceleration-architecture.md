@@ -115,6 +115,17 @@ The remaining gate is to make the next beam's parent labels reference the
 resident GPU epoch directly, eliminating the current per-transition label
 materialization rather than merely hiding it behind the navigator.
 
+That parent-reference seam is now implemented by
+`webgpu-resident-frontier-state.js`: a double-buffered resident label pool
+accepts indexed parent states, dispatches bounded batches into the opposite
+generation, and swaps only at `commitLayer`. The product search attaches the
+resulting resident slot/epoch to each beam state, so the next layer submits
+parent indices instead of rebuilding parent labels as its GPU input. The CPU
+arrays remain readback-only parity evidence and final canonical replay data.
+The next active gate is broader GPU ownership of candidate generation,
+target-index joins, and score/metric reductions; those are still CPU-visible
+control decisions even though their parity-gated adapters exist.
+
 The live 5174 runtime receipt for this seam is recorded in
 `docs/receipts/webgpu-deduplicator-runtime-2026-08-10.md`.
 

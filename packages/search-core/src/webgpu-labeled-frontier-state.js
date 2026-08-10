@@ -103,14 +103,15 @@ function setMask(target, offset, cells, grid) {
   }
 }
 
-export function createLabeledFrontierStateCandidate({ parentPlacements, candidate, pieceIds, remainingIds } = {}, grid = DEFAULT_FRONTIER_GRID) {
+export function createLabeledFrontierStateCandidate({ parentPlacements, candidate, pieceIds, remainingIds, parentStateIndex = null } = {}, grid = DEFAULT_FRONTIER_GRID) {
   const normalizedGrid = normalizeGrid(grid), ids = normalizePieceIds(pieceIds), placementList = Array.isArray(parentPlacements) ? parentPlacements : [];
   if (!candidate || !Number.isSafeInteger(candidate.id) || !Array.isArray(candidate.cells) || candidate.cells.length === 0) throw new TypeError('candidate must contain an integer id and non-empty cells');
   const pieceIndex = ids.indexOf(candidate.id);
   if (pieceIndex < 0) throw new RangeError('candidate.id must be present in pieceIds');
   const parentLabelMasks = new Uint32Array(ids.length * normalizedGrid.wordCount);
   for (const placement of placementList) { const index = ids.indexOf(placement?.id); if (index < 0 || !Array.isArray(placement.cells) || placement.cells.length === 0) throw new TypeError('parent placements must use pieceIds and contain cells'); setMask(parentLabelMasks, index * normalizedGrid.wordCount, placement.cells, normalizedGrid); }
-  return Object.freeze({ parentLabelMasks, candidateMask: createFrontierMaskFromCells(candidate.cells, normalizedGrid), candidatePieceIndex: pieceIndex, remainingMask: remainingMask(remainingIds), pieceIds: ids });
+  if (parentStateIndex != null && (!Number.isSafeInteger(parentStateIndex) || parentStateIndex < 0)) throw new TypeError('parentStateIndex must be a non-negative safe integer');
+  return Object.freeze({ parentLabelMasks, candidateMask: createFrontierMaskFromCells(candidate.cells, normalizedGrid), candidatePieceIndex: pieceIndex, remainingMask: remainingMask(remainingIds), pieceIds: ids, ...(parentStateIndex == null ? {} : { parentStateIndex }) });
 }
 
 function normalizeCandidates(candidates, grid) {
