@@ -12,6 +12,7 @@
     "check:frontier-topology": "node --check packages/search-core/src/webgpu-frontier-topology.js && node --check packages/search-core/test/webgpu-frontier-topology.test.js",
     "check:gpu-topology": "npm run check:labeled-frontier-state && npm run check:frontier-topology",
     "test:frontier-deduplicator": "node packages/search-core/test/webgpu-frontier-deduplicator.test.js",
+    "test:persistent-frontier-buffer": "node packages/search-core/test/webgpu-persistent-frontier-buffer.test.js",
     "check:frontier-deduplicator": "node --check packages/search-core/src/webgpu-frontier-deduplicator.js && node --check packages/search-core/test/webgpu-frontier-deduplicator.test.js",
     "bench:v2:prefilter": "node packages/search-worker/bench/prefilter-baseline.mjs",
     "bench:v2:product-search": "node packages/search-worker/bench/product-search-receipts.mjs",

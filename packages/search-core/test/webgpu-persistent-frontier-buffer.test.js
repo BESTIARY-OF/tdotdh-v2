@@ -1,0 +1,23 @@
+import assert from 'node:assert/strict';
+import { FRONTIER_COMPACTION_OPERATION, PersistentFrontierBuffer, PersistentFrontierBufferError, WEBGPU_PERSISTENT_FRONTIER_BUFFER_SCHEMA, webGpuStatus } from '../src/webgpu-persistent-frontier-buffer.js';
+
+const entry = (key, payload = {}) => ({ key, payload });
+const buffer = new PersistentFrontierBuffer({ capacity: 4, entries: [entry('a', { rank: 1 }), entry('b'), entry('a', { rank: 2 })] });
+const first = buffer.read({ limit: 2 });
+assert.deepEqual(first.entries, [entry('a', { rank: 1 }), entry('b')]);
+assert.deepEqual(buffer.read({ cursor: first.cursor }).entries, [entry('a', { rank: 2 })]);
+const payload = buffer.toPersistentPayload(first.cursor);
+assert.deepEqual(PersistentFrontierBuffer.fromPersistentPayload(payload).entries(), buffer.entries());
+assert.throws(() => buffer.enqueue([entry('c'), entry('d')]), error => error.code === 'CAPACITY_EXCEEDED');
+const oracle = buffer.cpuCompactionOracle();
+assert.deepEqual(oracle.entries, [entry('a', { rank: 1 }), entry('b')]);
+const handoff = buffer.prepareGpuCompactionHandoff({ navigator: {} });
+assert.equal(handoff.schema, WEBGPU_PERSISTENT_FRONTIER_BUFFER_SCHEMA);
+assert.equal(handoff.operation, FRONTIER_COMPACTION_OPERATION);
+assert.equal(handoff.webgpu.status, 'unavailable');
+assert.throws(() => buffer.acceptGpuCompactionResult({ ...handoff, kind: 'gpu-compaction-result', inputDigest: handoff.input.digest, entries: [entry('b'), entry('a')] }), error => error instanceof PersistentFrontierBufferError && error.code === 'PARITY_MISMATCH');
+const applied = buffer.acceptGpuCompactionResult({ ...handoff, kind: 'gpu-compaction-result', inputDigest: handoff.input.digest, entries: oracle.entries });
+assert.equal(applied.parity, 'verified');
+assert.equal(buffer.size, 2);
+assert.equal(webGpuStatus({ navigator: { gpu: {} } }).status, 'available');
+console.log('WebGPU persistent frontier buffer tests passed');
