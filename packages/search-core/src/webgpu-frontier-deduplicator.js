@@ -6,20 +6,52 @@ export const MAX_FRONTIER_DEDUP_ROWS = 4096;
 export const FRONTIER_DEDUP_WORKGROUP_SIZE = 64;
 
 export const DEFAULT_SHADER = `
-struct Params { rowCount: u32, reserved0: u32, reserved1: u32, reserved2: u32, };
+struct Params { rowCount: u32, tableMask: u32, reserved0: u32, reserved1: u32, };
 @group(0) @binding(0) var<storage, read> hashes: array<u32>;
-@group(0) @binding(1) var<storage, read_write> keep: array<u32>;
-@group(0) @binding(2) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read_write> table: array<atomic<u32>>;
+@group(0) @binding(2) var<storage, read> fingerprints: array<vec4<u32>>;
+@group(0) @binding(3) var<uniform> params: Params;
 
 @compute @workgroup_size(${FRONTIER_DEDUP_WORKGROUP_SIZE})
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let index = id.x;
   if (index >= params.rowCount) { return; }
-  var retained = true;
-  for (var previous = 0u; previous < index; previous++) {
-    if (hashes[previous] == hashes[index]) { retained = false; break; }
+  var slot = hashes[index] & params.tableMask;
+  let fingerprint = fingerprints[index];
+  loop {
+    let prior = atomicLoad(&table[slot]);
+    if (prior == 0u) {
+      let claimed = atomicCompareExchangeWeak(&table[slot], 0u, index + 1u);
+      if (claimed.exchanged) { break; }
+    } else {
+      let priorIndex = prior - 1u;
+      let priorFingerprint = fingerprints[priorIndex];
+      if (all(priorFingerprint == fingerprint)) { atomicMin(&table[slot], index + 1u); break; }
+    }
+    slot = (slot + 1u) & params.tableMask;
   }
-  keep[index] = select(0u, 1u, retained);
+}`;
+export const FINALIZE_SHADER = `
+struct Params { rowCount: u32, tableMask: u32, reserved0: u32, reserved1: u32, };
+@group(0) @binding(0) var<storage, read> hashes: array<u32>;
+@group(0) @binding(1) var<storage, read_write> table: array<atomic<u32>>;
+@group(0) @binding(2) var<storage, read> fingerprints: array<vec4<u32>>;
+@group(0) @binding(3) var<storage, read_write> keep: array<u32>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+@compute @workgroup_size(${FRONTIER_DEDUP_WORKGROUP_SIZE})
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let index = id.x;
+  if (index >= params.rowCount) { return; }
+  var slot = hashes[index] & params.tableMask;
+  let fingerprint = fingerprints[index];
+  loop {
+    let prior = atomicLoad(&table[slot]);
+    if (prior == 0u) { keep[index] = 0u; break; }
+    let priorFingerprint = fingerprints[prior - 1u];
+    if (all(priorFingerprint == fingerprint)) { keep[index] = select(0u, 1u, prior == index + 1u); break; }
+    slot = (slot + 1u) & params.tableMask;
+  }
 }`;
 
 function normalizeRows(rows) {
@@ -28,8 +60,20 @@ function normalizeRows(rows) {
     const hash = Number(row?.hash), signature = row?.signature;
     if (!Number.isSafeInteger(hash) || hash < 0 || hash > 0xffffffff) throw new TypeError(`frontier dedup row ${index}.hash must be a uint32`);
     if (typeof signature !== 'string' || !signature) throw new TypeError(`frontier dedup row ${index}.signature must be a non-empty string`);
-    return Object.freeze({ hash: hash >>> 0, signature });
+    return Object.freeze({ hash: hash >>> 0, signature, fingerprint: signatureFingerprint(signature) });
   });
+}
+
+function signatureFingerprint(signature) {
+  let a = 2166136261, b = 374761393, c = 668265263, d = 2246822519;
+  for (let index = 0; index < signature.length; index++) {
+    const code = signature.charCodeAt(index), salt = (code + index) >>> 0;
+    a = Math.imul(a ^ code, 16777619) >>> 0;
+    b = Math.imul(b ^ salt, 3266489917) >>> 0;
+    c = Math.imul(c ^ ((code << 1) | (code >>> 15)), 2246822519) >>> 0;
+    d = Math.imul(d ^ (salt ^ (a >>> 13)), 668265263) >>> 0;
+  }
+  return Object.freeze([a >>> 0, b >>> 0, c >>> 0, d >>> 0]);
 }
 
 export function cpuDeduplicateFrontierStates(rows) {
@@ -46,30 +90,44 @@ function unavailable(reason, cpu) {
 }
 
 async function runGpu(device, rows, shaderSource) {
-  const bytes = Math.max(4, rows.length * 4);
+  const bytes = Math.max(4, rows.length * 4), tableSize = nextPowerOfTwo(Math.max(2, rows.length * 2)), tableBytes = tableSize * 4;
   const hashes = device.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   const keep = device.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  const table = device.createBuffer({ size: tableBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  const fingerprints = device.createBuffer({ size: Math.max(16, rows.length * 16), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   const params = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const readback = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
   try {
     device.queue.writeBuffer(hashes, 0, Uint32Array.from(rows, row => row.hash));
-    device.queue.writeBuffer(params, 0, new Uint32Array([rows.length, 0, 0, 0]));
+    device.queue.writeBuffer(fingerprints, 0, Uint32Array.from(rows.flatMap(row => row.fingerprint)));
+    device.queue.writeBuffer(table, 0, new Uint32Array(tableSize));
+    device.queue.writeBuffer(params, 0, new Uint32Array([rows.length, tableSize - 1, 0, 0]));
     const module = device.createShaderModule({ code: shaderSource });
     const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
-    const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: hashes } }, { binding: 1, resource: { buffer: keep } }, { binding: 2, resource: { buffer: params } }] });
+    const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: hashes } }, { binding: 1, resource: { buffer: table } }, { binding: 2, resource: { buffer: fingerprints } }, { binding: 3, resource: { buffer: params } }] });
     const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
     pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(rows.length / FRONTIER_DEDUP_WORKGROUP_SIZE)); pass.end();
-    encoder.copyBufferToBuffer(keep, 0, readback, 0, bytes);
     device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+
+    const finalizeModule = device.createShaderModule({ code: FINALIZE_SHADER });
+    const finalizePipeline = device.createComputePipeline({ layout: 'auto', compute: { module: finalizeModule, entryPoint: 'main' } });
+    const finalizeGroup = device.createBindGroup({ layout: finalizePipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: hashes } }, { binding: 1, resource: { buffer: table } }, { binding: 2, resource: { buffer: fingerprints } }, { binding: 3, resource: { buffer: keep } }, { binding: 4, resource: { buffer: params } }] });
+    const finalizeEncoder = device.createCommandEncoder(), finalizePass = finalizeEncoder.beginComputePass();
+    finalizePass.setPipeline(finalizePipeline); finalizePass.setBindGroup(0, finalizeGroup); finalizePass.dispatchWorkgroups(Math.ceil(rows.length / FRONTIER_DEDUP_WORKGROUP_SIZE)); finalizePass.end();
+    finalizeEncoder.copyBufferToBuffer(keep, 0, readback, 0, bytes);
+    device.queue.submit([finalizeEncoder.finish()]);
     await device.queue.onSubmittedWorkDone();
     await readback.mapAsync(GPUMapMode.READ);
     const result = Array.from(new Uint32Array(readback.getMappedRange().slice(0, rows.length * 4)));
     readback.unmap();
     return result;
   } finally {
-    for (const buffer of [hashes, keep, params, readback]) buffer.destroy();
+    for (const buffer of [hashes, keep, table, fingerprints, params, readback]) buffer.destroy();
   }
 }
+
+function nextPowerOfTwo(value) { let result = 1; while (result < value) result *= 2; return result; }
 
 export function createWebGpuFrontierDeduplicator({ gpu = globalThis.navigator?.gpu, requiredLimits = { maxComputeWorkgroupSizeX: FRONTIER_DEDUP_WORKGROUP_SIZE }, shaderSource = DEFAULT_SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
   if (typeof shaderSource !== 'string' || !shaderSource.trim()) throw new TypeError('shaderSource must be a non-empty string');
@@ -88,7 +146,7 @@ export function createWebGpuFrontierDeduplicator({ gpu = globalThis.navigator?.g
       try {
         const gpuKeep = await runGpu(await deviceCache.getDevice(), normalized, shaderSource);
         if (JSON.stringify(gpuKeep) !== JSON.stringify(cpu.keep)) return unavailable('oracle-parity-mismatch', cpu);
-        return Object.freeze({ ...cpu, status: 'completed', backend: 'webgpu', parity: 'verified' });
+        return Object.freeze({ ...cpu, status: 'completed', backend: 'webgpu', parity: 'verified', algorithm: 'stable-open-addressing-fingerprint-min' });
       } catch (error) {
         deviceCache.reset();
         return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, cpu);

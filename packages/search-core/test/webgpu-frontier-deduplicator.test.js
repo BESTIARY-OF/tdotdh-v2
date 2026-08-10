@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { cpuDeduplicateFrontierStates, createWebGpuFrontierDeduplicator, DEFAULT_SHADER, WEBGPU_FRONTIER_DEDUPLICATOR_SCHEMA } from '../src/webgpu-frontier-deduplicator.js';
 
 assert.match(DEFAULT_SHADER, /var<storage, read> hashes/);
-assert.match(DEFAULT_SHADER, /hashes\[previous\] == hashes\[index\]/);
+assert.match(DEFAULT_SHADER, /table: array<atomic<u32>>/);
+assert.match(DEFAULT_SHADER, /atomicCompareExchangeWeak/);
+assert.match(DEFAULT_SHADER, /atomicMin/);
 
 const rows = [
   { hash: 11, signature: 'a' },
