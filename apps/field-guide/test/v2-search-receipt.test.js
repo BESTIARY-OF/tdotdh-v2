@@ -7,6 +7,7 @@ import { cpuEvaluateFieldMetrics } from '../../../packages/search-core/src/webgp
 import { cpuGenerateFrontierTargetBatch } from '../../../packages/search-core/src/webgpu-frontier-target-generator.js';
 import { cpuGenerateFrontierTargetPoolBatch } from '../../../packages/search-core/src/webgpu-frontier-target-pool.js';
 import { cpuDeduplicateFrontierStates } from '../../../packages/search-core/src/webgpu-frontier-deduplicator.js';
+import { cpuCompactFrontierRows } from '../../../packages/search-core/src/webgpu-frontier-compactor.js';
 
 globalThis.postMessage = () => {};
 
@@ -68,6 +69,9 @@ const frontierTargetPool = {
 const frontierTopology = {
   evaluate: async input => ({ ...cpuFrontierTopology(input), backend: 'test-frontier-topology', parity: 'verified' }),
 };
+const frontierCompactor = {
+  compact: async (rows, retain) => ({ ...cpuCompactFrontierRows(rows, retain), backend: 'test-frontier-compactor', parity: 'verified', algorithm: 'test-top-k' }),
+};
 let frontierDeduplicatorCalls = 0;
 const frontierDeduplicator = {
   availability: async () => ({ status: 'available', backend: 'webgpu' }),
@@ -92,6 +96,7 @@ const singleResult = await search(pieces, [], { ...sharedOptions, frontierGenera
 const result = await search(pieces, [], { ...sharedOptions, frontierGenerator });
 const targetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator });
 const targetPoolResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator, frontierTargetPool });
+const depthResult = await search(pieces, [], { ...sharedOptions, searchStrategy: 'depth', frontierCompactor });
 let checkpointCursor = null;
 const checkpointResult = await search(pieces, [], { ...sharedOptions, frontierGenerator, reportProgress: progress => { checkpointCursor = progress.cursor; } });
 assert.ok(checkpointCursor?.checkpoint);
@@ -145,6 +150,9 @@ assert.deepEqual(targetResult.metrics, result.metrics);
 assert.equal(targetPoolResult.frontierTargetPool.status, 'used');
 assert.equal(targetPoolResult.frontierTargetPool.backend, 'test-frontier-target-pool');
 assert.equal(targetPoolResult.frontierTargetPool.batch, 'beam');
+assert.equal(depthResult.frontierCompactor.status, 'used');
+assert.equal(depthResult.frontierCompactor.backend, 'test-frontier-compactor');
+assert.equal(depthResult.frontierCompactor.parity, 'verified');
 assert.ok(frontierDeduplicatorCalls > 0);
 assert.equal(targetPoolResult.frontierDedup.status, 'used');
 assert.equal(targetPoolResult.frontierDedup.backend, 'test-frontier-deduplicator');
