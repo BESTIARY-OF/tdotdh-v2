@@ -37,6 +37,21 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function orderCandidateIndices(request, candidates) {
+  const candidateDepths = request.constraints?.candidateDepths;
+  if (candidateDepths == null) return { indices: candidates.map((_, index) => index), depthAware: false, depths: null };
+  if (!Array.isArray(candidateDepths) || candidateDepths.length !== candidates.length) {
+    throw new TypeError('constraints.candidateDepths must match candidateArrangements length');
+  }
+  const depths = candidateDepths.map((depth, index) => {
+    if (!Number.isSafeInteger(depth) || depth < 0) throw new TypeError(`constraints.candidateDepths[${index}] must be a non-negative safe integer`);
+    return depth;
+  });
+  const direction = request.mode === 'breadth' ? 1 : -1;
+  const indices = candidates.map((_, index) => index).sort((a, b) => direction * (depths[a] - depths[b]) || a - b);
+  return { indices, depthAware: true, depths };
+}
+
 /**
  * Run a bounded deterministic CPU batch over candidate arrangements.
  *
@@ -51,11 +66,13 @@ export async function runCpuOracleBatch(input, { reportProgress = () => {}, isCa
   const workCursor = protocolCursorToWorkCursor(request.cursor, request.ticket, { runSeed: request.seed });
   const candidates = request.constraints?.candidateArrangements;
   if (!Array.isArray(candidates)) throw new TypeError('constraints.candidateArrangements must be an array');
+  const traversal = orderCandidateIndices(request, candidates);
 
   const startedAt = now();
   const deadline = startedAt + request.budget.maxMilliseconds;
   const start = request.cursor.nodeOffset;
   const limit = Math.min(request.budget.maxNodes, candidates.length - start);
+  const candidateIndices = traversal.indices.slice(start, start + limit);
   let prefilterReceipt = null;
   let validity = null;
   if (candidatePrefilter?.prefilter && typeof candidatePrefilter.prefilter === 'function') {
@@ -73,7 +90,9 @@ export async function runCpuOracleBatch(input, { reportProgress = () => {}, isCa
   let terminationStatus = 'completed';
   const cursorAt = nodeCursor => workCursorToProtocolCursor({ ...workCursor, nodeCursor });
 
-  for (let index = 0; index < limit; index += 1) {
+  for (let index = 0; index < candidateIndices.length; index += 1) {
+    const candidateIndex = candidateIndices[index];
+    const candidateDepth = traversal.depths?.[candidateIndex] ?? request.cursor.depth;
     if (isCancelled()) {
       terminationStatus = 'cancelled';
       break;
@@ -82,20 +101,20 @@ export async function runCpuOracleBatch(input, { reportProgress = () => {}, isCa
       terminationStatus = 'time-budget';
       break;
     }
-    if (validity && validity[start + index] !== 1) {
+    if (validity && validity[candidateIndex] !== 1) {
       nodes += 1;
-      reportProgress({ nodes, depth: request.cursor.depth, frontier: 0, families: signatures.length, cursor: cursorAt(start + index + 1) });
+      reportProgress({ nodes, depth: candidateDepth, frontier: 0, families: signatures.length, cursor: cursorAt(start + index + 1) });
       await Promise.resolve();
       continue;
     }
-    const placements = clone(candidates[start + index]);
+    const placements = clone(candidates[candidateIndex]);
     const signature = canonicalPlacementSignature(placements);
     if (!signatures.includes(signature) && !request.knownSignatureHints.includes(signature)) {
       signatures.push(signature);
       if (selectedPlacements.length === 0) selectedPlacements = placements;
     }
     nodes += 1;
-    reportProgress({ nodes, depth: request.cursor.depth, frontier: 0, families: signatures.length, cursor: cursorAt(start + index + 1) });
+    reportProgress({ nodes, depth: candidateDepth, frontier: 0, families: signatures.length, cursor: cursorAt(start + index + 1) });
     await Promise.resolve();
   }
 
@@ -106,6 +125,7 @@ export async function runCpuOracleBatch(input, { reportProgress = () => {}, isCa
     cursor: cursorAt(start + nodes),
     ticket: { ...request.ticket },
     cancelled: isCancelled(),
+    traversal: { mode: request.mode, depthAware: traversal.depthAware },
     termination: {
       status: terminationStatus,
       elapsedMilliseconds: Math.max(0, now() - startedAt),

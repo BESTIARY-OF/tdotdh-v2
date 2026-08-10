@@ -22,6 +22,20 @@ const request = createSearchRequest({
   constraints: { candidateArrangements: [first, equivalent, [{ pieceId: 3, cells: [{ x: 2, y: 2 }] }]] },
   knownSignatureHints: [],
 });
+const breadthRequest = createSearchRequest({
+  ...request,
+  requestId: 'runner-breadth',
+  mode: 'breadth',
+  constraints: {
+    candidateArrangements: [first, equivalent, [{ pieceId: 3, cells: [{ x: 2, y: 2 }] }]],
+    candidateDepths: [2, 0, 1],
+  },
+});
+const breadthResult = await runCpuOracleBatch({ ...breadthRequest, budget: { ...breadthRequest.budget, maxNodes: 1 } });
+assert.equal(breadthResult.traversal.depthAware, true);
+assert.deepEqual(breadthResult.placements, equivalent);
+const depthResult = await runCpuOracleBatch({ ...request, constraints: { ...request.constraints, candidateDepths: [2, 0, 1] }, budget: { ...request.budget, maxNodes: 1 } });
+assert.deepEqual(depthResult.placements, first);
 const progress = [];
 const result = await runCpuOracleBatch(request, { reportProgress: value => progress.push(value) });
 assert.deepEqual(result.ticket, request.ticket);
