@@ -97,6 +97,7 @@ const result = await search(pieces, [], { ...sharedOptions, frontierGenerator })
 const targetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator });
 const targetPoolResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator, frontierTargetPool });
 const depthResult = await search(pieces, [], { ...sharedOptions, searchStrategy: 'depth', frontierCompactor });
+const breadthResult = await search(pieces, [], { ...sharedOptions, searchStrategy: 'breadth', frontierCompactor });
 let checkpointCursor = null;
 const checkpointResult = await search(pieces, [], { ...sharedOptions, frontierGenerator, reportProgress: progress => { checkpointCursor = progress.cursor; } });
 assert.ok(checkpointCursor?.checkpoint);
@@ -153,6 +154,9 @@ assert.equal(targetPoolResult.frontierTargetPool.batch, 'beam');
 assert.equal(depthResult.frontierCompactor.status, 'used');
 assert.equal(depthResult.frontierCompactor.backend, 'test-frontier-compactor');
 assert.equal(depthResult.frontierCompactor.parity, 'verified');
+assert.equal(breadthResult.frontierCompactor.status, 'used');
+assert.equal(breadthResult.frontierCompactor.batch, 'breadth-quota');
+assert.equal(breadthResult.frontierCompactor.backend, 'test-frontier-compactor');
 assert.ok(frontierDeduplicatorCalls > 0);
 assert.equal(targetPoolResult.frontierDedup.status, 'used');
 assert.equal(targetPoolResult.frontierDedup.backend, 'test-frontier-deduplicator');

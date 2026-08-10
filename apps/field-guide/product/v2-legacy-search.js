@@ -1024,7 +1024,15 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       for (const { state } of compactedBeam) { retained.push(state); retainedSet.add(state); seedCounts.set(state.centroidFamilyId, (seedCounts.get(state.centroidFamilyId) || 0) + 1); }
     } else {
       const seedQuota = searchStrategy === 'breadth' ? 3 : 8;
-      for (let round = 0; round < seedQuota && retained.length < BEAM_LIMIT; round++) for (const bucket of orderedBuckets) {
+      if (searchStrategy === 'breadth') {
+        const quotaRows = [];
+        for (let round = 0; round < seedQuota; round++) for (const [bucketIndex, bucket] of orderedBuckets.entries()) {
+          const state = bucket[round]; if (!state) continue;
+          quotaRows.push({ state, score: round * 4096 + bucketIndex, tie: quotaRows.length });
+        }
+        const compactedQuota = await compactFrontierRows(quotaRows, BEAM_LIMIT, frontierCompactor, receipt => { frontierCompactorReceipt = { ...receipt, batch: 'breadth-quota' }; });
+        for (const { state } of compactedQuota) { retained.push(state); retainedSet.add(state); seedCounts.set(state.centroidFamilyId, (seedCounts.get(state.centroidFamilyId) || 0) + 1); }
+      } else for (let round = 0; round < seedQuota && retained.length < BEAM_LIMIT; round++) for (const bucket of orderedBuckets) {
         const state = bucket[round]; if (!state || retained.length >= BEAM_LIMIT) continue;
         retained.push(state); retainedSet.add(state); seedCounts.set(state.centroidFamilyId, (seedCounts.get(state.centroidFamilyId) || 0) + 1);
       }

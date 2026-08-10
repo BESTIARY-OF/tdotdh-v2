@@ -65,12 +65,12 @@ The search receipt calls this `GPU deterministic ranking`; unavailable or
 device-capacity-limited batches use the same CPU comparator without changing
 beam semantics.
 
-Depth-mode beam retention has a separate `webgpu-frontier-compactor.v0` contract.
-The bitonic shader returns only the deterministic top-K state indices, and the
-CPU oracle compares that bounded result before state remapping. Breadth mode is
-intentionally not routed through this seam: its family-quota policy is a
-semantic selection rule, not ordinary top-K ranking, and remains the next
-GPU-owned policy boundary.
+Beam retention has a separate `webgpu-frontier-compactor.v0` contract. In depth
+mode the bitonic shader returns the deterministic top-K state indices. In
+breadth mode the CPU derives the existing family round-robin policy as stable
+`(round, bucket-order)` keys, and the same shader selects its bounded quota
+without changing the policy. The CPU oracle compares every bounded result
+before state remapping.
 
 The next field-wide seam is now explicit as `webgpu-field-metrics.v0`. For every
 surviving branch it batches the occupied and centroid masks and computes the
