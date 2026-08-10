@@ -869,6 +869,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const navigationCancellation = typeof options.navigationCancellation === 'function' ? options.navigationCancellation : null;
   const navigationTicket = options.navigationTicket || null;
   const navigationCursor = options.navigationCursor || null;
+  const navigationExpansionBackend = frontierTargetGeneratorStatus?.status === 'available' ? 'webgpu' : frontierGeneratorStatus?.status === 'available' ? 'webgpu' : 'cpu-oracle';
   const reportProgress = typeof options.reportProgress === 'function'
     ? options.reportProgress
     : progress => postMessage({ type: 'progress', ...progress });
@@ -909,7 +910,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     const cancelled = isCancelled();
     if (navigationCancellation) navigationCancellation(cancelled);
     if (cancelled) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierDedup: frontierDedupReceipt };
-    const navigationBatchReceipt = navigationBatch?.({ stage: 'frontier-expansion', depth, nodeOffset: restoredNodeOffset + nodes, candidateCount: beam.length });
+    const navigationBatchReceipt = navigationBatch?.({ stage: 'frontier-expansion', backend: navigationExpansionBackend, ownership: navigationExpansionBackend === 'webgpu' ? 'gpu-first' : 'cpu-oracle-fallback', depth, nodeOffset: restoredNodeOffset + nodes, candidateCount: beam.length });
     const nextBeam = [];
     const gpuStateBuckets = new Map();
     const cpuStateKeys = new Set();

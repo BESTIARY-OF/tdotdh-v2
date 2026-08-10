@@ -32,6 +32,11 @@ function requireStage(value) {
   return value;
 }
 
+function requireLabel(value, name) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 96) throw new TypeError(`${name} must be a non-empty string of at most 96 characters`);
+  return value;
+}
+
 /** Owns the product-search lifecycle receipt without owning search topology. */
 export function createNavigationCoordinator({ ticket, cursor = {} } = {}) {
   if (!ticket || typeof ticket !== 'object') throw new TypeError('navigation ticket is required');
@@ -50,9 +55,10 @@ export function createNavigationCoordinator({ ticket, cursor = {} } = {}) {
     return latestCursor;
   };
 
-  const beginBatch = ({ stage, depth = latestCursor.depth, nodeOffset = latestCursor.nodeOffset, candidateCount = 0 } = {}) => {
+  const beginBatch = ({ stage, backend = 'webgpu', ownership = 'gpu-first', depth = latestCursor.depth, nodeOffset = latestCursor.nodeOffset, candidateCount = 0 } = {}) => {
     const nextCursor = normalizeCursor({ ...latestCursor, depth: Math.max(latestCursor.depth, integer(depth, 'batch.depth')), nodeOffset: Math.max(latestCursor.nodeOffset, integer(nodeOffset, 'batch.nodeOffset')) });
-    const receipt = Object.freeze({ schema: NAVIGATION_COORDINATOR_SCHEMA, ordinal: batchCount, stage: requireStage(stage), ticket: Object.freeze({ ...stableTicket, batchOrdinal: batchCount, stage: requireStage(stage) }), cursor: nextCursor, candidateCount: integer(candidateCount, 'batch.candidateCount') });
+    const normalizedStage = requireStage(stage), normalizedBackend = requireLabel(backend, 'navigation batch backend'), normalizedOwnership = requireLabel(ownership, 'navigation batch ownership');
+    const receipt = Object.freeze({ schema: NAVIGATION_COORDINATOR_SCHEMA, ordinal: batchCount, stage: normalizedStage, backend: normalizedBackend, ownership: normalizedOwnership, ticket: Object.freeze({ ...stableTicket, batchOrdinal: batchCount, stage: normalizedStage, backend: normalizedBackend }), cursor: nextCursor, candidateCount: integer(candidateCount, 'batch.candidateCount') });
     batchCount += 1;
     return receipt;
   };
@@ -66,6 +72,9 @@ export function createNavigationCoordinator({ ticket, cursor = {} } = {}) {
     const resultCursor = result?.cursor ? observeProgress(result.cursor) : latestCursor;
     const placements = Array.isArray(result?.placements) && result.placements.length ? result.placements : null;
     const canonicalSignature = placements ? canonicalPlacementSignature(placements) : null;
+    const expansion = result?.frontierTargetGeneration?.status === 'used' ? result.frontierTargetGeneration : result?.frontierGeneration?.status === 'used' ? result.frontierGeneration : null;
+    const expansionBackend = expansion?.backend || 'cpu-oracle';
+    const expansionParity = expansion?.parity || 'oracle';
     return Object.freeze({
       schema: NAVIGATION_COORDINATOR_SCHEMA,
       status: placements ? 'completed' : resultCursor.checkpoint ? 'checkpointed' : 'exhausted',
@@ -75,6 +84,10 @@ export function createNavigationCoordinator({ ticket, cursor = {} } = {}) {
       progressCount,
       batchCount,
       cancellationChecks,
+      expansionBackend,
+      expansionParity,
+      expansionOwnership: expansionBackend === 'webgpu' && expansionParity === 'verified' ? 'gpu-owned' : 'cpu-oracle-fallback',
+      gpuExpansionBatches: expansionBackend === 'webgpu' && expansionParity === 'verified' ? batchCount : 0,
       canonicalReplay: placements ? 'verified' : 'not-run',
       ...(canonicalSignature ? { canonicalSignature } : {}),
     });

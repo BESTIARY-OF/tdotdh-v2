@@ -7,6 +7,7 @@ import { cpuFrontierTopology } from '../../../packages/search-core/src/webgpu-fr
 import { cpuGenerateFrontierTargetBatch } from '../../../packages/search-core/src/webgpu-frontier-target-generator.js';
 import { cpuGenerateFrontierTargetPoolBatch } from '../../../packages/search-core/src/webgpu-frontier-target-pool.js';
 import { cpuCompactFrontierRows } from '../../../packages/search-core/src/webgpu-frontier-compactor.js';
+import { createNavigationCoordinator } from '../src/navigation-coordinator.js';
 
 globalThis.postMessage = () => {};
 
@@ -135,8 +136,13 @@ async function run(mode, options = {}) {
   const frontierTargetPool = createBenchFrontierTargetPool();
   const frontierTopology = createBenchFrontierTopology();
   const frontierCompactor = createBenchFrontierCompactor();
+  const navigation = createNavigationCoordinator({
+    ticket: { presetFingerprint: 'SEDLEC-00Q_ISLAND-001', familyId: `bench-${mode}`, pass: 0, threadId: 0 },
+    cursor: { depth: 0, nodeOffset: 0, rootChoice: 0 },
+  });
   const started = performance.now();
-  const result = await search(pieces, [], { searchStrategy: mode, candidatePrefilter, frontierMetrics, fieldMetrics, frontierState, frontierTargetGenerator, frontierTargetPool, frontierTopology, frontierCompactor, ...options });
+  const result = await search(pieces, [], { searchStrategy: mode, candidatePrefilter, frontierMetrics, fieldMetrics, frontierState, frontierTargetGenerator, frontierTargetPool, frontierTopology, frontierCompactor, navigationBatch: details => navigation.beginBatch(details), navigationCancellation: cancelled => navigation.observeCancellation(cancelled), reportProgress: progress => navigation.observeProgress(progress.cursor), ...options });
+  const navigationReceipt = navigation.complete(result);
   return {
     mode,
     elapsedMs: Number((performance.now() - started).toFixed(2)),
@@ -151,6 +157,7 @@ async function run(mode, options = {}) {
     frontierTargetPool: frontierTargetPool.receipt,
     frontierTopology: frontierTopology.receipt,
     frontierCompactor: frontierCompactor.receipt,
+    navigation: navigationReceipt,
     result,
   };
 }
