@@ -72,7 +72,7 @@ async function runGpu(device, rows, shaderSource) {
   } finally { for (const buffer of [inputScores, inputTies, outputIndices, params, readback]) buffer.destroy(); }
 }
 
-export function createWebGpuFrontierRanker({ gpu = globalThis.navigator?.gpu, requiredLimits = { maxStorageBufferBindingSize: MAX_FRONTIER_RANK_ROWS * 4 }, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
+export function createWebGpuFrontierRanker({ gpu = globalThis.navigator?.gpu, requiredLimits = { maxStorageBufferBindingSize: MAX_FRONTIER_RANK_ROWS * 4, maxComputeWorkgroupSizeX: MAX_FRONTIER_RANK_ROWS }, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
   const limits = { ...requiredLimits }; let availabilityPromise = null;
   const fallback = (reason, rows) => Object.freeze({ ...cpuRankFrontierRows(rows), schema: WEBGPU_FRONTIER_RANKER_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: String(reason) });
   const availability = async () => {
