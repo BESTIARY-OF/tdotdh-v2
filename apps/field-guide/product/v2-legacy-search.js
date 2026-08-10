@@ -419,7 +419,9 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         const noveltyBonus = searchStrategy === 'breadth' && !targetFamily && familyIsNew ? -220 : 0;
         const neighborTargetBonus = targetNeighborCount == null ? 0 : (candidateMetrics.centroidNeighborCount === targetNeighborCount ? -600 : Math.abs(candidateMetrics.centroidNeighborCount - targetNeighborCount) * 80);
         const qualityPenalty = searchQualityPenalty(candidateMetrics, quality) / 100000;
-        return { piece, candidate, score: openCentroid * 40 + (nextBounds.maxX - nextBounds.minX + 1) * (nextBounds.maxY - nextBounds.minY + 1) - contact * 2.4 - centroidContact * 2 - ringCoverage * 8 + targetBonus + noveltyBonus + neighborTargetBonus + hintBonus + qualityPenalty + random() * 12, nextBounds, hintMatches };
+        const gpuGeometryScore = Number.isFinite(candidate.gpuScore) ? candidate.gpuScore / 1000000 : null;
+        const geometryScore = gpuGeometryScore ?? (openCentroid * 40 + (nextBounds.maxX - nextBounds.minX + 1) * (nextBounds.maxY - nextBounds.minY + 1) - contact * 2.4 - centroidContact * 2 - ringCoverage * 8);
+        return { piece, candidate, score: geometryScore + targetBonus + noveltyBonus + neighborTargetBonus + hintBonus + qualityPenalty + random() * 12, nextBounds, hintMatches };
       }).filter(Boolean).sort((a, b) => a.score - b.score).slice(0, BRANCH_LIMIT);
       for (const option of ranked) {
         const placements = [...state.placements, option.candidate], metrics = fieldMetrics(placements, centroidId), field = new Set(state.field); option.candidate.cells.forEach(c => field.add(key(c.x, c.y)));

@@ -31,4 +31,5 @@ devices.
 This slice moves candidate generation and deterministic compaction onto the
 accelerator boundary. Metrics, ordered deduplication, beam policy, and the CPU
 oracle remain outside the GPU until the next GPU-resident scoring/navigation
-slice.
+slice; when the GPU evaluator returns a parity-verified score, that score now
+feeds the beam geometry ranker, while CPU fallback retains the prior ranker.
