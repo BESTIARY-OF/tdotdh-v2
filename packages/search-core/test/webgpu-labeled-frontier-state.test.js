@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createLabeledFrontierStateCandidate, cpuTransitionLabeledFrontierStates, createWebGpuLabeledFrontierState, WEBGPU_LABELED_FRONTIER_STATE_SCHEMA } from '../src/webgpu-labeled-frontier-state.js';
+import { canonicalSignatureFromLabeledFrontierState, createLabeledFrontierStateCandidate, cpuTransitionLabeledFrontierStates, createWebGpuLabeledFrontierState, WEBGPU_LABELED_FRONTIER_STATE_SCHEMA } from '../src/webgpu-labeled-frontier-state.js';
 
 const candidate = createLabeledFrontierStateCandidate({
   pieceIds: [3, 49, 97],
@@ -15,6 +15,7 @@ assert.equal(cpu.nextLabels.length, 3 * 128);
 assert.equal(cpu.canonicalLabels.length, 3 * 128);
 assert.equal(cpu.absoluteHashes.length, 1);
 assert.notEqual(cpu.absoluteHashes[0], cpu.canonicalHashes[0]);
+assert.equal(canonicalSignatureFromLabeledFrontierState({ pieceIds: cpu.pieceIds, canonicalLabels: cpu.canonicalLabels, wordCount: cpu.wordCount }), '3:0,0|49:1,0|97:0,1');
 
 const unavailable = await createWebGpuLabeledFrontierState({ gpu: null }).transition([candidate]);
 assert.equal(unavailable.status, 'unavailable');

@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { search } from '../../../apps/field-guide/product/v2-legacy-search.js';
 import { cpuEvaluateFrontierMetrics } from '../../../packages/search-core/src/webgpu-frontier-metrics.js';
 import { cpuTransitionLabeledFrontierStates } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
+import { cpuFrontierTopology } from '../../../packages/search-core/src/webgpu-frontier-topology.js';
 
 globalThis.postMessage = () => {};
 
@@ -51,12 +52,24 @@ function createBenchFrontierState() {
   };
 }
 
+function createBenchFrontierTopology() {
+  const receipt = { evaluations: 0 };
+  return {
+    receipt,
+    evaluate: async input => {
+      receipt.evaluations += 1;
+      return { ...cpuFrontierTopology(input), backend: 'benchmark', parity: 'verified' };
+    },
+  };
+}
+
 async function run(mode, options = {}) {
   const candidatePrefilter = createBenchPrefilter();
   const frontierMetrics = createBenchFrontierMetrics();
   const frontierState = createBenchFrontierState();
+  const frontierTopology = createBenchFrontierTopology();
   const started = performance.now();
-  const result = await search(pieces, [], { searchStrategy: mode, candidatePrefilter, frontierMetrics, frontierState, ...options });
+  const result = await search(pieces, [], { searchStrategy: mode, candidatePrefilter, frontierMetrics, frontierState, frontierTopology, ...options });
   return {
     mode,
     elapsedMs: Number((performance.now() - started).toFixed(2)),
@@ -66,6 +79,7 @@ async function run(mode, options = {}) {
     ...candidatePrefilter.receipt,
     frontierMetrics: frontierMetrics.receipt,
     frontierState: frontierState.receipt,
+    frontierTopology: frontierTopology.receipt,
     result,
   };
 }

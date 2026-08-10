@@ -155,6 +155,24 @@ export function cpuTransitionLabeledFrontierStates(candidates, grid = DEFAULT_FR
   return Object.freeze({ schema: WEBGPU_LABELED_FRONTIER_STATE_SCHEMA, status: 'completed', backend: 'cpu-oracle', pieceIds, nextLabels, canonicalLabels, absoluteHashes, canonicalHashes, candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, pieceCount: pieceIds.length, parity: 'oracle' });
 }
 
+export function canonicalSignatureFromLabeledFrontierState({ pieceIds, canonicalLabels, wordCount, grid = DEFAULT_FRONTIER_GRID } = {}) {
+  if (!Array.isArray(pieceIds) || !Array.isArray(canonicalLabels) || !Number.isSafeInteger(wordCount) || wordCount <= 0) throw new TypeError('pieceIds, canonicalLabels, and wordCount are required');
+  if (canonicalLabels.length !== pieceIds.length * wordCount) throw new RangeError('canonicalLabels length does not match pieceIds and wordCount');
+  const normalizedGrid = { ...DEFAULT_FRONTIER_GRID, ...grid };
+  return pieceIds.map((pieceId, pieceIndex) => {
+    const cells = [];
+    for (let wordIndex = 0; wordIndex < wordCount; wordIndex++) {
+      let word = canonicalLabels[pieceIndex * wordCount + wordIndex] >>> 0;
+      while (word) {
+        const bitOffset = 31 - Math.clz32(word), bit = wordIndex * 32 + bitOffset;
+        if (bit < normalizedGrid.width * normalizedGrid.height) cells.push(`${bit % normalizedGrid.width},${Math.floor(bit / normalizedGrid.width)}`);
+        word = (word & ~(1 << bitOffset)) >>> 0;
+      }
+    }
+    return `${pieceId}:${cells.sort().join(';')}`;
+  }).join('|');
+}
+
 function unavailable(reason, grid, cpu) { return Object.freeze({ schema: WEBGPU_LABELED_FRONTIER_STATE_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: String(reason), grid, pieceIds: cpu.pieceIds, nextLabels: cpu.nextLabels, canonicalLabels: cpu.canonicalLabels, absoluteHashes: cpu.absoluteHashes, canonicalHashes: cpu.canonicalHashes, candidateCount: cpu.candidateCount, wordCount: cpu.wordCount, pieceCount: cpu.pieceCount }); }
 
 function flatten(candidates, property, width) { const flat = new Uint32Array(candidates.length * width); candidates.forEach((candidate, index) => flat.set(candidate[property], index * width)); return flat; }

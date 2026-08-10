@@ -5,6 +5,7 @@ import { createWebGpuFrontierEvaluator } from '../../../packages/search-core/src
 import { createWebGpuFrontierGenerator } from '../../../packages/search-core/src/webgpu-frontier-generator.js';
 import { createWebGpuFrontierMetrics } from '../../../packages/search-core/src/webgpu-frontier-metrics.js';
 import { createWebGpuLabeledFrontierState } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
+import { createWebGpuFrontierTopology } from '../../../packages/search-core/src/webgpu-frontier-topology.js';
 import { createWebGpuDeviceCache } from '../../../packages/search-core/src/webgpu-device-cache.js';
 import { search } from './v2-legacy-search.js';
 
@@ -15,6 +16,7 @@ const frontierEvaluator = createWebGpuFrontierEvaluator({ gpu: globalThis.naviga
 const frontierGenerator = createWebGpuFrontierGenerator({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierMetrics = createWebGpuFrontierMetrics({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierState = createWebGpuLabeledFrontierState({ gpu: globalThis.navigator?.gpu, deviceCache });
+const frontierTopology = createWebGpuFrontierTopology({ gpu: globalThis.navigator?.gpu });
 async function runProductSearch(request, context) {
   const steering = request.steering || {};
   const result = await search(request.pieces, steering.knownCentroidFamilies || [], {
@@ -28,6 +30,7 @@ async function runProductSearch(request, context) {
     frontierGenerator,
     frontierMetrics,
     frontierState,
+    frontierTopology,
     isCancelled: context.isCancelled,
     reportProgress: progress => context.reportProgress(progress),
   });
@@ -52,7 +55,7 @@ self.onmessage = event => {
     return;
   }
   try {
-      void search(message?.pieces, message?.knownCentroidFamilies || [], { ...message, candidatePrefilter, frontierValidator, frontierEvaluator, frontierGenerator, frontierMetrics, frontierState })
+      void search(message?.pieces, message?.knownCentroidFamilies || [], { ...message, candidatePrefilter, frontierValidator, frontierEvaluator, frontierGenerator, frontierMetrics, frontierState, frontierTopology })
       .then(result => self.postMessage(result))
       .catch(error => self.postMessage({ type: 'done', placements: null, metrics: null, nodes: 0, error: error.message }));
   } catch (error) {

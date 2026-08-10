@@ -17,8 +17,11 @@ pieces are required, so translated or differently assigned fields are never
 conflated.
 When WebGPU is available and exact parity holds, the product uses those GPU results
 to rank the next beam; otherwise each slice reports an explicit CPU fallback. Full
-topology acceptance, ordered deduplication, cancellation/control flow, and the
-canonical topology acceptance, ordered final signature generation, and
-cancellation/control flow remain CPU-owned. The worker also exposes a protocol-native
+topology acceptance now has a final parity-gated GPU occupancy reduction; its
+hole/connectivity reduction remains CPU-oracle-derived inside that adapter until
+component-label and hole-flood passes are verified. Ordered deduplication,
+cancellation/control flow, and persistence remain CPU-owned, while final
+canonical signature generation is parity-checked from the GPU-derived labeled
+state. The worker also exposes a protocol-native
 `frontier-batch` operation with
 cursor-selected candidates, canonical signatures, and resumable receipts.

@@ -10,6 +10,8 @@ import { createFrontierMaskFromCells } from '../../../packages/search-core/src/w
 import { createFrontierEvaluationCandidate } from '../../../packages/search-core/src/webgpu-frontier-evaluator.js';
 import { createFrontierMetricsCandidate } from '../../../packages/search-core/src/webgpu-frontier-metrics.js';
 import { createLabeledFrontierStateCandidate } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
+import { canonicalSignatureFromLabeledFrontierState } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
+import { DEFAULT_FRONTIER_GRID } from '../../../packages/search-core/src/webgpu-frontier-topology.js';
 
 function key(x, y) { return `${x},${y}`; }
 function adjacent(p) { return [{ x: p.x + 1, y: p.y }, { x: p.x - 1, y: p.y }, { x: p.x, y: p.y + 1 }, { x: p.x, y: p.y - 1 }]; }
@@ -294,7 +296,7 @@ async function evaluateFrontierState(entries, state, frontierState, onState = ()
         const nextLabels = result.nextLabels.slice(labelStart, labelStart + labelsPerCandidate);
         const canonicalLabels = result.canonicalLabels.slice(labelStart, labelStart + labelsPerCandidate);
         const remainingMask = Array.from(candidates[index].remainingMask);
-        return { ...entry, gpuState: { absoluteHash: result.absoluteHashes[index], canonicalHash: result.canonicalHashes[index], nextLabels, canonicalLabels, pieceIds: result.pieceIds, remainingMask, stateKey: `${result.pieceIds.join(',')}:${remainingMask.join(',')}:${nextLabels.join(',')}` } };
+        return { ...entry, gpuState: { absoluteHash: result.absoluteHashes[index], canonicalHash: result.canonicalHashes[index], nextLabels, canonicalLabels, pieceIds: result.pieceIds, wordCount, remainingMask, stateKey: `${result.pieceIds.join(',')}:${remainingMask.join(',')}:${nextLabels.join(',')}` } };
       });
     }
     onState({ status: 'fallback', reason: result?.reason || 'frontier-state-unavailable' });
@@ -329,7 +331,23 @@ async function evaluateFrontierOptions(entries, state, centroidId, frontierEvalu
   return entries;
 }
 
-async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroidId, targetNeighborCount, allowKnownFamily = false, knownSignatures = new Set(), searchHints = false, positionPreferences = {}, random = Math.random, quality = {}, candidatePrefilter = null, onPrefilter = () => {}, frontierValidator = null, frontierEvaluator = null, frontierGenerator = null, frontierGeneratorStatus = null, onFrontier = () => {}, onGeneration = () => {}, isCancelled = () => {}, frontierMetrics = null, onMetrics = () => {}, frontierState = null, onState = () => {}) {
+async function evaluateFinalTopology(state, centroidId, frontierTopology, onTopology = () => {}) {
+  if (!frontierTopology?.evaluate) return null;
+  try {
+    const cells = state.placements.flatMap(placement => placement.cells);
+    const centroidCells = state.placements.find(placement => placement.id === centroidId)?.cells || [];
+    const emptyMask = new Uint32Array(Math.ceil(DEFAULT_FRONTIER_GRID.width * DEFAULT_FRONTIER_GRID.height / 32));
+    const result = await frontierTopology.evaluate({ parentMask: emptyMask, candidateMask: createFrontierMaskFromCells(cells), centroidMask: centroidCells.length ? createFrontierMaskFromCells(centroidCells) : emptyMask });
+    if (result?.status === 'completed' && result.parity === 'verified' && result.metrics) {
+      onTopology({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, metrics: result.metrics });
+      return result.metrics;
+    }
+    onTopology({ status: result?.status === 'rejected' ? 'rejected' : 'fallback', reason: result?.reason || 'frontier-topology-unavailable' });
+  } catch (error) { onTopology({ status: 'fallback', reason: `frontier-topology-failed:${error.message}` }); }
+  return null;
+}
+
+async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroidId, targetNeighborCount, allowKnownFamily = false, knownSignatures = new Set(), searchHints = false, positionPreferences = {}, random = Math.random, quality = {}, candidatePrefilter = null, onPrefilter = () => {}, frontierValidator = null, frontierEvaluator = null, frontierGenerator = null, frontierGeneratorStatus = null, onFrontier = () => {}, onGeneration = () => {}, isCancelled = () => {}, frontierMetrics = null, onMetrics = () => {}, frontierState = null, onState = () => {}, frontierTopology = null, onTopology = () => {}) {
   const unknownBranches = (allowKnownFamily ? branches : branches.filter(branch => !knownFamilies.has(branch.centroidFamilyId))).sort(() => random() - .5);
   let nodes = 0;
   for (const branch of unknownBranches) {
@@ -340,7 +358,9 @@ async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroi
       nodes++;
       if (!state.remaining.length) {
         const metrics = fieldMetrics(state.placements, centroidId);
-        if (metrics.area === pieces.length * AREA && metrics.holes === 0 && !metrics.centroidEdgeCoast && connected(state.field) && (targetNeighborCount == null || metrics.centroidNeighborCount === targetNeighborCount) && !knownSignatures.has(arrangementSignature(state.placements))) return completedResult(state.placements, metrics, nodes);
+        const topologyMetrics = await evaluateFinalTopology(state, centroidId, frontierTopology, onTopology);
+        const acceptedMetrics = { ...metrics, ...(topologyMetrics || {}), connected: topologyMetrics?.connected ?? connected(state.field) };
+        if (acceptedMetrics.area === pieces.length * AREA && acceptedMetrics.holes === 0 && !acceptedMetrics.centroidEdgeCoast && acceptedMetrics.connected && (targetNeighborCount == null || metrics.centroidNeighborCount === targetNeighborCount) && !knownSignatures.has(arrangementSignature(state.placements))) return completedResult(state.placements, metrics, nodes);
         return null;
       }
       const choices = [];
@@ -390,8 +410,9 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const frontierGenerator = options.frontierGenerator;
   const frontierMetrics = options.frontierMetrics;
   const frontierState = options.frontierState;
+  const frontierTopology = options.frontierTopology;
   const frontierGeneratorStatus = frontierGenerator?.availability ? await frontierGenerator.availability() : null;
-  let prefilterReceipt = { status: 'cpu-oracle' }, frontierReceipt = { status: 'cpu-oracle' }, frontierGenerationReceipt = { status: 'cpu-oracle' }, frontierMetricsReceipt = { status: 'cpu-oracle' }, frontierStateReceipt = { status: 'cpu-oracle' };
+  let prefilterReceipt = { status: 'cpu-oracle' }, frontierReceipt = { status: 'cpu-oracle' }, frontierGenerationReceipt = { status: 'cpu-oracle' }, frontierMetricsReceipt = { status: 'cpu-oracle' }, frontierStateReceipt = { status: 'cpu-oracle' }, frontierTopologyReceipt = { status: 'cpu-oracle' };
   async function filterCandidates(entries) {
     if (!candidatePrefilter?.prefilter || entries.length === 0) return entries;
     const result = await candidatePrefilter.prefilter(entries.map(entry => [entry.candidate]));
@@ -421,18 +442,18 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const seedSet = new Set(seedCells.map(c => key(c.x, c.y))), centroidRing = new Set(); seedCells.forEach(cell => adjacent(cell).forEach(next => { if (!seedSet.has(key(next.x, next.y))) centroidRing.add(key(next.x, next.y)); }));
   const seed = { placements: [seedPlacement], field: new Set(seedCells.map(c => key(c.x, c.y))), remaining: pieces.filter(p => p.id !== centroidId), bounds: fieldMetrics([seedPlacement], centroidId), hintMatches: 0 }, seedBranches = searchStrategy === 'breadth' ? lockedSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, centroidRing, positionLocks) : targetFamily ? targetSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, targetSeed, positionLocks, random) : [];
   if (seedBranches.length) {
-    const lockedResult = await searchLockedSeedBranches(pieces, seedBranches, knownFamilies, centroidId, targetNeighborCount, Boolean(targetFamily), knownSignatures, searchHints, positionPreferences, random, quality, candidatePrefilter, receipt => { prefilterReceipt = receipt; }, options.frontierValidator, frontierEvaluator, frontierGenerator, frontierGeneratorStatus, receipt => { frontierReceipt = receipt; }, receipt => { frontierGenerationReceipt = receipt; }, isCancelled, options.frontierMetrics, receipt => { frontierMetricsReceipt = receipt; }, options.frontierState, receipt => { frontierStateReceipt = receipt; });
-    return { ...lockedResult, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierMetrics: frontierMetricsReceipt, frontierState: frontierStateReceipt };
+    const lockedResult = await searchLockedSeedBranches(pieces, seedBranches, knownFamilies, centroidId, targetNeighborCount, Boolean(targetFamily), knownSignatures, searchHints, positionPreferences, random, quality, candidatePrefilter, receipt => { prefilterReceipt = receipt; }, options.frontierValidator, frontierEvaluator, frontierGenerator, frontierGeneratorStatus, receipt => { frontierReceipt = receipt; }, receipt => { frontierGenerationReceipt = receipt; }, isCancelled, options.frontierMetrics, receipt => { frontierMetricsReceipt = receipt; }, options.frontierState, receipt => { frontierStateReceipt = receipt; }, frontierTopology, receipt => { frontierTopologyReceipt = receipt; });
+    return { ...lockedResult, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierMetrics: frontierMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt };
   }
   const beam = [seed];
   let nodes = 0, fallback = null, bestHintResult = null;
   const pieceCount = pieces.length;
   for (let depth = 0; depth < pieceCount - 1 && beam.length && nodes < NODE_LIMIT; depth++) {
-    if (isCancelled()) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierMetrics: frontierMetricsReceipt, frontierState: frontierStateReceipt };
+    if (isCancelled()) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierMetrics: frontierMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt };
     const nextBeam = [];
     const stateKeys = new Set();
     for (const state of beam) {
-      if (isCancelled()) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierMetrics: frontierMetricsReceipt, frontierState: frontierStateReceipt };
+      if (isCancelled()) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierMetrics: frontierMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt };
       if (nodes >= NODE_LIMIT) break;
       let selectedTarget = null, selectedOptions = null;
       const openCentroid = [...centroidRing].filter(ringKey => !state.field.has(ringKey));
@@ -521,8 +542,23 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     reportProgress({ depth: depth + 1, nodes, beam: beam.length, families: seedCounts.size, frontier: nextBeam.length, cursor: { depth: depth + 1, nodeOffset: nodes, rootChoice: Number(options.rootChoice || 0) } });
   for (const state of beam) if (!state.remaining.length) {
     const metrics = fieldMetrics(state.placements, centroidId);
-    if (metrics.area === pieceCount * AREA && metrics.holes === 0 && !metrics.centroidEdgeCoast && connected(state.field) && !knownSignatures.has(arrangementSignature(state.placements))) {
-      const result = { type: 'done', placements: state.placements, metrics: { width: metrics.width, height: metrics.height, area: metrics.area, holes: metrics.holes, centroidCoast: metrics.centroidCoast, centroidEdgeCoast: metrics.centroidEdgeCoast, centroidCornerCoast: metrics.centroidCornerCoast, enclosure: metrics.enclosure, centroidFamily: metrics.centroidFamily, centroidFamilyId: metrics.centroidFamilyId, centroidSeed: metrics.centroidSeed, centroidNeighborCount: metrics.centroidNeighborCount, perimeter: metrics.perimeter, density: metrics.density, centerOffset: metrics.centerOffset, centroidSquareOffset: metrics.centroidSquareOffset, centerSquareDistance: metrics.centerSquareDistance, radialVariance: metrics.radialVariance, gravityVariance: metrics.gravityVariance, gravityOffset: metrics.gravityOffset, gravityTension: metrics.gravityTension, inletCells: metrics.inletCells, inletEdges: metrics.inletEdges, inletRisk: metrics.inletRisk, peninsulaDepth: metrics.peninsulaDepth, nestedPeninsulaDepth: metrics.nestedPeninsulaDepth, terminalChains: metrics.terminalChains, score: metrics.score }, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierMetrics: frontierMetricsReceipt, frontierState: frontierStateReceipt };
+    const topologyMetrics = await evaluateFinalTopology(state, centroidId, frontierTopology, receipt => { frontierTopologyReceipt = receipt; });
+    const acceptedMetrics = { ...metrics, ...(topologyMetrics || {}), connected: topologyMetrics?.connected ?? connected(state.field) };
+    const cpuSignature = arrangementSignature(state.placements);
+    if (state.gpuState?.canonicalLabels) {
+      try {
+        const gpuCanonicalSignature = canonicalSignatureFromLabeledFrontierState(state.gpuState);
+        if (gpuCanonicalSignature !== cpuSignature) {
+          frontierStateReceipt = { ...frontierStateReceipt, finalCanonicalParity: 'rejected', reason: 'canonical-signature-mismatch' };
+          continue;
+        }
+        frontierStateReceipt = { ...frontierStateReceipt, finalCanonicalParity: 'verified', canonicalSignature: gpuCanonicalSignature };
+      } catch (error) {
+        frontierStateReceipt = { ...frontierStateReceipt, finalCanonicalParity: 'fallback', reason: `canonical-signature-failed:${error.message}` };
+      }
+    }
+    if (acceptedMetrics.area === pieceCount * AREA && acceptedMetrics.holes === 0 && !acceptedMetrics.centroidEdgeCoast && acceptedMetrics.connected && !knownSignatures.has(cpuSignature)) {
+      const result = { type: 'done', placements: state.placements, metrics: { width: metrics.width, height: metrics.height, area: metrics.area, holes: metrics.holes, centroidCoast: metrics.centroidCoast, centroidEdgeCoast: metrics.centroidEdgeCoast, centroidCornerCoast: metrics.centroidCornerCoast, enclosure: metrics.enclosure, centroidFamily: metrics.centroidFamily, centroidFamilyId: metrics.centroidFamilyId, centroidSeed: metrics.centroidSeed, centroidNeighborCount: metrics.centroidNeighborCount, perimeter: metrics.perimeter, density: metrics.density, centerOffset: metrics.centerOffset, centroidSquareOffset: metrics.centroidSquareOffset, centerSquareDistance: metrics.centerSquareDistance, radialVariance: metrics.radialVariance, gravityVariance: metrics.gravityVariance, gravityOffset: metrics.gravityOffset, gravityTension: metrics.gravityTension, inletCells: metrics.inletCells, inletEdges: metrics.inletEdges, inletRisk: metrics.inletRisk, peninsulaDepth: metrics.peninsulaDepth, nestedPeninsulaDepth: metrics.nestedPeninsulaDepth, terminalChains: metrics.terminalChains, score: metrics.score }, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierMetrics: frontierMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt };
       if (targetFamily && metrics.centroidFamilyId === targetFamily && !metrics.centroidCornerCoast && (targetNeighborCount == null || metrics.centroidNeighborCount === targetNeighborCount)) return result;
       if (!metrics.centroidCornerCoast) {
         if (!searchHints && targetNeighborCount == null) return result;
@@ -534,7 +570,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     }
   }
   }
-  return bestHintResult || fallback || { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierMetrics: frontierMetricsReceipt, frontierState: frontierStateReceipt };
+  return bestHintResult || fallback || { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierMetrics: frontierMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt };
 }
 
 export { search };
