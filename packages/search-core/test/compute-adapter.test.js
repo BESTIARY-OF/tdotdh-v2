@@ -42,6 +42,30 @@ assert.deepEqual(result.placements, [{ id: 3 }, { id: 43 }]);
 assert.deepEqual(result.accelerator, { status: 'unavailable', backend: 'compute-shader', reason: 'compute-shader-unavailable' });
 assert.equal(oracleInput.deterministicKey, 'run-2026-08-08:preset-v1/F-0RHDG0U/2/1');
 
+let acceleratedCalls = 0;
+const acceleratedAdapter = createCpuOracleFirstAdapter({
+  cpuOracle: async () => ({ canonicalSignature: '#03[0,0]|#43[1,0]', placements: [{ id: 3 }, { id: 43 }] }),
+  computeShader: {
+    available: true,
+    execute: async request => {
+      acceleratedCalls += 1;
+      return { canonicalSignature: '#03[0,0]|#43[1,0]', placements: [{ id: 3 }, { id: 43 }], mode: request.mode };
+    },
+  },
+});
+const acceleratedResult = await acceleratedAdapter.execute({ mode: 'breadth', ticket, cursor, runSeed });
+assert.equal(acceleratedCalls, 1);
+assert.equal(acceleratedResult.backend, 'compute-shader');
+assert.deepEqual(acceleratedResult.accelerator, { status: 'available', backend: 'compute-shader', parity: 'verified' });
+
+const rejectedAdapter = createCpuOracleFirstAdapter({
+  cpuOracle: async () => ({ canonicalSignature: '#03[0,0]|#43[1,0]', placements: [{ id: 3 }, { id: 43 }] }),
+  computeShader: { available: true, execute: async () => ({ canonicalSignature: '#mismatch' }) },
+});
+const rejectedResult = await rejectedAdapter.execute({ mode: 'depth', ticket, cursor, runSeed });
+assert.equal(rejectedResult.backend, 'cpu-oracle');
+assert.deepEqual(rejectedResult.accelerator, { status: 'rejected', backend: 'compute-shader', reason: 'canonical-signature-mismatch' });
+
 await assert.rejects(() => adapter.execute({ mode: 'breadth', ticket, cursor, runSeed: 'different-run' }), /does not match/);
 await assert.rejects(() => createCpuOracleFirstAdapter({ cpuOracle: async () => ({}) }).execute({ mode: 'breadth', ticket, cursor, runSeed }), /canonical arrangement signature/);
 

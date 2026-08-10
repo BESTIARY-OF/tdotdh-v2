@@ -48,7 +48,7 @@ export function createUnavailableComputeAdapter(reason) {
 
 export function createCpuOracleFirstAdapter({ cpuOracle, computeShader = null, unavailableReason } = {}) {
   if (typeof cpuOracle !== 'function') throw new TypeError('cpuOracle must be a function');
-  const acceleratorStatus = computeShader?.available === true
+  const acceleratorStatus = computeShader?.available === true && typeof computeShader.execute === 'function'
     ? Object.freeze({ status: COMPUTE_ADAPTER_STATUS.available, backend: 'compute-shader' })
     : unavailable(unavailableReason);
   return Object.freeze({
@@ -58,6 +58,50 @@ export function createCpuOracleFirstAdapter({ cpuOracle, computeShader = null, u
       const request = createComputeSearchRequest(input);
       const oracle = await cpuOracle(request);
       const canonicalSignature = requireCanonicalSignature(oracle?.canonicalSignature);
+      if (acceleratorStatus.status === COMPUTE_ADAPTER_STATUS.available) {
+        try {
+          const accelerated = await computeShader.execute(request);
+          if (accelerated?.canonicalSignature === canonicalSignature) {
+            return Object.freeze({
+              status: 'completed',
+              backend: 'compute-shader',
+              mode: request.mode,
+              ticketKey: request.ticketKey,
+              canonicalSignature,
+              placements: accelerated.placements ?? oracle.placements ?? null,
+              accelerator: Object.freeze({ ...acceleratorStatus, parity: 'verified' }),
+            });
+          }
+          return Object.freeze({
+            status: 'completed',
+            backend: 'cpu-oracle',
+            mode: request.mode,
+            ticketKey: request.ticketKey,
+            canonicalSignature,
+            placements: oracle.placements ?? null,
+            accelerator: Object.freeze({
+              status: 'rejected',
+              backend: 'compute-shader',
+              reason: 'canonical-signature-mismatch',
+            }),
+          });
+        } catch (error) {
+          return Object.freeze({
+            status: 'completed',
+            backend: 'cpu-oracle',
+            mode: request.mode,
+            ticketKey: request.ticketKey,
+            canonicalSignature,
+            placements: oracle.placements ?? null,
+            accelerator: Object.freeze({
+              status: 'rejected',
+              backend: 'compute-shader',
+              reason: 'execution-failed',
+              message: String(error?.message || error),
+            }),
+          });
+        }
+      }
       return Object.freeze({
         status: 'completed',
         backend: 'cpu-oracle',
