@@ -251,6 +251,7 @@ export function createWorkerRuntime({ postMessage, execute }) {
 
   const emit = (run, type, payload = {}) => {
     postMessage({
+      ...payload,
       protocolVersion: WORKER_PROTOCOL_VERSION,
       requestId: run?.request.requestId ?? null,
       ticket: run?.request.ticket ?? null,
@@ -258,7 +259,6 @@ export function createWorkerRuntime({ postMessage, execute }) {
       mode: run?.request.mode ?? null,
       type,
       sequence: ++sequence,
-      ...payload,
     });
   };
 

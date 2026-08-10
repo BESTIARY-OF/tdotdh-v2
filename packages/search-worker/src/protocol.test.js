@@ -80,7 +80,7 @@ assert.equal(failed[0].error.code, "NO_ACTIVE_REQUEST");
 const breadthEvents = [];
 const breadthRuntime = createWorkerRuntime({
   postMessage: (event) => breadthEvents.push(event),
-  execute: async () => ({ placements: [{ id: 3, cells: [{ x: 0, y: 0 }] }], nodes: 1 }),
+  execute: async () => ({ type: "done", placements: [{ id: 3, cells: [{ x: 0, y: 0 }] }], nodes: 1 }),
 });
 await breadthRuntime.handleMessage({ ...baseCommand, requestId: "search-breadth-runtime", mode: SEARCH_MODES.breadth });
 assert.deepEqual(breadthEvents.map((event) => event.type), ["started", "result", "completed"]);

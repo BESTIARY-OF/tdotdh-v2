@@ -901,7 +901,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   }
   const beam = restored?.beam || [seed];
   const restoredNodeOffset = restored?.nodeOffset || 0;
-  let nodes = 0, fallback = null, bestHintResult = null;
+  let nodes = 0, fallback = null, bestHintResult = null, lastDepth = restored?.depth || 0;
   const pieceCount = pieces.length;
   for (let depth = restored?.depth || 0; depth < pieceCount - 1 && beam.length && nodes < NODE_LIMIT; depth++) {
     if (isCancelled()) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierDedup: frontierDedupReceipt };
@@ -1041,6 +1041,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     beam.splice(0, beam.length, ...retained);
     const checkpoint = serializeCheckpoint(beam, depth + 1, restoredNodeOffset + nodes);
     reportProgress({ depth: depth + 1, nodes, beam: beam.length, families: seedCounts.size, frontier: nextBeam.length, cursor: { depth: depth + 1, nodeOffset: restoredNodeOffset + nodes, rootChoice: Number(options.rootChoice || 0), checkpoint } });
+    lastDepth = depth + 1;
   for (const state of beam) if (!state.remaining.length) {
     const metrics = fieldMetrics(state.placements, centroidId);
     const topologyMetrics = await evaluateFinalTopology(state, centroidId, frontierTopology, receipt => { frontierTopologyReceipt = receipt; });
@@ -1071,7 +1072,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     }
   }
   }
-  const terminalCheckpoint = serializeCheckpoint(beam, Math.min(pieceCount - 1, restored?.depth || 0), restoredNodeOffset + nodes);
+  const terminalCheckpoint = serializeCheckpoint(beam, Math.min(pieceCount - 1, lastDepth), restoredNodeOffset + nodes);
   return bestHintResult || fallback || { type: 'done', placements: null, metrics: null, nodes, cursor: { depth: terminalCheckpoint.depth, nodeOffset: terminalCheckpoint.nodeOffset, rootChoice: Number(options.rootChoice || 0), checkpoint: terminalCheckpoint }, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierRanker: frontierRankerReceipt, frontierCompactor: frontierCompactorReceipt, frontierDedup: frontierDedupReceipt };
 }
 

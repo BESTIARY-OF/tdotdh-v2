@@ -1,0 +1,65 @@
+import assert from 'node:assert/strict';
+import { Worker } from 'node:worker_threads';
+import { pathToFileURL } from 'node:url';
+import { resolve } from 'node:path';
+
+const workerPath = pathToFileURL(resolve('apps/field-guide/product/v2-search-worker.js')).href;
+const wrapper = `
+  const { parentPort } = require('node:worker_threads');
+  globalThis.self = { postMessage: message => parentPort.postMessage(message) };
+  const pending = [];
+  parentPort.on('message', message => {
+    if (typeof globalThis.self.onmessage === 'function') globalThis.self.onmessage({ data: message });
+    else pending.push(message);
+  });
+  (async () => {
+    await import(${JSON.stringify(workerPath)});
+    for (const message of pending.splice(0)) globalThis.self.onmessage({ data: message });
+  })().catch(error => { parentPort.postMessage({ type: 'boot-error', message: error.message }); });
+`;
+const cells = Array.from({ length: 9 }, (_, index) => ({ x: index % 3, y: Math.floor(index / 3) }));
+const request = {
+  type: 'start',
+  protocolVersion: 1,
+  requestId: 'worker-runtime-test',
+  presetFingerprint: 'test-preset',
+  catalogRevision: 'field-guide:test:v2',
+  seed: 'runtime-test',
+  mode: 'depth',
+  operation: 'product-search',
+  ticket: { presetFingerprint: 'test-preset', familyId: 'open', pass: 0, threadId: 0 },
+  cursor: { depth: 0, nodeOffset: 0, rootChoice: 0 },
+  budget: { maxNodes: 1000, maxMilliseconds: 10000 },
+  pieces: [{ id: 3, cells }, { id: 1, cells }, { id: 2, cells }, { id: 4, cells }],
+  knownSignatureHints: [],
+  steering: { centroidId: 3, knownCentroidFamilies: [], searchStrategy: 'depth', positionLocks: { 1: { dx: -3, dy: 0 }, 2: { dx: 3, dy: 0 } } },
+};
+
+const worker = new Worker(wrapper, { eval: true });
+const events = [];
+const result = await new Promise((resolveResult, reject) => {
+  const timer = setTimeout(() => reject(new Error('product worker runtime test timed out')), 15000);
+  worker.on('message', event => {
+    events.push(event);
+    if (event.type === 'result') {
+      clearTimeout(timer);
+      resolveResult(event);
+    }
+    if (event.type === 'failed') {
+      clearTimeout(timer);
+      reject(new Error(event.error?.message || 'product worker failed'));
+    }
+  });
+  worker.on('error', error => { clearTimeout(timer); reject(error); });
+  worker.postMessage(request);
+});
+await worker.terminate();
+
+assert.ok(events.some(event => event.type === 'started'));
+assert.equal(result.protocolOperation, 'product-search');
+assert.equal(result.navigation.schema, 'tdotdh.navigation-coordinator.v0');
+assert.equal(result.navigation.ticket.threadId, 0);
+assert.equal(result.navigation.canonicalReplay, result.placements.length ? 'verified' : 'not-run');
+assert.ok(result.navigation.progressCount >= 1);
+assert.equal(result.navigation.cursor.rootChoice, 0);
+console.log('v2 product worker runtime receipt passed');
