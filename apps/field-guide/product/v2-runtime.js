@@ -1,9 +1,12 @@
 import { createDisplayGeometry } from '../../../packages/domain/src/display-geometry.js';
 import { createRendererRequest } from '../../../packages/browser-handoff/src/renderer-boundary.js';
+import { createRendererAdapter } from '../../../packages/browser-handoff/src/renderer-adapter-capability.js';
 import { createCpuOracleFirstAdapter } from '../../../packages/search-core/src/compute-adapter.js';
 import { createWebGpuCandidateScorer, cpuCandidateScores } from '../../../packages/search-core/src/webgpu-candidate-scorer.js';
+import { createWebGpuCandidatePrefilter, cpuCandidatePrefilter } from '../../../packages/search-core/src/webgpu-candidate-prefilter.js';
 
 const geometry = createDisplayGeometry({ kind: 'flatland', dimension: 2 });
+const rendererAdapter = createRendererAdapter();
 const cpuOracle = async request => ({
   canonicalSignature: request.deterministicKey,
   placements: null,
@@ -16,6 +19,7 @@ const cpuOracleFirst = createCpuOracleFirstAdapter({
 const workerUrl = new URL('./v2-search-worker.js', import.meta.url);
 const cpuWorker = new Worker(workerUrl, { type: 'module' });
 const gpuScorer = createWebGpuCandidateScorer();
+const gpuCandidatePrefilter = createWebGpuCandidatePrefilter();
 
 window.__TDOTDH_V2_RUNTIME__ = Object.freeze({
   product: 'nonomino-field-guide',
@@ -24,6 +28,8 @@ window.__TDOTDH_V2_RUNTIME__ = Object.freeze({
   cpuOracleFirst,
   cpuWorker,
   gpuScorer,
+  gpuCandidatePrefilter,
+  rendererAdapter,
   workerUrl: workerUrl.href,
   rendererRequest: cells => createRendererRequest({ geometry, cells }),
   acceleration: cpuOracleFirst.availability(),
@@ -61,7 +67,15 @@ void gpuScorer.availability().then(async capability => {
   const values = [0, 1, 17, 255];
   const gpuResult = await gpuScorer.score(values);
   const parity = gpuResult.status === 'completed' && JSON.stringify(gpuResult.scores) === JSON.stringify(cpuCandidateScores(values));
-  if (status) status.textContent = parity
-    ? 'V2 product · WebGPU candidate parity verified · search still CPU-oracle'
+  if (!parity || !status) return;
+  const candidates = [
+    [{ pieceId: 1, cells: [{ x: 0, y: 0 }, { x: 1, y: 0 }] }],
+    [{ pieceId: 2, cells: [{ x: 0, y: 0 }, { x: 0, y: 0 }] }],
+  ];
+  const prefilterResult = await gpuCandidatePrefilter.prefilter(candidates);
+  const prefilterParity = prefilterResult.status === 'completed'
+    && JSON.stringify(prefilterResult.validity) === JSON.stringify(cpuCandidatePrefilter(candidates).validity);
+  status.textContent = prefilterParity
+    ? 'V2 product · WebGPU occupancy parity verified · search still CPU-oracle'
     : 'V2 product · WebGPU candidate parity failed · CPU oracle active';
 }).catch(() => {});

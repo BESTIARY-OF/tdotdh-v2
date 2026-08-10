@@ -6,6 +6,7 @@ family records, steering state, and the real variable-field search worker. The v
 server exposes it at `/` on the preview port (5174 in development).
 
 The product currently uses the CPU worker as its correctness oracle. The v2 runtime
-bridge exposes the versioned compute and renderer contracts and reports the compute
-shader backend as unavailable until canonical-signature parity is demonstrated.
-This is intentionally not a claim that GPU search is already implemented.
+bridge exposes versioned compute and renderer contracts, a real WebGPU candidate
+scoring dispatch, and a real WebGPU candidate occupancy prefilter. Both GPU slices
+are parity-gated and fall back explicitly; the full island search topology remains
+CPU-oracle controlled until canonical arrangement parity is demonstrated.
