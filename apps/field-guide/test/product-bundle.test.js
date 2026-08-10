@@ -32,6 +32,7 @@ for (const assetPattern of absoluteProductAssets) {
 const workerPath = "/apps/field-guide/product/search-worker.js";
 assert.match(productApp, /new Worker\('\/apps\/field-guide\/product\/v2-search-worker\.js(?:\?[^']*)?', \{ type: 'module' \}\)/);
 assert.match(productApp, /GPU occupancy prefilter/);
+assert.match(productApp, /GPU frontier validation/);
 assert.match(productApp, /CPU seed branch/);
 const runtime = await readFile(resolve(productDirectory, "v2-runtime.js"), "utf8");
 assert.match(runtime, /new Worker\(workerUrl, \{ type: 'module' \}\)/);
@@ -40,6 +41,7 @@ assert.match(runtime, /status: parity \? 'parity-verified'/);
 const v2Worker = await readFile(resolve(productDirectory, "v2-search-worker.js"), "utf8");
 assert.match(v2Worker, /v2-legacy-search\.js/);
 assert.match(v2Worker, /candidatePrefilter/);
+assert.match(v2Worker, /frontierValidator/);
 assert.match(v2Worker, /\.then\(result => self\.postMessage\(result\)\)/);
 
 console.log(JSON.stringify({

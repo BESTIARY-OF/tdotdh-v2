@@ -15,7 +15,7 @@ function canonicalPlacementSignature(placements) {
   const cells = placements.flatMap(placement => placement?.cells ?? []);
   if (cells.length === 0) throw new TypeError('candidate placements must contain cells');
   const origin = cells.reduce((bounds, cell) => {
-    const { x, y } = cellKey(cell).split(',').map(Number);
+    const [x, y] = cellKey(cell).split(',').map(Number);
     return { minX: Math.min(bounds.minX, x), minY: Math.min(bounds.minY, y) };
   }, { minX: Number.POSITIVE_INFINITY, minY: Number.POSITIVE_INFINITY });
   return [...placements]

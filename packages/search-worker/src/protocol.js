@@ -21,6 +21,9 @@ const MAX_PIECES = 64;
 const MAX_CELLS_PER_PIECE = 256;
 const MAX_BUDGET_NODES = 10_000_000;
 const MAX_BUDGET_MILLISECONDS = 15 * 60 * 1000;
+const FRONTIER_BATCH_OPERATION = 'frontier-batch';
+
+import { normalizeFrontierBatch } from './frontier-batch-contract.js';
 
 export class WorkerProtocolError extends Error {
   constructor(code, message, details = {}) {
@@ -162,6 +165,7 @@ export function createSearchRequest(input) {
     catalogRevision: requireString(source.catalogRevision, "catalogRevision"),
     seed: requireString(source.seed, "seed", MAX_SEED_LENGTH),
     mode: normalizeMode(source.mode),
+    operation: source.operation == null ? 'oracle-batch' : requireString(source.operation, 'operation'),
     ticket: normalizeTicket(source.ticket, presetFingerprint),
     cursor: normalizeCursor(source.cursor),
     budget: normalizeBudget(source.budget),
@@ -170,6 +174,7 @@ export function createSearchRequest(input) {
     steering: cloneJson(source.steering ?? {}, "steering"),
     knownSignatureHints: normalizeHints(source.knownSignatureHints),
   };
+  if (request.operation === FRONTIER_BATCH_OPERATION) request.frontierBatch = normalizeFrontierBatch(source.frontierBatch);
 
   const bytes = byteLength(request);
   if (bytes > MAX_REQUEST_BYTES) {

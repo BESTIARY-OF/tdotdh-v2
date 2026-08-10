@@ -15,11 +15,19 @@ const candidatePrefilter = {
     };
   },
 };
+const frontierValidator = {
+  backend: 'test-frontier-validator',
+  validate: async function validate(candidates) {
+    return { status: 'completed', backend: this.backend, validity: candidates.map(() => 1) };
+  },
+};
 const result = await search(pieces, [], {
   searchStrategy: 'balanced',
   candidatePrefilter,
+  frontierValidator,
 });
 
 assert.equal(result.type, 'done');
 assert.deepEqual(result.prefilter, { status: 'used', backend: 'test-compute-shader', candidateCount: 3 });
+assert.deepEqual(result.frontier, { status: 'used', backend: 'test-frontier-validator', candidateCount: 3 });
 console.log('v2 product search receipt test passed');
