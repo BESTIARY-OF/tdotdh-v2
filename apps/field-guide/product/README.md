@@ -29,3 +29,10 @@ canonical signature generation is parity-checked from the GPU-derived labeled
 state. The worker also exposes a protocol-native
 `frontier-batch` operation with
 cursor-selected candidates, canonical signatures, and resumable receipts.
+
+When WebGPU is available, frontier generation is issued as one flattened batch
+for all remaining pieces in a beam state. The batch shader emits deterministic
+origins and validity masks, and the CPU oracle compares every item before the
+candidates re-enter target selection. This removes the prior one-piece-at-a-time
+dispatch pattern from the GPU path while preserving CPU fallback and cursor
+semantics.

@@ -118,6 +118,38 @@ async function generateFrontierTranslations(piece, state, bounds, frontierGenera
   });
   return [...translations.values()];
 }
+async function generateFrontierTranslationsBatch(pieces, state, bounds, frontierGenerator, onGeneration = () => {}, availabilityStatus = null) {
+  const fallback = () => new Map(pieces.map(piece => [piece.id, candidateTranslations(piece, state.field, bounds)]));
+  if (!pieces.length) return new Map();
+  if (availabilityStatus && availabilityStatus.status !== 'available') {
+    const translations = fallback();
+    onGeneration({ status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', candidateCount: [...translations.values()].reduce((sum, value) => sum + value.length, 0), batch: 'fallback' });
+    return translations;
+  }
+  if (!frontierGenerator?.generateBatch) {
+    if (!frontierGenerator?.generate) return fallback();
+    const generated = new Map();
+    for (const piece of pieces) generated.set(piece.id, await generateFrontierTranslations(piece, state, bounds, frontierGenerator, onGeneration, availabilityStatus));
+    return generated;
+  }
+  const fieldCells = [...state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
+  const result = await frontierGenerator.generateBatch(pieces.map(piece => ({ pieceId: piece.id, fieldCells, pieceCells: applyLock(piece), bounds })));
+  onGeneration({ status: result?.parity === 'verified' ? 'used' : 'fallback', backend: result?.backend || 'cpu-oracle', parity: result?.parity, candidateCount: result?.candidateCount || 0, batch: result?.batch || 'fallback' });
+  if (!Array.isArray(result?.items)) return fallback();
+  const byId = new Map();
+  for (const item of result.items) {
+    const piece = pieces.find(candidate => candidate.id === item.pieceId);
+    if (!piece) continue;
+    const translations = new Map();
+    (item.origins || []).forEach((origin, index) => {
+      if (item.validity?.[index] !== 1 || !origin || !Number.isSafeInteger(origin.x) || !Number.isSafeInteger(origin.y)) return;
+      const cells = placedCells(piece, origin), originKey = `${origin.x},${origin.y}`;
+      if (!translations.has(originKey)) translations.set(originKey, { id: piece.id, origin, cells });
+    });
+    byId.set(piece.id, [...translations.values()]);
+  }
+  return new Map(pieces.map(piece => [piece.id, byId.get(piece.id) || []]));
+}
 function candidateTranslationsForTarget(piece, field, bounds, target, positionLocks = {}, centroidOrigin = null) {
   const shape = applyLock(piece), translations = new Map(), lock = positionLocks[piece.id], lockedOrigin = lock && centroidOrigin ? { x: centroidOrigin.x + Number(lock.dx), y: centroidOrigin.y + Number(lock.dy) } : null;
   for (const source of shape) {
@@ -500,7 +532,10 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       const ringTargets = openCentroid.map(ringKey => frontier.get(ringKey)).filter(Boolean), targetPool = ringTargets.length ? ringTargets : [...frontier.values()];
       const useGeneratedFrontier = frontierGeneratorStatus?.status === 'available';
       const generatedByPiece = useGeneratedFrontier ? new Map() : null;
-      if (useGeneratedFrontier) for (const piece of state.remaining) generatedByPiece.set(piece.id, await generateFrontierTranslations(piece, state, state.bounds, frontierGenerator, receipt => { frontierGenerationReceipt = receipt; }, frontierGeneratorStatus));
+      if (useGeneratedFrontier) {
+        const generated = await generateFrontierTranslationsBatch(state.remaining, state, state.bounds, frontierGenerator, receipt => { frontierGenerationReceipt = receipt; }, frontierGeneratorStatus);
+        for (const [pieceId, translations] of generated) generatedByPiece.set(pieceId, translations);
+      }
       else if (frontierGenerator?.generate && frontierGenerationReceipt.status === 'cpu-oracle') frontierGenerationReceipt = { status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', candidateCount: 0 };
       for (const target of targetPool) {
         const options = [];

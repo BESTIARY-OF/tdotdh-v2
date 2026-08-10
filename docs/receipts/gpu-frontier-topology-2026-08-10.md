@@ -22,6 +22,15 @@ candidate×cell label buffers into shared dispatches; CPU-oracle and benchmark
 adapters short-circuit the batch path so they do not pay a false acceleration
 penalty.
 
+## Frontier expansion batch
+
+The navigation loop now calls the generator's `generateBatch` operation once per
+beam state for all remaining pieces. Its flattened WebGPU dispatch covers the
+field-frontier × direction × source-cell product for every piece, returns
+per-piece validity/origin slices, and is accepted only after exact CPU-oracle
+parity. CPU-only adapters retain their existing per-piece behavior and the
+search receipt reports `batch: verified` only for the hardware batch path.
+
 Verification:
 
 - `node packages/search-core/test/webgpu-frontier-topology.test.js`

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { cpuGenerateFrontierCandidates, createWebGpuFrontierGenerator } from '../src/webgpu-frontier-generator.js';
+import { cpuGenerateFrontierCandidates, cpuGenerateFrontierBatch, createWebGpuFrontierGenerator } from '../src/webgpu-frontier-generator.js';
 
 const input = {
   fieldCells: [{ x: 0, y: 0 }, { x: 1, y: 0 }],
@@ -21,4 +21,12 @@ assert.deepEqual(fallback.validity, cpu.validity);
 assert.deepEqual(fallback.acceptedIndices, cpu.acceptedIndices);
 assert.deepEqual(fallback.compactedOrigins, cpu.compactedOrigins);
 assert.equal(fallback.compactedCount, cpu.compactedCount);
+const batchInput = [{ ...input, pieceId: 1 }, { ...input, pieceId: 2, pieceCells: [{ x: 0, y: 0 }] }];
+const batchCpu = cpuGenerateFrontierBatch(batchInput);
+assert.equal(batchCpu.candidateCount, 24);
+assert.deepEqual(batchCpu.items.map(item => item.pieceId), [1, 2]);
+assert.deepEqual(batchCpu.items.map(item => item.acceptedIndices.length), [10, 6]);
+const batchFallback = await createWebGpuFrontierGenerator({ gpu: null }).generateBatch(batchInput);
+assert.equal(batchFallback.status, 'unavailable');
+assert.deepEqual(batchFallback.items.map(item => item.validity), batchCpu.items.map(item => item.validity));
 console.log(JSON.stringify({ candidateCount: cpu.candidateCount, accepted: cpu.acceptedIndices.length, result: 'passed' }));
