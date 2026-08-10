@@ -92,10 +92,10 @@ const sharedOptions = {
   navigationTicket: { presetFingerprint: 'test-preset', familyId: 'open', pass: 0, threadId: 0 },
   navigationCursor: { depth: 0, nodeOffset: 0, rootChoice: 0 },
 };
-let residentExpansionCalls = 0, residentParentReferences = 0, residentEpoch = 0;
+let residentExpansionCalls = 0, residentParentReferences = 0, residentLayerOpens = 0, residentLayerCommits = 0, residentEpoch = 0;
 const residentNavigator = {
-  beginLayer() { return { status: 'layer-open' }; },
-  commitLayer() { return { status: 'layer-committed' }; },
+  beginLayer() { residentLayerOpens += 1; return { status: 'layer-open' }; },
+  commitLayer() { residentLayerCommits += 1; return { status: 'layer-committed' }; },
   expand: async candidates => {
     residentExpansionCalls += 1;
     residentParentReferences += candidates.filter(candidate => candidate.parentStateIndex != null).length;
@@ -173,6 +173,8 @@ assert.equal(breadthResult.frontierCompactor.batch, 'breadth-quota');
 assert.equal(breadthResult.frontierCompactor.backend, 'test-frontier-compactor');
 assert.ok(residentExpansionCalls > 0);
 assert.ok(residentParentReferences > 0, 'later beam layers must submit resident parent references');
+assert.ok(residentLayerOpens > 0, 'resident navigator must own locked-branch layer boundaries');
+assert.equal(residentLayerCommits, residentLayerOpens, 'resident locked-branch layers must commit exactly once');
 assert.equal(residentResult.frontierState.resident, true);
 assert.equal(residentResult.frontierState.backend, 'resident-test-webgpu');
 assert.deepEqual(residentResult.placements, residentBaseline.placements);

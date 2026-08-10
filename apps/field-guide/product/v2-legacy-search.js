@@ -739,7 +739,7 @@ async function evaluateFinalTopology(state, centroidId, frontierTopology, onTopo
   return null;
 }
 
-async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroidId, targetNeighborCount, allowKnownFamily = false, knownSignatures = new Set(), searchHints = false, positionPreferences = {}, random = Math.random, quality = {}, candidatePrefilter = null, onPrefilter = () => {}, frontierValidator = null, frontierEvaluator = null, frontierGenerator = null, frontierGeneratorStatus = null, onFrontier = () => {}, onGeneration = () => {}, isCancelled = () => {}, frontierMetrics = null, onMetrics = () => {}, frontierState = null, onState = () => {}, frontierTopology = null, onTopology = () => {}, fieldMetricsAdapter = null, frontierTargetPool = null, frontierTargetPoolStatus = null, onTargetPool = () => {}) {
+async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroidId, targetNeighborCount, allowKnownFamily = false, knownSignatures = new Set(), searchHints = false, positionPreferences = {}, random = Math.random, quality = {}, candidatePrefilter = null, onPrefilter = () => {}, frontierValidator = null, frontierEvaluator = null, frontierGenerator = null, frontierGeneratorStatus = null, onFrontier = () => {}, onGeneration = () => {}, isCancelled = () => {}, frontierMetrics = null, onMetrics = () => {}, frontierState = null, onState = () => {}, frontierTopology = null, onTopology = () => {}, fieldMetricsAdapter = null, frontierTargetPool = null, frontierTargetPoolStatus = null, onTargetPool = () => {}, frontierNavigator = null) {
   const unknownBranches = (allowKnownFamily ? branches : branches.filter(branch => !knownFamilies.has(branch.centroidFamilyId))).sort(() => random() - .5);
   let nodes = 0;
   for (const branch of unknownBranches) {
@@ -793,7 +793,10 @@ async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroi
           }
         }
         options = await evaluateFrontierGeometry(options, state, centroidId, frontierMetrics, onMetrics);
-        options = await evaluateFrontierState(options, state, frontierState, onState);
+        const stateEngine = frontierNavigator || frontierState;
+        stateEngine?.beginLayer?.();
+        options = await evaluateFrontierState(options, state, stateEngine, onState);
+        stateEngine?.commitLayer?.();
         options = await evaluateFrontierOptions(options, state, centroidId, frontierEvaluator, frontierValidator, onFrontier);
         if (!options.length) return null;
         choices.push({ piece, options });
@@ -910,7 +913,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const restored = restoreCheckpoint(options.resumeCheckpoint);
   const seed = { placements: [seedPlacement], field: new Set(seedCells.map(c => key(c.x, c.y))), remaining: pieces.filter(p => p.id !== centroidId), bounds: fieldMetrics([seedPlacement], centroidId), hintMatches: 0 }, seedBranches = restored ? [] : searchStrategy === 'breadth' ? await lockedSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, centroidRing, positionLocks, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; }) : targetFamily ? await targetSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, targetSeed, positionLocks, random, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; }) : [];
   if (seedBranches.length) {
-    const lockedResult = await searchLockedSeedBranches(pieces, seedBranches, knownFamilies, centroidId, targetNeighborCount, Boolean(targetFamily), knownSignatures, searchHints, positionPreferences, random, quality, candidatePrefilter, receipt => { prefilterReceipt = receipt; }, options.frontierValidator, frontierEvaluator, frontierGenerator, frontierGeneratorStatus, receipt => { frontierReceipt = receipt; }, receipt => { frontierGenerationReceipt = receipt; }, isCancelled, options.frontierMetrics, receipt => { frontierMetricsReceipt = receipt; }, options.frontierState, receipt => { frontierStateReceipt = receipt; }, frontierTopology, receipt => { frontierTopologyReceipt = receipt; }, fieldMetricsAdapter, frontierTargetPool, frontierTargetPoolStatus, receipt => { frontierTargetPoolReceipt = receipt; });
+    const lockedResult = await searchLockedSeedBranches(pieces, seedBranches, knownFamilies, centroidId, targetNeighborCount, Boolean(targetFamily), knownSignatures, searchHints, positionPreferences, random, quality, candidatePrefilter, receipt => { prefilterReceipt = receipt; }, options.frontierValidator, frontierEvaluator, frontierGenerator, frontierGeneratorStatus, receipt => { frontierReceipt = receipt; }, receipt => { frontierGenerationReceipt = receipt; }, isCancelled, options.frontierMetrics, receipt => { frontierMetricsReceipt = receipt; }, options.frontierState, receipt => { frontierStateReceipt = receipt; }, frontierTopology, receipt => { frontierTopologyReceipt = receipt; }, fieldMetricsAdapter, frontierTargetPool, frontierTargetPoolStatus, receipt => { frontierTargetPoolReceipt = receipt; }, frontierNavigator);
     return { ...lockedResult, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierRanker: frontierRankerReceipt, frontierCompactor: frontierCompactorReceipt, frontierDedup: frontierDedupReceipt };
   }
   const beam = restored?.beam || [seed];
