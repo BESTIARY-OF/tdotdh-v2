@@ -957,8 +957,8 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
           if (useTargetGeneratedFrontier) { options.push(...(generatedByTarget.get(key(target.x, target.y)) || []).filter(entry => entry.piece.id === piece.id)); continue; }
           const generated = useGeneratedFrontier ? (generatedByPiece.get(piece.id) || []) : candidateTranslationsForTarget(piece, state.field, state.bounds, target, positionLocks, seedOrigin);
           if (!useGeneratedFrontier) { for (const candidate of generated) options.push({ piece, candidate }); continue; }
-          const targetCandidates = new Set(candidateTranslationsForTarget(piece, state.field, state.bounds, target, positionLocks, seedOrigin).map(candidate => `${candidate.origin.x},${candidate.origin.y}`));
-          for (const candidate of generated) if (targetCandidates.has(`${candidate.origin.x},${candidate.origin.y}`)) options.push({ piece, candidate });
+          const targetKey = key(target.x, target.y);
+          for (const candidate of generated) if (candidate.cells?.some(cell => key(cell.x, cell.y) === targetKey)) options.push({ piece, candidate });
         }
         if (options.length && (!selectedOptions || options.length < selectedOptions.length)) selectedOptions = options;
       }
