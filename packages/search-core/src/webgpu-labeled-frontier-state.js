@@ -101,6 +101,12 @@ function normalizeMask(mask, wordCount, label) {
   return Uint32Array.from(mask, word => { if (!Number.isSafeInteger(word) || word < 0 || word > 0xffffffff) throw new TypeError(`${label} contains a non-uint32 word`); return word; });
 }
 
+function normalizeParentStateIndex(value, label = 'parentStateIndex') {
+  if (value == null) return null;
+  if (!Number.isSafeInteger(value) || value < 0) throw new TypeError(`${label} must be a non-negative safe integer`);
+  return value;
+}
+
 function remainingMask(ids) {
   if (!Array.isArray(ids)) throw new TypeError('remainingIds must be an array');
   const mask = new Uint32Array(REMAINING_MASK_WORD_COUNT);
@@ -124,8 +130,8 @@ export function createLabeledFrontierStateCandidate({ parentPlacements, candidat
   if (pieceIndex < 0) throw new RangeError('candidate.id must be present in pieceIds');
   const parentLabelMasks = new Uint32Array(ids.length * normalizedGrid.wordCount);
   for (const placement of placementList) { const index = ids.indexOf(placement?.id); if (index < 0 || !Array.isArray(placement.cells) || placement.cells.length === 0) throw new TypeError('parent placements must use pieceIds and contain cells'); setMask(parentLabelMasks, index * normalizedGrid.wordCount, placement.cells, normalizedGrid); }
-  if (parentStateIndex != null && (!Number.isSafeInteger(parentStateIndex) || parentStateIndex < 0)) throw new TypeError('parentStateIndex must be a non-negative safe integer');
-  return Object.freeze({ parentLabelMasks, candidateMask: createFrontierMaskFromCells(candidate.cells, normalizedGrid), candidatePieceIndex: pieceIndex, remainingMask: remainingMask(remainingIds), pieceIds: ids, ...(parentStateIndex == null ? {} : { parentStateIndex }) });
+  const normalizedParentStateIndex = normalizeParentStateIndex(parentStateIndex);
+  return Object.freeze({ parentLabelMasks, candidateMask: createFrontierMaskFromCells(candidate.cells, normalizedGrid), candidatePieceIndex: pieceIndex, remainingMask: remainingMask(remainingIds), pieceIds: ids, ...(normalizedParentStateIndex == null ? {} : { parentStateIndex: normalizedParentStateIndex }) });
 }
 
 function normalizeCandidates(candidates, grid) {
@@ -134,7 +140,8 @@ function normalizeCandidates(candidates, grid) {
   const normalized = candidates.map((candidate, index) => {
     const ids = normalizePieceIds(candidate?.pieceIds);
     if (!pieceIds) pieceIds = ids; else if (JSON.stringify(ids) !== JSON.stringify(pieceIds)) throw new TypeError('all candidates must use the same pieceIds');
-    return Object.freeze({ parentLabelMasks: normalizeMask(candidate.parentLabelMasks, ids.length * grid.wordCount, `candidate ${index}.parentLabelMasks`), candidateMask: normalizeMask(candidate.candidateMask, grid.wordCount, `candidate ${index}.candidateMask`), candidatePieceIndex: candidate.candidatePieceIndex, remainingMask: normalizeMask(candidate.remainingMask, REMAINING_MASK_WORD_COUNT, `candidate ${index}.remainingMask`), pieceIds: ids });
+    const parentStateIndex = normalizeParentStateIndex(candidate.parentStateIndex, `candidate ${index}.parentStateIndex`);
+    return Object.freeze({ parentLabelMasks: normalizeMask(candidate.parentLabelMasks, ids.length * grid.wordCount, `candidate ${index}.parentLabelMasks`), candidateMask: normalizeMask(candidate.candidateMask, grid.wordCount, `candidate ${index}.candidateMask`), candidatePieceIndex: candidate.candidatePieceIndex, remainingMask: normalizeMask(candidate.remainingMask, REMAINING_MASK_WORD_COUNT, `candidate ${index}.remainingMask`), pieceIds: ids, ...(parentStateIndex == null ? {} : { parentStateIndex }) });
   });
   normalized.forEach((candidate, index) => { if (!Number.isSafeInteger(candidate.candidatePieceIndex) || candidate.candidatePieceIndex < 0 || candidate.candidatePieceIndex >= candidate.pieceIds.length) throw new TypeError(`candidate ${index}.candidatePieceIndex is invalid`); });
   return { normalized, pieceIds: Object.freeze(pieceIds) };

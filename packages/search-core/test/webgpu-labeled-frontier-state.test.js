@@ -1,13 +1,30 @@
 import assert from 'node:assert/strict';
 import { canonicalSignatureFromLabeledFrontierState, createLabeledFrontierStateCandidate, cpuTransitionLabeledFrontierStates, createWebGpuLabeledFrontierState, WEBGPU_LABELED_FRONTIER_STATE_SCHEMA } from '../src/webgpu-labeled-frontier-state.js';
 
-const candidate = createLabeledFrontierStateCandidate({
+const candidateInput = {
   pieceIds: [3, 49, 97],
   parentPlacements: [{ id: 3, cells: [{ x: 2, y: 0 }] }, { id: 49, cells: [{ x: 3, y: 0 }] }],
   candidate: { id: 97, cells: [{ x: 2, y: 1 }] },
   remainingIds: [97],
-});
+};
+const candidate = createLabeledFrontierStateCandidate(candidateInput);
 const cpu = cpuTransitionLabeledFrontierStates([candidate]);
+
+const referencedCandidate = createLabeledFrontierStateCandidate({ ...candidateInput, parentStateIndex: 7 });
+assert.equal(referencedCandidate.parentStateIndex, 7);
+assert.deepEqual(cpuTransitionLabeledFrontierStates([referencedCandidate]), cpu);
+assert.throws(
+  () => createLabeledFrontierStateCandidate({ ...candidateInput, parentStateIndex: -1 }),
+  /parentStateIndex must be a non-negative safe integer/,
+);
+assert.throws(
+  () => cpuTransitionLabeledFrontierStates([{ ...candidate, parentStateIndex: 1.5 }]),
+  /candidate 0\.parentStateIndex must be a non-negative safe integer/,
+);
+assert.throws(
+  () => cpuTransitionLabeledFrontierStates([{ ...candidate, parentStateIndex: '7' }]),
+  /candidate 0\.parentStateIndex must be a non-negative safe integer/,
+);
 
 assert.equal(cpu.schema, WEBGPU_LABELED_FRONTIER_STATE_SCHEMA);
 assert.deepEqual(cpu.pieceIds, [3, 49, 97]);
