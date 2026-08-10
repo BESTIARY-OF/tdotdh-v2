@@ -7,6 +7,8 @@
  */
 
 export const WORKER_PROTOCOL_VERSION = 1;
+export const SEARCH_MODES = Object.freeze({ breadth: "breadth", depth: "depth" });
+export const DEFAULT_SEARCH_MODE = SEARCH_MODES.depth;
 export const MAX_SIGNATURE_HINTS = 256;
 export const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 export const MAX_RESULT_BYTES = 4 * 1024 * 1024;
@@ -86,6 +88,16 @@ function normalizeCursor(value = {}) {
   };
 }
 
+function normalizeMode(value) {
+  if (value == null) return DEFAULT_SEARCH_MODE;
+  if (value !== SEARCH_MODES.breadth && value !== SEARCH_MODES.depth) {
+    throw new WorkerProtocolError("INVALID_MODE", `mode must be \"${SEARCH_MODES.breadth}\" or \"${SEARCH_MODES.depth}\".`, {
+      received: value,
+    });
+  }
+  return value;
+}
+
 function normalizeHints(value) {
   if (value == null) return [];
   if (!Array.isArray(value)) {
@@ -149,6 +161,7 @@ export function createSearchRequest(input) {
     presetFingerprint,
     catalogRevision: requireString(source.catalogRevision, "catalogRevision"),
     seed: requireString(source.seed, "seed", MAX_SEED_LENGTH),
+    mode: normalizeMode(source.mode),
     ticket: normalizeTicket(source.ticket, presetFingerprint),
     cursor: normalizeCursor(source.cursor),
     budget: normalizeBudget(source.budget),
@@ -224,6 +237,7 @@ export function createWorkerRuntime({ postMessage, execute }) {
       requestId: run?.request.requestId ?? null,
       ticket: run?.request.ticket ?? null,
       cursor: run?.cursor ?? null,
+      mode: run?.request.mode ?? null,
       type,
       sequence: ++sequence,
       ...payload,
@@ -237,6 +251,7 @@ export function createWorkerRuntime({ postMessage, execute }) {
       requestId,
       ticket: run?.request.ticket ?? null,
       cursor: run?.cursor ?? null,
+      mode: run?.request.mode ?? null,
       type: "failed",
       sequence: ++sequence,
       phase,

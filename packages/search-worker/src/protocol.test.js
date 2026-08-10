@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import {
   MAX_SIGNATURE_HINTS,
+  DEFAULT_SEARCH_MODE,
+  SEARCH_MODES,
   WORKER_PROTOCOL_VERSION,
   WorkerProtocolError,
   createSearchRequest,
@@ -26,8 +28,16 @@ const baseCommand = {
 const request = createSearchRequest(baseCommand);
 assert.deepEqual(request.ticket, baseCommand.ticket);
 assert.deepEqual(request.cursor, baseCommand.cursor);
+assert.equal(request.mode, DEFAULT_SEARCH_MODE);
 assert.equal(request.knownSignatureHints.length, 2);
 assert.equal(request.payloadBytes > 0, true);
+
+const breadthRequest = createSearchRequest({ ...baseCommand, requestId: "search-breadth", mode: SEARCH_MODES.breadth });
+assert.equal(breadthRequest.mode, SEARCH_MODES.breadth);
+assert.throws(
+  () => createSearchRequest({ ...baseCommand, mode: "balanced" }),
+  (error) => error instanceof WorkerProtocolError && error.code === "INVALID_MODE",
+);
 
 assert.throws(
   () => createSearchRequest({ ...baseCommand, knownSignatureHints: Array.from({ length: MAX_SIGNATURE_HINTS + 1 }, (_, index) => `sig-${index}`) }),
@@ -55,6 +65,7 @@ await running;
 
 assert.deepEqual(events.map((event) => event.type), ["started", "progress", "cancelled"]);
 assert.deepEqual(events.map((event) => event.sequence), [1, 2, 3]);
+assert.deepEqual(events.map((event) => event.mode), [DEFAULT_SEARCH_MODE, DEFAULT_SEARCH_MODE, DEFAULT_SEARCH_MODE]);
 assert.deepEqual(events[1].ticket, baseCommand.ticket);
 assert.deepEqual(events[1].cursor, { depth: 1, nodeOffset: 1, rootChoice: 2 });
 assert.deepEqual(events[2].cursor, { depth: 1, nodeOffset: 1, rootChoice: 2 });
@@ -65,5 +76,14 @@ const idleRuntime = createWorkerRuntime({ postMessage: (event) => failed.push(ev
 await idleRuntime.handleMessage({ type: "cancel", requestId: "missing" });
 assert.equal(failed[0].type, "failed");
 assert.equal(failed[0].error.code, "NO_ACTIVE_REQUEST");
+
+const breadthEvents = [];
+const breadthRuntime = createWorkerRuntime({
+  postMessage: (event) => breadthEvents.push(event),
+  execute: async () => ({ placements: [{ id: 3, cells: [{ x: 0, y: 0 }] }], nodes: 1 }),
+});
+await breadthRuntime.handleMessage({ ...baseCommand, requestId: "search-breadth-runtime", mode: SEARCH_MODES.breadth });
+assert.deepEqual(breadthEvents.map((event) => event.type), ["started", "result", "completed"]);
+assert.equal(breadthEvents.every((event) => event.mode === SEARCH_MODES.breadth), true);
 
 console.log("search-worker protocol smoke test passed");
