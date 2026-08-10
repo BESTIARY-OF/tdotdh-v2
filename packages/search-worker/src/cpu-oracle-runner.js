@@ -1,4 +1,5 @@
 import { createSearchRequest } from './protocol.js';
+import { protocolCursorToWorkCursor, workCursorToProtocolCursor } from './cursor-bridge.js';
 
 function cellKey(cell) {
   if (!Number.isSafeInteger(cell?.x) || !Number.isSafeInteger(cell?.y)) {
@@ -47,6 +48,7 @@ function clone(value) {
 export async function runCpuOracleBatch(input, { reportProgress = () => {}, isCancelled = () => false, candidatePrefilter = null } = {}) {
   const request = input?.type === 'start' ? createSearchRequest(input) : input;
   if (!request?.ticket || !request?.cursor || !request?.budget) throw new TypeError('a normalized search request is required');
+  const workCursor = protocolCursorToWorkCursor(request.cursor, request.ticket, { runSeed: request.seed });
   const candidates = request.constraints?.candidateArrangements;
   if (!Array.isArray(candidates)) throw new TypeError('constraints.candidateArrangements must be an array');
 
@@ -66,12 +68,13 @@ export async function runCpuOracleBatch(input, { reportProgress = () => {}, isCa
   const signatures = [];
   let selectedPlacements = [];
   let nodes = 0;
+  const cursorAt = nodeCursor => workCursorToProtocolCursor({ ...workCursor, nodeCursor });
 
   for (let index = 0; index < limit; index += 1) {
     if (isCancelled()) break;
     if (validity && validity[start + index] !== 1) {
       nodes += 1;
-      reportProgress({ nodes, depth: request.cursor.depth, frontier: 0, families: signatures.length, cursor: { ...request.cursor, nodeOffset: start + index + 1 } });
+      reportProgress({ nodes, depth: request.cursor.depth, frontier: 0, families: signatures.length, cursor: cursorAt(start + index + 1) });
       await Promise.resolve();
       continue;
     }
@@ -82,7 +85,7 @@ export async function runCpuOracleBatch(input, { reportProgress = () => {}, isCa
       if (selectedPlacements.length === 0) selectedPlacements = placements;
     }
     nodes += 1;
-    reportProgress({ nodes, depth: request.cursor.depth, frontier: 0, families: signatures.length, cursor: { ...request.cursor, nodeOffset: start + index + 1 } });
+    reportProgress({ nodes, depth: request.cursor.depth, frontier: 0, families: signatures.length, cursor: cursorAt(start + index + 1) });
     await Promise.resolve();
   }
 
@@ -90,7 +93,7 @@ export async function runCpuOracleBatch(input, { reportProgress = () => {}, isCa
     placements: selectedPlacements,
     canonicalSignatures: signatures,
     nodes,
-    cursor: { ...request.cursor, nodeOffset: start + nodes },
+    cursor: cursorAt(start + nodes),
     ticket: { ...request.ticket },
     cancelled: isCancelled(),
     ...(prefilterReceipt ? { prefilter: prefilterReceipt } : {}),
