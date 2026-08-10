@@ -600,7 +600,7 @@ async function evaluateFrontierState(entries, state, frontierState, onState = ()
     }));
     const result = frontierState.expand ? await frontierState.expand(candidates) : await frontierState.transition(candidates);
     if (result?.status === 'completed' && result.parity === 'verified' && Array.isArray(result.absoluteHashes) && result.absoluteHashes.length === entries.length) {
-      onState({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, persistent: result.persistent === true, resident: result.navigator?.status === 'resident', navigatorEpoch: result.navigator?.epoch, bufferCapacity: result.bufferCapacity, candidateCount: entries.length });
+      onState({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, persistent: result.persistent === true, resident: result.navigator?.status === 'resident', navigatorEpoch: result.navigator?.epoch, bufferCapacity: result.bufferCapacity, candidateCount: entries.length, parentReference: result.parentReference });
       const wordCount = Number(result.wordCount) || 0;
       const labelsPerCandidate = result.pieceIds.length * wordCount;
       return entries.map((entry, index) => {
@@ -640,7 +640,7 @@ async function evaluateFrontierStateAcrossBeam(jobs, frontierState, onState = ()
         else Object.assign(statePayload, { nextLabels: result.nextLabels.slice(labelStart, labelStart + labelsPerCandidate), canonicalLabels });
         jobs[item.jobIndex].entries[item.entryIndex] = { ...item.entry, gpuState: statePayload };
       }
-      onState({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, persistent: result.persistent === true, resident: result.navigator?.status === 'resident', navigatorEpoch: result.navigator?.epoch, bufferCapacity: result.bufferCapacity, candidateCount: pending.length, batch: 'beam' });
+      onState({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, persistent: result.persistent === true, resident: result.navigator?.status === 'resident', navigatorEpoch: result.navigator?.epoch, bufferCapacity: result.bufferCapacity, candidateCount: pending.length, batch: 'beam', parentReference: result.parentReference });
       return jobs;
     }
     onState({ status: 'fallback', reason: result?.reason || 'frontier-state-unavailable', candidateCount: pending.length, batch: 'beam' });
