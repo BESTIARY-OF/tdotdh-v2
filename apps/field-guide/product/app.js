@@ -1008,7 +1008,7 @@ function stopContinuousSearch(message = 'Auto-search paused') {
 function launchSearchPass() {
   if (!app.continuous) return;
   app.solving = true; const button = document.querySelector('#solveButton'); setSearchButton(); showSearchBoard(); document.querySelector('#searchStatus').textContent = `Growing candidates · pass ${app.pass + 1}`;
-  const worker = new Worker('/apps/field-guide/product/v2-search-worker.js?v=20260810-v2worker48', { type: 'module' }); app.searchWorker = worker; const startingNodes = app.totalNodes, startedAt = performance.now();
+  const worker = new Worker('/apps/field-guide/product/v2-search-worker.js?v=20260810-v2worker49', { type: 'module' }); app.searchWorker = worker; const startingNodes = app.totalNodes, startedAt = performance.now();
   const families = new Map();
   app.snapshots.forEach(snapshot => { const familyId = snapshotFamilyId(snapshot); if (!families.has(familyId)) families.set(familyId, []); families.get(familyId).push(snapshot); });
   const orderedFamilies = [...families.entries()].map(([family, snapshots]) => [family, orderedSnapshots(snapshots)]).filter(([, snapshots]) => snapshots.length).sort((a, b) => { const aMetric = familySortMetric(a[1]), bMetric = familySortMetric(b[1]); return aMetric.primary - bMetric.primary || aMetric.secondary - bMetric.secondary; });
@@ -1040,7 +1040,7 @@ function launchSearchPass() {
     const gpuStages = Object.entries(stageReceipts).filter(([, receipt]) => receipt?.status === 'used' || receipt?.status === 'completed' && receipt?.backend === 'webgpu').map(([name]) => name);
     const cpuFallbackStages = Object.entries(stageReceipts).filter(([, receipt]) => receipt?.status === 'fallback' || receipt?.status === 'cpu-oracle' || receipt?.status === 'not-used').map(([name]) => name);
     const stageAvailability = result.gpuExecution?.stageAvailability || {};
-    const cpuFallbackReasons = Object.fromEntries(Object.entries(stageReceipts).filter(([, receipt]) => receipt?.status === 'fallback' || receipt?.status === 'cpu-oracle' || receipt?.status === 'not-used').map(([name, receipt]) => [name, receipt?.reason || stageAvailability[name]?.reason || stageAvailability[name]?.status || receipt?.status || 'unknown']));
+    const cpuFallbackReasons = Object.fromEntries(Object.entries(stageReceipts).filter(([, receipt]) => receipt?.status === 'fallback' || receipt?.status === 'cpu-oracle' || receipt?.status === 'not-used').map(([name, receipt]) => [name, receipt?.reason || (receipt?.status === 'cpu-oracle' ? 'not-executed' : stageAvailability[name]?.reason || stageAvailability[name]?.status || receipt?.status || 'unknown')]));
     const elapsedMs = Math.max(0, performance.now() - startedAt);
     globalThis.__TDOTDH_V2_LAST_SEARCH_RECEIPT__ = Object.freeze({ schema: 'tdotdh.v2.search-receipt.v1', elapsedMs, gpuExecution: result.gpuExecution || null, gpuStages: Object.freeze(gpuStages), cpuFallbackStages: Object.freeze(cpuFallbackStages), cpuFallbackReasons: Object.freeze(cpuFallbackReasons), ...stageReceipts, placements: Array.isArray(result.placements) ? result.placements.length : 0, nodes: Number(result.nodes) || 0 });
     const runtimeStatus = document.querySelector('#v2RuntimeStatus');
