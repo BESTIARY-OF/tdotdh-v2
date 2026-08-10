@@ -3,7 +3,7 @@ import { createRendererRequest } from '../../../packages/browser-handoff/src/ren
 import { createRendererAdapter } from '../../../packages/browser-handoff/src/renderer-adapter-capability.js';
 import { createCpuOracleFirstAdapter } from '../../../packages/search-core/src/compute-adapter.js';
 import { createWebGpuDeviceCache } from '../../../packages/search-core/src/webgpu-device-cache.js';
-import { probeWebGpuExecutionCapabilities } from '../../../packages/search-core/src/webgpu-execution-probe.js';
+import { probeWebGpuExecutionCapabilities } from '../../../packages/search-core/src/webgpu-execution-probe.js?v=20260810-gpu35';
 import { createWebGpuCandidateScorer, cpuCandidateScores } from '../../../packages/search-core/src/webgpu-candidate-scorer.js';
 import { createWebGpuCandidatePrefilter, cpuCandidatePrefilter } from '../../../packages/search-core/src/webgpu-candidate-prefilter.js';
 import { createWebGpuFrontierTargetPool, cpuGenerateFrontierTargetPoolBatch } from '../../../packages/search-core/src/webgpu-frontier-target-pool.js';
