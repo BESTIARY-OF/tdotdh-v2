@@ -865,6 +865,8 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const positionLocks = options.positionLocks || {};
   const knownSignatures = new Set(options.knownSignatures || []);
   const isCancelled = typeof options.isCancelled === 'function' ? options.isCancelled : () => false;
+  const navigationBatch = typeof options.navigationBatch === 'function' ? options.navigationBatch : null;
+  const navigationCancellation = typeof options.navigationCancellation === 'function' ? options.navigationCancellation : null;
   const navigationTicket = options.navigationTicket || null;
   const navigationCursor = options.navigationCursor || null;
   const reportProgress = typeof options.reportProgress === 'function'
@@ -904,7 +906,10 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   let nodes = 0, fallback = null, bestHintResult = null, lastDepth = restored?.depth || 0;
   const pieceCount = pieces.length;
   for (let depth = restored?.depth || 0; depth < pieceCount - 1 && beam.length && nodes < NODE_LIMIT; depth++) {
-    if (isCancelled()) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierDedup: frontierDedupReceipt };
+    const cancelled = isCancelled();
+    if (navigationCancellation) navigationCancellation(cancelled);
+    if (cancelled) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierDedup: frontierDedupReceipt };
+    const navigationBatchReceipt = navigationBatch?.({ stage: 'frontier-expansion', depth, nodeOffset: restoredNodeOffset + nodes, candidateCount: beam.length });
     const nextBeam = [];
     const gpuStateBuckets = new Map();
     const cpuStateKeys = new Set();
@@ -936,6 +941,12 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       ? await generateFrontierTranslationsAcrossBeam(beamPlans, frontierGenerator, receipt => { frontierGenerationReceipt = receipt; }, frontierGeneratorStatus)
       : null;
     if (!useGeneratedFrontier && frontierGenerator?.generate && frontierGenerationReceipt.status === 'cpu-oracle') frontierGenerationReceipt = { status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', candidateCount: 0 };
+    if (navigationBatchReceipt) {
+      const annotate = receipt => receipt?.status ? { ...receipt, navigationBatch: navigationBatchReceipt } : receipt;
+      frontierTargetPoolReceipt = annotate(frontierTargetPoolReceipt);
+      frontierTargetGenerationReceipt = annotate(frontierTargetGenerationReceipt);
+      frontierGenerationReceipt = annotate(frontierGenerationReceipt);
+    }
     for (const [planIndex, plan] of beamPlans.entries()) {
       const state = plan.state, generatedByPiece = generatedByBeam?.[planIndex] || null, generatedByTarget = generatedByTargetBeam?.[planIndex] || null;
       let selectedOptions = null;
@@ -958,6 +969,9 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     await evaluateFieldAggregatesAcrossBeam(beamJobs, centroidId, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; });
     await evaluateFrontierOptionsAcrossBeam(beamJobs, centroidId, frontierEvaluator, options.frontierValidator, receipt => { frontierReceipt = { ...receipt, ...(navigationTicket ? { ticket: navigationTicket } : {}), ...(navigationCursor ? { cursor: { ...navigationCursor, depth, nodeOffset: navigationCursor.nodeOffset + nodes } } : {}) }; });
     await evaluateFrontierStateAcrossBeam(beamJobs, frontierState, receipt => { frontierStateReceipt = receipt; });
+    const cancelledAfterGpu = isCancelled();
+    if (navigationCancellation) navigationCancellation(cancelledAfterGpu);
+    if (cancelledAfterGpu) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierDedup: frontierDedupReceipt };
     for (const job of beamJobs) {
       const state = job.state;
       let selectedOptions = job.entries;

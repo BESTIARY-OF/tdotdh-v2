@@ -21,12 +21,14 @@ The GPU may return compact candidates and scores, but it must return canonical
 arrangement signatures that the CPU can replay. A signature mismatch is a
 correctness failure, not a performance tradeoff. If an adapter is unavailable
 or fails parity, the coordinator falls back to CPU and records that fact in the
-receipt. Ticketing, cursor arbitration, cancellation acknowledgement,
-checkpoint serialization, and final canonical acceptance remain CPU-owned
-until the end-to-end navigator parity gate is closed. The product worker now
-carries a bounded versioned beam checkpoint through the cursor and persists it
-across a reload; GPU state is recomputed on resume rather than trusted from
-storage.
+receipt. The navigation coordinator now issues deterministic per-stage batch
+tickets, carries their cursors into generation receipts, and records
+cancellation checks before and after a GPU expansion layer. Ticketing, cursor
+arbitration, checkpoint serialization, and final canonical acceptance remain
+CPU-owned until the end-to-end navigator parity gate is closed. The product
+worker carries a bounded versioned beam checkpoint through the cursor and
+persists it across a reload; GPU state is recomputed on resume rather than
+trusted from storage.
 
 The worker boundary remains responsible for cancellation acknowledgement,
 checkpoint persistence, and ordered result delivery. GPU dispatch must not make
@@ -73,6 +75,13 @@ not completed gate 6:
 parity in the field-metrics shader.
 - The dedup seam is hash-first on the GPU and exact-signature gated by the CPU
   oracle; hash collisions or unavailable dispatch leave CPU admission unchanged.
+- `79301c6` hardens the worker transport and real product-worker receipt path:
+  terminal cursors remain monotonic, result envelopes cannot be overwritten by
+  search payload fields, and the runtime test covers `started → progress →
+  result → completed`.
+- The navigation receipt now exposes deterministic stage batch ordinals and
+  cancellation-check counts; these are the next evidence surface for closing
+  gate 6 rather than treating GPU dispatch as an opaque side effect.
 
 The live 5174 runtime receipt for this seam is recorded in
 `docs/receipts/webgpu-deduplicator-runtime-2026-08-10.md`.

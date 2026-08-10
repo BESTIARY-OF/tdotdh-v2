@@ -36,6 +36,12 @@ across all beam states, while the product receipt carries the worker ticket
 and cursor used for that dispatch. Candidate-to-state remapping and CPU
 canonical admission remain deterministic after readback.
 
+Each expansion layer also receives a deterministic navigation batch ordinal and
+stage ticket. The worker checks cancellation at the layer boundary and again
+after the GPU stages return; the receipt records those checks alongside the
+resumable cursor. This makes a cancelled or resumed GPU layer observable rather
+than relying on timing or an implicit worker state.
+
 When WebGPU is available, frontier generation is issued as one flattened batch
 for all retained beam states and their remaining pieces, chunked only at the
 adapter's storage safety limit. The batch shader emits deterministic origins

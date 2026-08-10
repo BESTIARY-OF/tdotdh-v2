@@ -27,6 +27,11 @@ function assertForward(previous, next) {
   if (next.nodeOffset < previous.nodeOffset) throw new TypeError('navigation cursor nodeOffset cannot move backward');
 }
 
+function requireStage(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 96) throw new TypeError('navigation batch stage must be a non-empty string of at most 96 characters');
+  return value;
+}
+
 /** Owns the product-search lifecycle receipt without owning search topology. */
 export function createNavigationCoordinator({ ticket, cursor = {} } = {}) {
   if (!ticket || typeof ticket !== 'object') throw new TypeError('navigation ticket is required');
@@ -34,6 +39,8 @@ export function createNavigationCoordinator({ ticket, cursor = {} } = {}) {
   const startCursor = normalizeCursor(cursor);
   let latestCursor = startCursor;
   let progressCount = 0;
+  let batchCount = 0;
+  let cancellationChecks = 0;
 
   const observeProgress = nextCursor => {
     const normalized = normalizeCursor(nextCursor);
@@ -41,6 +48,18 @@ export function createNavigationCoordinator({ ticket, cursor = {} } = {}) {
     latestCursor = normalized;
     progressCount += 1;
     return latestCursor;
+  };
+
+  const beginBatch = ({ stage, depth = latestCursor.depth, nodeOffset = latestCursor.nodeOffset, candidateCount = 0 } = {}) => {
+    const nextCursor = normalizeCursor({ ...latestCursor, depth: Math.max(latestCursor.depth, integer(depth, 'batch.depth')), nodeOffset: Math.max(latestCursor.nodeOffset, integer(nodeOffset, 'batch.nodeOffset')) });
+    const receipt = Object.freeze({ schema: NAVIGATION_COORDINATOR_SCHEMA, ordinal: batchCount, stage: requireStage(stage), ticket: Object.freeze({ ...stableTicket, batchOrdinal: batchCount, stage: requireStage(stage) }), cursor: nextCursor, candidateCount: integer(candidateCount, 'batch.candidateCount') });
+    batchCount += 1;
+    return receipt;
+  };
+
+  const observeCancellation = cancelled => {
+    cancellationChecks += 1;
+    return Object.freeze({ checked: true, cancelled: Boolean(cancelled), count: cancellationChecks, cursor: latestCursor });
   };
 
   const complete = result => {
@@ -54,10 +73,12 @@ export function createNavigationCoordinator({ ticket, cursor = {} } = {}) {
       startCursor,
       cursor: resultCursor,
       progressCount,
+      batchCount,
+      cancellationChecks,
       canonicalReplay: placements ? 'verified' : 'not-run',
       ...(canonicalSignature ? { canonicalSignature } : {}),
     });
   };
 
-  return Object.freeze({ ticket: stableTicket, cursor: () => latestCursor, observeProgress, complete });
+  return Object.freeze({ ticket: stableTicket, cursor: () => latestCursor, beginBatch, observeProgress, observeCancellation, complete });
 }

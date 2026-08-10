@@ -56,6 +56,8 @@ async function runProductSearch(request, context) {
     frontierCompactor,
     frontierDeduplicator,
     isCancelled: context.isCancelled,
+    navigationBatch: details => navigation.beginBatch(details),
+    navigationCancellation: cancelled => navigation.observeCancellation(cancelled),
     reportProgress: progress => context.reportProgress({ ...progress, cursor: navigation.observeProgress(progress.cursor) }),
   });
   return {

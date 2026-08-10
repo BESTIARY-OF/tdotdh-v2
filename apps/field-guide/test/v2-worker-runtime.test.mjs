@@ -61,5 +61,7 @@ assert.equal(result.navigation.schema, 'tdotdh.navigation-coordinator.v0');
 assert.equal(result.navigation.ticket.threadId, 0);
 assert.equal(result.navigation.canonicalReplay, result.placements.length ? 'verified' : 'not-run');
 assert.ok(result.navigation.progressCount >= 1);
+assert.ok(result.navigation.batchCount >= 1);
+assert.ok(result.navigation.cancellationChecks >= 2);
 assert.equal(result.navigation.cursor.rootChoice, 0);
 console.log('v2 product worker runtime receipt passed');
