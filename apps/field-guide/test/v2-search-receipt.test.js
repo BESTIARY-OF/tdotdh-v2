@@ -9,6 +9,7 @@ import { cpuGenerateFrontierTargetPoolBatch } from '../../../packages/search-cor
 import { cpuDeduplicateFrontierStates } from '../../../packages/search-core/src/webgpu-frontier-deduplicator.js';
 import { cpuCompactFrontierRows } from '../../../packages/search-core/src/webgpu-frontier-compactor.js';
 import { cpuCompactFrontierCandidateRecords } from '../../../packages/search-core/src/webgpu-frontier-candidate-records.js';
+import { createWebGpuFrontierNavigationPlanFromCandidateRecords } from '../../../packages/search-core/src/webgpu-frontier-navigation-plan.js';
 
 globalThis.postMessage = () => {};
 
@@ -75,6 +76,20 @@ const flatNavigationScheduler = {
     return { status: 'completed', backend: 'test-navigation-webgpu', parity: 'verified', rowCount: rows.length, selectedRows: rows.map((_, index) => index), selectedCount: rows.length, planCount, inputDigest: 'test-flat-navigation' };
   },
 };
+let fallbackFlatRecordCount = 0;
+const fallbackTargetGenerator = {
+  availability: async () => ({ status: 'available', backend: 'webgpu' }),
+  generateBatch: async () => ({ status: 'unavailable', backend: 'webgpu', reason: 'test-target-generator-capacity' }),
+};
+const fallbackFlatNavigationScheduler = {
+  availability: async () => ({ status: 'available', backend: 'webgpu' }),
+  selectCandidateRecords: async (plans, { planCount }) => {
+    const plan = createWebGpuFrontierNavigationPlanFromCandidateRecords(plans);
+    const currentCount = plans.reduce((sum, plan) => sum + plan.records.length, 0);
+    fallbackFlatRecordCount += currentCount;
+    return { status: 'completed', backend: 'webgpu', parity: 'verified', plan, rowCount: currentCount, selectedRows: Array.from({ length: currentCount }, (_, index) => index), selectedCount: currentCount, planCount, inputDigest: 'test-fallback-flat-navigation' };
+  },
+};
 let frontierCandidateRecordCalls = 0;
 const frontierCandidateRecords = {
   compact: async records => { frontierCandidateRecordCalls += 1; return { ...cpuCompactFrontierCandidateRecords(records), status: 'completed', backend: 'test-frontier-candidate-records', parity: 'verified' }; },
@@ -121,6 +136,7 @@ const singleResult = await search(pieces, [], { ...sharedOptions, frontierGenera
 const result = await search(pieces, [], { ...sharedOptions, frontierGenerator });
 const targetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator, frontierCandidateRecords });
 const flatTargetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator, frontierCandidateRecords, navigationScheduler: flatNavigationScheduler });
+const fallbackTargetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator: fallbackTargetGenerator, navigationScheduler: fallbackFlatNavigationScheduler });
 const targetPoolResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator, frontierTargetPool });
 const depthResult = await search(pieces, [], { ...sharedOptions, searchStrategy: 'depth', frontierCompactor });
 const breadthResult = await search(pieces, [], { ...sharedOptions, searchStrategy: 'breadth', frontierCompactor });
@@ -136,6 +152,7 @@ const lockedPieces = [
   { id: 4, cells },
 ];
 let lockedTargetPoolCalls = 0;
+let lockedNavigationBatchCalls = 0;
 const lockedTargetPool = {
   availability: async () => ({ status: 'available', backend: 'webgpu' }),
   generateBatch: async inputs => {
@@ -149,6 +166,7 @@ const lockedResult = await search(lockedPieces, [], {
   positionLocks: { 1: { dx: 3, dy: 0 } },
   frontierGenerator: singleFrontierGenerator,
   frontierTargetPool: lockedTargetPool,
+  navigationBatch: () => { lockedNavigationBatchCalls += 1; },
 });
 const residentBaseline = await search(lockedPieces, [], { ...sharedOptions, searchStrategy: 'breadth', frontierGenerator });
 const residentResult = await search(lockedPieces, [], { ...sharedOptions, searchStrategy: 'breadth', frontierGenerator, frontierNavigator: residentNavigator });
@@ -181,6 +199,9 @@ assert.deepEqual(targetResult.metrics, result.metrics);
 assert.ok(flatNavigationSelectCalls > 0);
 assert.deepEqual(flatTargetResult.placements, result.placements);
 assert.deepEqual(flatTargetResult.metrics, result.metrics);
+assert.ok(fallbackFlatRecordCount > 0, 'target-generator fallback must preserve flat records for GPU navigation');
+assert.equal(fallbackTargetResult.frontierTargetGeneration.status, 'fallback');
+assert.equal(fallbackTargetResult.navigationPlan.status, 'used');
 assert.equal(targetPoolResult.frontierTargetPool.status, 'used');
 assert.equal(targetPoolResult.frontierTargetPool.backend, 'test-frontier-target-pool');
 assert.equal(targetPoolResult.frontierTargetPool.batch, 'beam');
@@ -206,6 +227,7 @@ assert.deepEqual(targetPoolResult.metrics, result.metrics);
 assert.deepEqual(resumedResult.placements, checkpointResult.placements);
 assert.deepEqual(resumedResult.metrics, checkpointResult.metrics);
 assert.ok(lockedTargetPoolCalls > 0);
+assert.ok(lockedNavigationBatchCalls > 0, 'locked family branches must report navigation batches to the coordinator');
 assert.equal(lockedResult.frontierTargetPool.status, 'used');
 assert.equal(lockedResult.frontierTargetPool.backend, 'test-frontier-target-pool');
 assert.equal(lockedResult.frontierTargetPool.batch, 'locked-branch');
