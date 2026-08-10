@@ -82,6 +82,12 @@ parity in the field-metrics shader.
 - The navigation receipt now exposes deterministic stage batch ordinals and
   cancellation-check counts; these are the next evidence surface for closing
   gate 6 rather than treating GPU dispatch as an opaque side effect.
+- `859ff38` extends that receipt with `expansionBackend`, `expansionParity`,
+  `expansionOwnership`, and `gpuExpansionBatches`. The product and realistic
+  fixture benchmark now exercise the same coordinator lifecycle. `45877fe`
+  removes a duplicate CPU candidate-generation pass after GPU frontier origins
+  have been returned; the remaining CPU work is an explicit target-index join,
+  not a second search of the candidate space.
 
 The live 5174 runtime receipt for this seam is recorded in
 `docs/receipts/webgpu-deduplicator-runtime-2026-08-10.md`.
