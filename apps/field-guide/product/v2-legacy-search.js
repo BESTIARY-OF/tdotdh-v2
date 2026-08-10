@@ -218,12 +218,13 @@ async function generateFrontierTranslationsAcrossBeam(plans, frontierGenerator, 
   onGeneration({ status: items.length === inputCount ? 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? parity : 'oracle', reason: items.length === inputCount ? undefined : 'frontier-generator-batch-fallback', candidateCount: totalCandidateCount, batches, batch: 'beam', candidateRecords: { backend: recordBackend, parity: recordParity, inputCount: recordInputCount, outputCount: recordOutputCount } });
   return generated;
 }
-async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTargetGenerator, positionLocks, seedOrigin, onGeneration = () => {}, availabilityStatus = null, frontierCandidateRecords = null) {
+async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTargetGenerator, positionLocks, seedOrigin, onGeneration = () => {}, availabilityStatus = null, frontierCandidateRecords = null, materializeCandidates = true) {
   const generated = plans.map(() => new Map());
   if (!plans.length) return generated;
   if (!frontierTargetGenerator?.generateBatch) {
     for (const [planIndex, plan] of plans.entries()) {
       const byTarget = new Map();
+      byTarget.records = [];
       for (const target of plan.targetPool) for (const piece of plan.state.remaining) for (const candidate of candidateTranslationsForTarget(piece, plan.state.field, plan.state.bounds, target, positionLocks, seedOrigin)) {
         const targetKey = key(target.x, target.y), entries = byTarget.get(targetKey) || [];
         entries.push({ piece, candidate }); byTarget.set(targetKey, entries);
@@ -262,6 +263,7 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
   }
   for (const { item, ref } of items) {
     const byTarget = generated[ref.planIndex] || new Map(), piece = ref.piece, pieceCount = Number(item.pieceCount) || applyLock(piece).length, records = [];
+    if (!Array.isArray(byTarget.records)) byTarget.records = [];
     for (let index = 0; index < (item.origins || []).length; index++) {
       if (item.validity?.[index] !== 1) continue;
       const origin = item.origins[index];
@@ -273,8 +275,11 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
     for (const record of compacted.records || []) {
       const target = ref.plan.targetPool[record.targetOrdinal];
       if (!target) continue;
-      const targetKey = key(target.x, target.y), entries = byTarget.get(targetKey) || [];
-      entries.push({ piece, candidate: { id: piece.id, origin: { x: record.originX, y: record.originY }, cells: placedCells(piece, { x: record.originX, y: record.originY }) } }); byTarget.set(targetKey, entries);
+      byTarget.records.push({ pieceId: piece.id, targetOrdinal: record.targetOrdinal, originX: record.originX, originY: record.originY, inputOrdinal: record.inputOrdinal });
+      if (materializeCandidates) {
+        const targetKey = key(target.x, target.y), entries = byTarget.get(targetKey) || [];
+        entries.push({ piece, candidate: { id: piece.id, origin: { x: record.originX, y: record.originY }, cells: placedCells(piece, { x: record.originX, y: record.originY }) } }); byTarget.set(targetKey, entries);
+      }
     }
     generated[ref.planIndex] = byTarget;
   }
@@ -1030,7 +1035,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     for (let index = beamPlans.length - 1; index >= 0; index--) if (!beamPlans[index].targetPool?.length) beamPlans.splice(index, 1);
     const useTargetGeneratedFrontier = frontierTargetGeneratorStatus?.status === 'available';
     const generatedByTargetBeam = useTargetGeneratedFrontier
-      ? await generateFrontierTargetTranslationsAcrossBeam(beamPlans, frontierTargetGenerator, positionLocks, seedOrigin, receipt => { frontierTargetGenerationReceipt = receipt; }, frontierTargetGeneratorStatus, frontierCandidateRecords)
+      ? await generateFrontierTargetTranslationsAcrossBeam(beamPlans, frontierTargetGenerator, positionLocks, seedOrigin, receipt => { frontierTargetGenerationReceipt = receipt; }, frontierTargetGeneratorStatus, frontierCandidateRecords, navigationAvailability?.status !== 'available')
       : null;
     const useGeneratedFrontier = !useTargetGeneratedFrontier && frontierGeneratorStatus?.status === 'available';
     const generatedByBeam = useGeneratedFrontier
@@ -1069,6 +1074,16 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       const navigationRows = [], navigationRefs = [];
       for (const [planIndex, plan] of beamPlans.entries()) {
         const state = plan.state, generatedByPiece = generatedByBeam?.[planIndex] || null, generatedByTarget = generatedByTargetBeam?.[planIndex] || null;
+        if (useTargetGeneratedFrontier) {
+          const remainingById = new Map(state.remaining.map(piece => [piece.id, piece]));
+          for (const record of generatedByTarget?.records || []) {
+            const piece = remainingById.get(record.pieceId), target = plan.targetPool[record.targetOrdinal];
+            if (!piece || !target) continue;
+            navigationRows.push({ planIndex, targetOrdinal: record.targetOrdinal, pieceId: piece.id, candidateIndex: record.inputOrdinal, originX: record.originX, originY: record.originY, targetX: target.x, targetY: target.y });
+            navigationRefs.push({ planIndex, piece, origin: { x: record.originX, y: record.originY } });
+          }
+          continue;
+        }
         for (const [targetOrdinal, target] of plan.targetPool.entries()) {
           for (const piece of state.remaining) {
             let candidates = [];
@@ -1086,13 +1101,14 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         }
       }
       const navigationPlan = await navigationScheduler.select(navigationRows, { planCount: beamPlans.length });
-      navigationPlanReceipt = { status: navigationPlan.status === 'completed' && navigationPlan.backend === 'webgpu' && navigationPlan.parity === 'verified' ? 'used' : navigationPlan.status, backend: navigationPlan.backend, parity: navigationPlan.parity, rowCount: navigationPlan.rowCount, selectedCount: navigationPlan.selectedCount, planCount: navigationPlan.planCount, inputDigest: navigationPlan.inputDigest, ...(navigationPlan.reason ? { reason: navigationPlan.reason } : {}), ...(navigationPlan.dispatch ? { dispatch: navigationPlan.dispatch } : {}) };
+      navigationPlanReceipt = { status: navigationPlan.status === 'completed' && navigationPlan.backend === 'webgpu' && navigationPlan.parity === 'verified' ? 'used' : navigationPlan.status, backend: navigationPlan.backend, parity: navigationPlan.parity, rowCount: navigationPlan.rowCount, selectedCount: navigationPlan.selectedCount, planCount: navigationPlan.planCount, inputDigest: navigationPlan.inputDigest, inputRepresentation: useTargetGeneratedFrontier ? 'flat-target-records' : 'materialized-candidates', ...(navigationPlan.reason ? { reason: navigationPlan.reason } : {}), ...(navigationPlan.dispatch ? { dispatch: navigationPlan.dispatch } : {}) };
       const selectedByPlan = new Map();
       for (const rowIndex of navigationPlan.selectedRows || []) {
         const ref = navigationRefs[rowIndex];
         if (!ref) continue;
         const entries = selectedByPlan.get(ref.planIndex) || [];
-        entries.push({ piece: ref.piece, candidate: ref.candidate });
+        const candidate = ref.candidate || { id: ref.piece.id, origin: ref.origin, cells: placedCells(ref.piece, ref.origin) };
+        entries.push({ piece: ref.piece, candidate });
         selectedByPlan.set(ref.planIndex, entries);
       }
       for (const [planIndex, plan] of beamPlans.entries()) {

@@ -67,6 +67,14 @@ const frontierTargetPool = {
   availability: async () => ({ status: 'available', backend: 'webgpu' }),
   generateBatch: async inputs => ({ ...cpuGenerateFrontierTargetPoolBatch(inputs), status: 'completed', backend: 'test-frontier-target-pool', parity: 'verified' }),
 };
+let flatNavigationSelectCalls = 0;
+const flatNavigationScheduler = {
+  availability: async () => ({ status: 'available', backend: 'webgpu' }),
+  select: async (rows, { planCount }) => {
+    flatNavigationSelectCalls += 1;
+    return { status: 'completed', backend: 'test-navigation-webgpu', parity: 'verified', rowCount: rows.length, selectedRows: rows.map((_, index) => index), selectedCount: rows.length, planCount, inputDigest: 'test-flat-navigation' };
+  },
+};
 let frontierCandidateRecordCalls = 0;
 const frontierCandidateRecords = {
   compact: async records => { frontierCandidateRecordCalls += 1; return { ...cpuCompactFrontierCandidateRecords(records), status: 'completed', backend: 'test-frontier-candidate-records', parity: 'verified' }; },
@@ -112,6 +120,7 @@ const residentNavigator = {
 const singleResult = await search(pieces, [], { ...sharedOptions, frontierGenerator: singleFrontierGenerator });
 const result = await search(pieces, [], { ...sharedOptions, frontierGenerator });
 const targetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator, frontierCandidateRecords });
+const flatTargetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator, frontierCandidateRecords, navigationScheduler: flatNavigationScheduler });
 const targetPoolResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator, frontierTargetPool });
 const depthResult = await search(pieces, [], { ...sharedOptions, searchStrategy: 'depth', frontierCompactor });
 const breadthResult = await search(pieces, [], { ...sharedOptions, searchStrategy: 'breadth', frontierCompactor });
@@ -169,6 +178,9 @@ assert.ok(frontierCandidateRecordCalls > 0);
 assert.equal(targetResult.frontierTargetGeneration.candidateRecords.backend, 'test-frontier-candidate-records');
 assert.deepEqual(targetResult.placements, result.placements);
 assert.deepEqual(targetResult.metrics, result.metrics);
+assert.ok(flatNavigationSelectCalls > 0);
+assert.deepEqual(flatTargetResult.placements, result.placements);
+assert.deepEqual(flatTargetResult.metrics, result.metrics);
 assert.equal(targetPoolResult.frontierTargetPool.status, 'used');
 assert.equal(targetPoolResult.frontierTargetPool.backend, 'test-frontier-target-pool');
 assert.equal(targetPoolResult.frontierTargetPool.batch, 'beam');
