@@ -388,4 +388,4 @@ export function createWebGpuFrontierGenerator({ gpu = globalThis.navigator?.gpu,
   });
 }
 
-export { SHADER as DEFAULT_SHADER };
+export { SHADER as DEFAULT_SHADER, COMPACTION_SCAN_SHADER, COMPACTION_WRITE_SHADER };

@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
-import { cpuGenerateFrontierCandidates, cpuGenerateFrontierBatch, createWebGpuFrontierGenerator } from '../src/webgpu-frontier-generator.js';
+import { cpuGenerateFrontierCandidates, cpuGenerateFrontierBatch, createWebGpuFrontierGenerator, COMPACTION_SCAN_SHADER, COMPACTION_WRITE_SHADER } from '../src/webgpu-frontier-generator.js';
+
+assert.match(COMPACTION_SCAN_SHADER, /workgroupBarrier/);
+assert.match(COMPACTION_SCAN_SHADER, /groupTotals/);
+assert.match(COMPACTION_WRITE_SHADER, /groupOffsets/);
+assert.match(COMPACTION_WRITE_SHADER, /prefixes/);
 
 const input = {
   fieldCells: [{ x: 0, y: 0 }, { x: 1, y: 0 }],
