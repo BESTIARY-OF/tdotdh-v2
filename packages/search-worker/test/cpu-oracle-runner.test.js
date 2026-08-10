@@ -28,6 +28,7 @@ assert.deepEqual(result.ticket, request.ticket);
 assert.deepEqual(result.cursor, { ...request.cursor, nodeOffset: 2 });
 assert.equal(result.nodes, 2);
 assert.equal(result.canonicalSignatures.length, 1);
+assert.equal(result.termination.status, 'completed');
 assert.equal(progress.at(-1).cursor.nodeOffset, 2);
 
 const resumed = await runCpuOracleBatch({ ...request, cursor: { ...request.cursor, nodeOffset: 2 }, budget: { ...request.budget, maxNodes: 1 } });
@@ -41,5 +42,18 @@ assert.equal(prefiltered.canonicalSignatures.length, 1);
 assert.equal(prefiltered.canonicalSignatures[0], canonicalPlacementSignature(equivalent));
 assert.equal(prefiltered.prefilter.status, 'used');
 assert.equal(prefiltered.nodes, 2);
+
+const budgeted = await runCpuOracleBatch({ ...request, budget: { ...request.budget, maxNodes: 3, maxMilliseconds: 2 } }, {
+  now: (() => { let tick = 0; return () => ++tick; })(),
+});
+assert.equal(budgeted.termination.status, 'time-budget');
+assert.equal(budgeted.nodes, 2);
+
+let cancelledChecks = 0;
+const cancelled = await runCpuOracleBatch(request, {
+  isCancelled: () => ++cancelledChecks > 1,
+});
+assert.equal(cancelled.termination.status, 'cancelled');
+assert.equal(cancelled.cancelled, true);
 
 console.log('CPU oracle runner tests passed');

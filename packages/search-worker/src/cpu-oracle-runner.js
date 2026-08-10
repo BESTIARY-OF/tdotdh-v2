@@ -45,13 +45,15 @@ function clone(value) {
  * establishes the v2 ticket/cursor/signature seam that a compute backend must
  * match exactly before it can be enabled.
  */
-export async function runCpuOracleBatch(input, { reportProgress = () => {}, isCancelled = () => false, candidatePrefilter = null } = {}) {
+export async function runCpuOracleBatch(input, { reportProgress = () => {}, isCancelled = () => false, candidatePrefilter = null, now = () => performance.now() } = {}) {
   const request = input?.type === 'start' ? createSearchRequest(input) : input;
   if (!request?.ticket || !request?.cursor || !request?.budget) throw new TypeError('a normalized search request is required');
   const workCursor = protocolCursorToWorkCursor(request.cursor, request.ticket, { runSeed: request.seed });
   const candidates = request.constraints?.candidateArrangements;
   if (!Array.isArray(candidates)) throw new TypeError('constraints.candidateArrangements must be an array');
 
+  const startedAt = now();
+  const deadline = startedAt + request.budget.maxMilliseconds;
   const start = request.cursor.nodeOffset;
   const limit = Math.min(request.budget.maxNodes, candidates.length - start);
   let prefilterReceipt = null;
@@ -68,10 +70,18 @@ export async function runCpuOracleBatch(input, { reportProgress = () => {}, isCa
   const signatures = [];
   let selectedPlacements = [];
   let nodes = 0;
+  let terminationStatus = 'completed';
   const cursorAt = nodeCursor => workCursorToProtocolCursor({ ...workCursor, nodeCursor });
 
   for (let index = 0; index < limit; index += 1) {
-    if (isCancelled()) break;
+    if (isCancelled()) {
+      terminationStatus = 'cancelled';
+      break;
+    }
+    if (nodes > 0 && now() >= deadline) {
+      terminationStatus = 'time-budget';
+      break;
+    }
     if (validity && validity[start + index] !== 1) {
       nodes += 1;
       reportProgress({ nodes, depth: request.cursor.depth, frontier: 0, families: signatures.length, cursor: cursorAt(start + index + 1) });
@@ -96,6 +106,11 @@ export async function runCpuOracleBatch(input, { reportProgress = () => {}, isCa
     cursor: cursorAt(start + nodes),
     ticket: { ...request.ticket },
     cancelled: isCancelled(),
+    termination: {
+      status: terminationStatus,
+      elapsedMilliseconds: Math.max(0, now() - startedAt),
+      maxMilliseconds: request.budget.maxMilliseconds,
+    },
     ...(prefilterReceipt ? { prefilter: prefilterReceipt } : {}),
   };
 }
