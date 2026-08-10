@@ -46,6 +46,7 @@ async function runProductSearch(request, context) {
   const frontierNavigator = createWebGpuFrontierNavigator({ stateAdapter: residentFrontierState, ticket: request.ticket, cursor: request.cursor, isCancelled: context.isCancelled });
   const result = await search(request.pieces, steering.knownCentroidFamilies || [], {
     ...steering,
+    gpuExecution,
     knownSignatures: request.knownSignatureHints,
     searchSalt: request.seed,
     rootChoice: request.ticket.rootChoice ?? request.cursor.rootChoice,
