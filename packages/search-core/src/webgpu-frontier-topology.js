@@ -414,12 +414,12 @@ async function runWebGpuReduction(gpu, normalized, grid, shaderSource, requiredL
 async function runWebGpuBatchReduction(gpu, normalizedInputs, grid, requiredLimits) {
   const adapter = await gpu.requestAdapter();
   if (!adapter) throw new Error('webgpu-adapter-unavailable');
-  const device = await adapter.requestDevice({ requiredLimits });
-  const usage = gpuBufferUsage();
-  const mapMode = gpuMapMode();
   const candidateCount = normalizedInputs.length;
   const wordCount = grid.wordCount;
   const cellCount = grid.width * grid.height;
+  const device = await adapter.requestDevice({ requiredLimits: { ...requiredLimits, maxStorageBufferBindingSize: Math.max(requiredLimits.maxStorageBufferBindingSize || 0, candidateCount * grid.wordCount * 4, candidateCount * grid.width * grid.height * 4) } });
+  const usage = gpuBufferUsage();
+  const mapMode = gpuMapMode();
   const wordByteLength = candidateCount * wordCount * 4;
   const cellByteLength = candidateCount * cellCount * 4;
   const flattenMasks = property => {
@@ -546,12 +546,17 @@ export function cpuTopologyReduction(input, grid = DEFAULT_FRONTIER_GRID) {
 export function createWebGpuFrontierTopology({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 65536 }, shaderSource = SHADER, accelerator = null } = {}) {
   const normalizedGrid = normalizeGrid(grid);
   if (typeof shaderSource !== 'string' || !shaderSource.trim()) throw new TypeError('shaderSource must be a non-empty string');
-  const availability = async () => {
+  let availabilityPromise = null;
+  const availability = () => {
+    if (availabilityPromise) return availabilityPromise;
+    availabilityPromise = (async () => {
       if (typeof accelerator === 'function') return Object.freeze({ schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA, status: 'available', backend: 'webgpu' });
       const probe = await probeWebGpuCapabilities({ gpu, requiredLimits });
       return probe.adapterAvailable && probe.requiredLimitsSatisfied
         ? Object.freeze({ schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA, status: 'available', backend: 'webgpu' })
         : unavailable(probe.adapterAvailable ? 'webgpu-required-limits-unsatisfied' : 'webgpu-adapter-unavailable', null);
+    })();
+    return availabilityPromise;
   };
   const verifyAccelerated = (input, accelerated) => {
     const cpu = cpuFrontierTopology(input, normalizedGrid);

@@ -56,6 +56,7 @@ function createBenchFrontierTopology() {
   const receipt = { evaluations: 0 };
   return {
     receipt,
+    availability: async () => ({ status: 'fallback', backend: 'benchmark', reason: 'batch-path-not-measured' }),
     evaluateBatch: async inputs => ({ status: 'fallback', backend: 'benchmark', reason: 'batch-path-not-measured', candidateCount: inputs.length, results: [] }),
     evaluate: async input => {
       receipt.evaluations += 1;

@@ -258,6 +258,8 @@ function frontierScoreTerms(metrics) {
   return [score, 0, 0, 0, 0, 0, 0, 0];
 }
 
+const frontierTopologyAvailability = new WeakMap();
+
 async function evaluateFrontierGeometry(entries, state, centroidId, frontierMetrics, onMetrics = () => {}) {
   if (!frontierMetrics?.evaluate || !entries.length) return entries;
   try {
@@ -304,9 +306,24 @@ async function evaluateFrontierState(entries, state, frontierState, onState = ()
   return entries;
 }
 
-async function evaluateFrontierTopology(entries, state, centroidId, frontierTopology, onTopology = () => {}) {
+async function evaluateFrontierTopology(entries, state, centroidId, frontierTopology, onTopology = () => {}, knownAvailability = null) {
   if (!frontierTopology?.evaluateBatch && !frontierTopology?.evaluate) return entries;
   try {
+    if (knownAvailability && knownAvailability.status !== 'available') {
+      return entries;
+    }
+    if (!knownAvailability && frontierTopology.availability) {
+      let availabilityPromise = frontierTopologyAvailability.get(frontierTopology);
+      if (!availabilityPromise) {
+        availabilityPromise = frontierTopology.availability();
+        frontierTopologyAvailability.set(frontierTopology, availabilityPromise);
+      }
+      const availability = await availabilityPromise;
+      if (availability?.status !== 'available') {
+        onTopology({ status: 'fallback', reason: availability?.reason || 'frontier-topology-unavailable' });
+        return entries;
+      }
+    }
     const parentCells = [...state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
     const centroidCells = state.placements.find(placement => placement.id === centroidId)?.cells || [];
     const inputs = entries.map(entry => ({ parentMask: createFrontierMaskFromCells(parentCells), candidateMask: createFrontierMaskFromCells(entry.candidate.cells), centroidMask: createFrontierMaskFromCells(centroidCells) }));
@@ -427,8 +444,10 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const frontierMetrics = options.frontierMetrics;
   const frontierState = options.frontierState;
   const frontierTopology = options.frontierTopology;
+  const frontierTopologyAvailabilityReceipt = frontierTopology?.availability ? await frontierTopology.availability() : null;
   const frontierGeneratorStatus = frontierGenerator?.availability ? await frontierGenerator.availability() : null;
   let prefilterReceipt = { status: 'cpu-oracle' }, frontierReceipt = { status: 'cpu-oracle' }, frontierGenerationReceipt = { status: 'cpu-oracle' }, frontierMetricsReceipt = { status: 'cpu-oracle' }, frontierStateReceipt = { status: 'cpu-oracle' }, frontierTopologyReceipt = { status: 'cpu-oracle' };
+  if (frontierTopologyAvailabilityReceipt?.status !== 'available' && frontierTopologyAvailabilityReceipt) frontierTopologyReceipt = { status: 'fallback', reason: frontierTopologyAvailabilityReceipt.reason || 'frontier-topology-unavailable' };
   async function filterCandidates(entries) {
     if (!candidatePrefilter?.prefilter || entries.length === 0) return entries;
     const result = await candidatePrefilter.prefilter(entries.map(entry => [entry.candidate]));
@@ -498,7 +517,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       selectedOptions = await evaluateFrontierGeometry(selectedOptions, state, centroidId, frontierMetrics, receipt => { frontierMetricsReceipt = receipt; });
       selectedOptions = await evaluateFrontierOptions(selectedOptions, state, centroidId, frontierEvaluator, options.frontierValidator, receipt => { frontierReceipt = receipt; });
       selectedOptions = await evaluateFrontierState(selectedOptions, state, frontierState, receipt => { frontierStateReceipt = receipt; });
-      selectedOptions = await evaluateFrontierTopology(selectedOptions, state, centroidId, frontierTopology, receipt => { frontierTopologyReceipt = receipt; });
+      selectedOptions = await evaluateFrontierTopology(selectedOptions, state, centroidId, frontierTopology, receipt => { frontierTopologyReceipt = receipt; }, frontierTopologyAvailabilityReceipt);
       if (!selectedOptions.length) continue;
       const ranked = selectedOptions.map(({ piece, candidate, gpuGeometry, gpuState, gpuTopology }) => {
         const nextBounds = { minX: Math.min(state.bounds.minX, ...candidate.cells.map(c => c.x)), maxX: Math.max(state.bounds.maxX, ...candidate.cells.map(c => c.x)), minY: Math.min(state.bounds.minY, ...candidate.cells.map(c => c.y)), maxY: Math.max(state.bounds.maxY, ...candidate.cells.map(c => c.y)) };

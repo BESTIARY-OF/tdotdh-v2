@@ -17,8 +17,10 @@ acceptance semantics.
 
 The adapter also exposes `evaluateBatch` for frontier navigation. The product
 uses that contract to submit candidate frontiers in one GPU-oriented call when
-WebGPU is available; CPU-oracle and benchmark adapters short-circuit the batch
-path so they do not pay a false acceleration penalty.
+WebGPU is available. The hardware path flattens candidate×word occupancy and
+candidate×cell label buffers into shared dispatches; CPU-oracle and benchmark
+adapters short-circuit the batch path so they do not pay a false acceleration
+penalty.
 
 Verification:
 
