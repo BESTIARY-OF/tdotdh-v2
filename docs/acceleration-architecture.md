@@ -8,7 +8,8 @@ The CPU implementation is the oracle. Compute-shader adapters receive the same
 deterministic family ticket, mode (`breadth` or `depth`), run seed, and
 resumable cursor. The current navigation path batches occupancy prefiltering,
 frontier generation, target-pool classification, field aggregates, geometry,
-state transitions, topology, and frontier ranking on the GPU when each adapter
+state transitions, topology, ranking, and hash-first frontier deduplication on
+the GPU when each adapter
 passes parity. Family/locked branches use the target-pool contract too; they no
 longer have a special implicit CPU-only target gate.
 
@@ -61,7 +62,12 @@ not completed gate 6:
 - 90f9c19 moves beam target selection behind a parity-gated GPU target pool,
   including the family/locked branch path.
 - 9e985c7 covers WGSL compound-statement portability and empty-field bounds
-  parity in the field-metrics shader.
+parity in the field-metrics shader.
+- The dedup seam is hash-first on the GPU and exact-signature gated by the CPU
+  oracle; hash collisions or unavailable dispatch leave CPU admission unchanged.
+
+The live 5174 runtime receipt for this seam is recorded in
+`docs/receipts/webgpu-deduplicator-runtime-2026-08-10.md`.
 
 Committed runtime receipts in `docs/receipts/` prove real Chrome/D3D11 dispatch
 for the candidate scorer and occupancy prefilter, including a measured

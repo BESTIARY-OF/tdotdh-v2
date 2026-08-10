@@ -10,7 +10,7 @@
    family/locked path now shares the target-pool gate instead of silently
    reverting to a CPU-only target selector.
 7. Close the end-to-end GPU navigator gate: GPU-owned batch expansion and
-   deduplication with deterministic ticket/cursor exchange, cancellation
+   hash-first deduplication with deterministic ticket/cursor exchange, cancellation
    checkpoints, and canonical-signature replay by the CPU oracle.
 8. Add a renderer boundary that keeps flatland coordinates canonical while
    treating sphere, hypersphere, cube, hypercube, and simplex projections as

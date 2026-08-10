@@ -6,6 +6,7 @@ import { cpuFrontierTopology } from '../../../packages/search-core/src/webgpu-fr
 import { cpuEvaluateFieldMetrics } from '../../../packages/search-core/src/webgpu-field-metrics.js';
 import { cpuGenerateFrontierTargetBatch } from '../../../packages/search-core/src/webgpu-frontier-target-generator.js';
 import { cpuGenerateFrontierTargetPoolBatch } from '../../../packages/search-core/src/webgpu-frontier-target-pool.js';
+import { cpuDeduplicateFrontierStates } from '../../../packages/search-core/src/webgpu-frontier-deduplicator.js';
 
 globalThis.postMessage = () => {};
 
@@ -67,6 +68,14 @@ const frontierTargetPool = {
 const frontierTopology = {
   evaluate: async input => ({ ...cpuFrontierTopology(input), backend: 'test-frontier-topology', parity: 'verified' }),
 };
+let frontierDeduplicatorCalls = 0;
+const frontierDeduplicator = {
+  availability: async () => ({ status: 'available', backend: 'webgpu' }),
+  deduplicate: async rows => {
+    frontierDeduplicatorCalls += 1;
+    return { ...cpuDeduplicateFrontierStates(rows), status: 'completed', backend: 'test-frontier-deduplicator', parity: 'verified' };
+  },
+};
 const sharedOptions = {
   searchStrategy: 'balanced',
   candidatePrefilter,
@@ -75,6 +84,7 @@ const sharedOptions = {
   frontierState,
   frontierTopology,
   fieldMetrics,
+  frontierDeduplicator,
 };
 const singleResult = await search(pieces, [], { ...sharedOptions, frontierGenerator: singleFrontierGenerator });
 const result = await search(pieces, [], { ...sharedOptions, frontierGenerator });
@@ -129,6 +139,9 @@ assert.deepEqual(targetResult.metrics, result.metrics);
 assert.equal(targetPoolResult.frontierTargetPool.status, 'used');
 assert.equal(targetPoolResult.frontierTargetPool.backend, 'test-frontier-target-pool');
 assert.equal(targetPoolResult.frontierTargetPool.batch, 'beam');
+assert.ok(frontierDeduplicatorCalls > 0);
+assert.equal(targetPoolResult.frontierDedup.status, 'used');
+assert.equal(targetPoolResult.frontierDedup.backend, 'test-frontier-deduplicator');
 assert.deepEqual(targetPoolResult.placements, result.placements);
 assert.deepEqual(targetPoolResult.metrics, result.metrics);
 assert.ok(lockedTargetPoolCalls > 0);
