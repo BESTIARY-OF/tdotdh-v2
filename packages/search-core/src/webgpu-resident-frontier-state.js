@@ -19,7 +19,7 @@ struct Params { candidateCount: u32, wordCount: u32, pieceCount: u32, width: u32
 @group(0) @binding(5) var<storage, read_write> canonicalLabels: array<u32>;
 @group(0) @binding(6) var<storage, read_write> absoluteHashes: array<u32>;
 @group(0) @binding(7) var<storage, read_write> canonicalHashes: array<u32>;
-@group(0) @binding(8) var<uniform> params: Params;
+@group(0) @binding(8) var<storage, read> params: Params;
 @group(0) @binding(9) var<storage, read> residentParents: array<u32>;
 @group(0) @binding(10) var<storage, read_write> residentNext: array<u32>;
 @group(0) @binding(11) var<storage, read_write> residentCanonical: array<u32>;
@@ -39,17 +39,16 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let parentBase = id.x * labelsPerState;
   let residentParentBase = parentIndex * labelsPerState;
   let residentOutputBase = outputIndex * labelsPerState;
-  for (var piece: u32 = 0u; piece < params.pieceCount; piece++) for (var word: u32 = 0u; word < labelStride; word++) {
-    let localOffset = localBase + piece * labelStride + word;
-    if (parentIndex == ${RESIDENT_PARENT_SENTINEL}u) { nextLabels[localOffset] = seedParents[parentBase + piece * labelStride + word]; }
-    else { nextLabels[localOffset] = residentParents[residentParentBase + piece * labelStride + word]; }
-    canonicalLabels[localOffset] = 0u;
-  }
   let pieceIndex = candidatePieceIndices[id.x];
   let candidateMaskBase = id.x * params.wordCount;
-  for (var word: u32 = 0u; word < params.wordCount; word++) {
-    let nextOffset = localBase + pieceIndex * labelStride + word;
-    nextLabels[nextOffset] = nextLabels[nextOffset] | candidateMasks[candidateMaskBase + word];
+  for (var piece: u32 = 0u; piece < params.pieceCount; piece++) for (var word: u32 = 0u; word < labelStride; word++) {
+    let localOffset = localBase + piece * labelStride + word;
+    var parentValue = 0u;
+    if (parentIndex == ${RESIDENT_PARENT_SENTINEL}u) { parentValue = seedParents[parentBase + piece * labelStride + word]; }
+    else { parentValue = residentParents[residentParentBase + piece * labelStride + word]; }
+    let candidateValue = select(0u, candidateMasks[candidateMaskBase + word], piece == pieceIndex);
+    nextLabels[localOffset] = parentValue | candidateValue;
+    canonicalLabels[localOffset] = 0u;
   }
   var found = false;
   var minX: i32 = 0;
@@ -143,7 +142,7 @@ function makeResources(device, capacity, batchCapacity, pieceCount, grid, shader
     canonicalLabels: device.createBuffer({ size: batchLabelsBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
     absoluteHashes: device.createBuffer({ size: hashBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
     canonicalHashes: device.createBuffer({ size: hashBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
-    params: device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }),
+    params: device.createBuffer({ size: 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
     residentParents: device.createBuffer({ size: residentBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
     residentNext: device.createBuffer({ size: residentBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
     residentCanonical: device.createBuffer({ size: residentBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
@@ -154,7 +153,12 @@ function makeResources(device, capacity, batchCapacity, pieceCount, grid, shader
     absoluteHashReadback: device.createBuffer({ size: hashBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
     canonicalHashReadback: device.createBuffer({ size: hashBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
   };
-  const module = device.createShaderModule({ code: shaderSource }), pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+  const specializedShader = shaderSource
+    .replaceAll('params.wordCount', `${grid.wordCount}u`)
+    .replaceAll('params.pieceCount', `${pieceCount}u`)
+    .replaceAll('params.width', `${grid.width}u`)
+    .replaceAll('params.height', `${grid.height}u`);
+  const module = device.createShaderModule({ code: specializedShader }), pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
   const bindingBuffers = [buffers.seedParents, buffers.candidateMasks, buffers.candidatePieceIndices, buffers.remainingMasks, buffers.nextLabels, buffers.canonicalLabels, buffers.absoluteHashes, buffers.canonicalHashes, buffers.params, buffers.residentParents, buffers.residentNext, buffers.residentCanonical, buffers.parentStateIndices, buffers.outputStateIndices];
   const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: bindingBuffers.map((buffer, binding) => ({ binding, resource: { buffer } })) });
   return { capacity, batchCapacity, pieceCount, grid, labelsPerState, buffers, pipeline, bindGroup };
@@ -170,7 +174,13 @@ async function dispatch(device, resources, candidates, pieceIds, outputIndices, 
   device.queue.writeBuffer(buffers.candidateMasks, 0, flatten(candidates, 'candidateMask', grid.wordCount));
   device.queue.writeBuffer(buffers.candidatePieceIndices, 0, Uint32Array.from(candidates.map(candidate => candidate.candidatePieceIndex)));
   device.queue.writeBuffer(buffers.remainingMasks, 0, flatten(candidates, 'remainingMask', REMAINING_MASK_WORD_COUNT));
-  device.queue.writeBuffer(buffers.parentStateIndices, 0, Uint32Array.from(candidates.map(candidate => candidate.parentStateIndex == null ? RESIDENT_PARENT_SENTINEL : candidate.parentStateIndex)));
+  const parentStateIndices = candidates.map((candidate, index) => {
+    if (candidate.parentStateIndex != null) return candidate.parentStateIndex;
+    const outputIndex = outputIndices[index];
+    device.queue.writeBuffer(buffers.residentParents, outputIndex * labelsPerState * 4, candidate.parentLabelMasks);
+    return outputIndex;
+  });
+  device.queue.writeBuffer(buffers.parentStateIndices, 0, Uint32Array.from(parentStateIndices));
   device.queue.writeBuffer(buffers.outputStateIndices, 0, Uint32Array.from(outputIndices));
   device.queue.writeBuffer(buffers.params, 0, new Int32Array([count, grid.wordCount, pieceIds.length, grid.width, grid.height, grid.originX, grid.originY, 0]));
   const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
