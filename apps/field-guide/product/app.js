@@ -1012,8 +1012,9 @@ function launchSearchPass() {
   const families = new Map();
   app.snapshots.forEach(snapshot => { const familyId = snapshotFamilyId(snapshot); if (!families.has(familyId)) families.set(familyId, []); families.get(familyId).push(snapshot); });
   const orderedFamilies = [...families.entries()].map(([family, snapshots]) => [family, orderedSnapshots(snapshots)]).filter(([, snapshots]) => snapshots.length).sort((a, b) => { const aMetric = familySortMetric(a[1]), bMetric = familySortMetric(b[1]); return aMetric.primary - bMetric.primary || aMetric.secondary - bMetric.secondary; });
-  const target = app.searchStrategy === 'breadth' ? null : nextFamilySteeringTarget(orderedFamilies), knownCentroidFamilies = [...families.keys()];
-  const searchSalt = target?.searchSalt || `open:pass-${app.pass}`, requestId = globalThis.crypto?.randomUUID?.() || `product-${Date.now()}-${app.pass}`;
+  const checkpointTarget = app.searchCheckpoint ? { familyId: app.searchCheckpoint.targetFamily || null, seed: app.searchCheckpoint.targetSeed || null, threadIndex: Number(app.searchCheckpoint.threadId || 0), searchSalt: app.searchCheckpoint.searchSalt || null } : null;
+  const target = app.searchStrategy === 'breadth' ? null : checkpointTarget || nextFamilySteeringTarget(orderedFamilies), knownCentroidFamilies = [...families.keys()];
+  const searchSalt = app.searchCheckpoint?.searchSalt || target?.searchSalt || `open:pass-${app.pass}`, requestId = globalThis.crypto?.randomUUID?.() || `product-${Date.now()}-${app.pass}`;
   const ticket = { presetFingerprint: app.preset.id, familyId: target?.familyId || 'open', pass: app.pass, threadId: Number(target?.threadIndex || 0) };
   app.searchRequestId = requestId;
   let protocolResult = null;
