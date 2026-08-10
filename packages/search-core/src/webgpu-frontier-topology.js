@@ -1,4 +1,5 @@
 import { probeWebGpuCapabilities } from './webgpu-capability-probe.js';
+import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
 import { DEFAULT_FRONTIER_GRID } from './webgpu-frontier-validator.js';
 
 export const WEBGPU_FRONTIER_TOPOLOGY_SCHEMA = 'tdotdh.webgpu-frontier-topology.v0';
@@ -51,6 +52,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let x = i32(id.x % params.width);
   let y = i32(id.x / params.width);
   var label = currentLabels[id.x];
+  let activeOccupied = params.reserved0 != 0u;
+  if (occupiedAt(id.x) != activeOccupied) { nextLabels[id.x] = 0u; return; }
   if (label == 0u) { nextLabels[id.x] = 0u; return; }
   if (labelAt(x + 1, y) != 0u) { label = min(label, labelAt(x + 1, y)); }
   if (labelAt(x - 1, y) != 0u) { label = min(label, labelAt(x - 1, y)); }
@@ -325,10 +328,8 @@ function gpuMapMode() {
   return globalThis.GPUMapMode;
 }
 
-async function runWebGpuReduction(gpu, normalized, grid, shaderSource, requiredLimits) {
-  const adapter = await gpu.requestAdapter();
-  if (!adapter) throw new Error('webgpu-adapter-unavailable');
-  const device = await adapter.requestDevice({ requiredLimits });
+async function runWebGpuReduction(deviceCache, normalized, grid, shaderSource) {
+  const device = await deviceCache.getDevice();
   const usage = gpuBufferUsage();
   const mapMode = gpuMapMode();
   const byteLength = grid.wordCount * 4;
@@ -375,10 +376,10 @@ async function runWebGpuReduction(gpu, normalized, grid, shaderSource, requiredL
     ];
     const labelReadbacks = [device.createBuffer({ size: labelByteLength, usage: usage.MAP_READ | usage.COPY_DST }), device.createBuffer({ size: labelByteLength, usage: usage.MAP_READ | usage.COPY_DST })];
     const labelParams = device.createBuffer({ size: 16, usage: usage.UNIFORM | usage.COPY_DST });
-    const runLabels = async initial => {
+    const runLabels = async (initial, activeOccupied) => {
       device.queue.writeBuffer(labelBuffers[0], 0, initial);
       device.queue.writeBuffer(labelBuffers[1], 0, new Uint32Array(initial.length));
-      device.queue.writeBuffer(labelParams, 0, new Uint32Array([grid.width * grid.height, grid.width, grid.height, 0]));
+      device.queue.writeBuffer(labelParams, 0, new Uint32Array([grid.width * grid.height, grid.width, grid.height, activeOccupied ? 1 : 0]));
       let current = 0;
       const encoder = device.createCommandEncoder();
       for (let pass = 0; pass < grid.width + grid.height; pass += 1) {
@@ -401,8 +402,8 @@ async function runWebGpuReduction(gpu, normalized, grid, shaderSource, requiredL
       labelReadbacks[0].unmap();
       return labels;
     };
-    const gpuOccupiedLabels = await runLabels(occupiedLabels);
-    const gpuEmptyLabels = await runLabels(emptyLabels);
+    const gpuOccupiedLabels = await runLabels(occupiedLabels, true);
+    const gpuEmptyLabels = await runLabels(emptyLabels, false);
     for (const buffer of [...labelBuffers, ...labelReadbacks, labelParams]) buffer.destroy();
     const summary = summarizeLabels(gpuOccupiedLabels, gpuEmptyLabels, grid);
     return { occupiedMask, area, occupiedLabels: Array.from(gpuOccupiedLabels), emptyLabels: Array.from(gpuEmptyLabels), ...summary };
@@ -411,13 +412,11 @@ async function runWebGpuReduction(gpu, normalized, grid, shaderSource, requiredL
   }
 }
 
-async function runWebGpuBatchReduction(gpu, normalizedInputs, grid, requiredLimits) {
-  const adapter = await gpu.requestAdapter();
-  if (!adapter) throw new Error('webgpu-adapter-unavailable');
+async function runWebGpuBatchReduction(deviceCache, normalizedInputs, grid) {
   const candidateCount = normalizedInputs.length;
   const wordCount = grid.wordCount;
   const cellCount = grid.width * grid.height;
-  const device = await adapter.requestDevice({ requiredLimits: { ...requiredLimits, maxStorageBufferBindingSize: Math.max(requiredLimits.maxStorageBufferBindingSize || 0, candidateCount * grid.wordCount * 4, candidateCount * grid.width * grid.height * 4) } });
+  const device = await deviceCache.getDevice();
   const usage = gpuBufferUsage();
   const mapMode = gpuMapMode();
   const wordByteLength = candidateCount * wordCount * 4;
@@ -543,7 +542,7 @@ export function cpuTopologyReduction(input, grid = DEFAULT_FRONTIER_GRID) {
   return Object.freeze({ occupiedMask: Array.from(normalized.occupiedMask), area: occupiedCells(normalized.occupiedMask, normalizedGrid).length, occupiedLabels: Array.from(occupiedLabels), emptyLabels: Array.from(emptyLabels), ...summarizeLabels(occupiedLabels, emptyLabels, normalizedGrid) });
 }
 
-export function createWebGpuFrontierTopology({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 65536 }, shaderSource = SHADER, accelerator = null } = {}) {
+export function createWebGpuFrontierTopology({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 33554432 }, shaderSource = SHADER, accelerator = null, deviceCache = createWebGpuDeviceCache({ gpu, requiredLimits }) } = {}) {
   const normalizedGrid = normalizeGrid(grid);
   if (typeof shaderSource !== 'string' || !shaderSource.trim()) throw new TypeError('shaderSource must be a non-empty string');
   let availabilityPromise = null;
@@ -575,9 +574,10 @@ export function createWebGpuFrontierTopology({ gpu = globalThis.navigator?.gpu, 
     try {
       const accelerated = typeof accelerator === 'function'
         ? await accelerator(normalized, normalizedGrid)
-        : await runWebGpuReduction(gpu, normalized, normalizedGrid, shaderSource, requiredLimits);
+        : await runWebGpuReduction(deviceCache, normalized, normalizedGrid, shaderSource);
       return verifyAccelerated(input, accelerated);
     } catch (error) {
+      deviceCache.reset();
       return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, cpu.metrics);
     }
   };
@@ -590,10 +590,11 @@ export function createWebGpuFrontierTopology({ gpu = globalThis.navigator?.gpu, 
       if (typeof accelerator === 'function') {
         results = await Promise.all(inputs.map(async input => verifyAccelerated(input, await accelerator(normalizeInput(input, normalizedGrid), normalizedGrid))));
       } else {
-        const reductions = await runWebGpuBatchReduction(gpu, inputs.map(input => normalizeInput(input, normalizedGrid)), normalizedGrid, requiredLimits);
+        const reductions = await runWebGpuBatchReduction(deviceCache, inputs.map(input => normalizeInput(input, normalizedGrid)), normalizedGrid);
         results = reductions.map((reduction, index) => verifyAccelerated(inputs[index], reduction));
       }
     } catch (error) {
+      deviceCache.reset();
       return Object.freeze({ schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA, status: 'fallback', backend: 'cpu-oracle', reason: `webgpu-batch-failed:${error?.message || String(error)}`, candidateCount: inputs.length, results: [] });
     }
     const verified = results.every(result => result?.status === 'completed' && ['verified', 'labels-verified'].includes(result.parity));

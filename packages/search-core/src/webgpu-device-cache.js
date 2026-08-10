@@ -1,6 +1,7 @@
 export const WEBGPU_DEVICE_CACHE_SCHEMA = 'tdotdh.webgpu-device-cache.v0';
 
-export function createWebGpuDeviceCache({ gpu = globalThis.navigator?.gpu } = {}) {
+export function createWebGpuDeviceCache({ gpu = globalThis.navigator?.gpu, requiredLimits = {} } = {}) {
+  const normalizedRequiredLimits = Object.freeze({ ...requiredLimits });
   let devicePromise = null;
   const getDevice = async () => {
     if (!devicePromise) {
@@ -8,7 +9,9 @@ export function createWebGpuDeviceCache({ gpu = globalThis.navigator?.gpu } = {}
         if (!gpu || typeof gpu.requestAdapter !== 'function') throw new Error('webgpu-adapter-unavailable');
         const adapter = await gpu.requestAdapter();
         if (!adapter || typeof adapter.requestDevice !== 'function') throw new Error('webgpu-adapter-unavailable');
-        return adapter.requestDevice();
+        return Object.keys(normalizedRequiredLimits).length
+          ? adapter.requestDevice({ requiredLimits: normalizedRequiredLimits })
+          : adapter.requestDevice();
       }).catch(error => { devicePromise = null; throw error; });
     }
     return devicePromise;

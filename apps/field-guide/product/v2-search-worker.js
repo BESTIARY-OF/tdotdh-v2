@@ -3,24 +3,24 @@ import { createWebGpuCandidatePrefilter } from '../../../packages/search-core/sr
 import { createWebGpuFrontierValidator } from '../../../packages/search-core/src/webgpu-frontier-validator.js';
 import { createWebGpuFrontierEvaluator } from '../../../packages/search-core/src/webgpu-frontier-evaluator.js';
 import { createWebGpuFrontierGenerator } from '../../../packages/search-core/src/webgpu-frontier-generator.js?v=20260810-gpu26';
-import { createWebGpuFrontierTargetGenerator } from '../../../packages/search-core/src/webgpu-frontier-target-generator.js?v=20260810-targetdiag4';
+import { createWebGpuFrontierTargetGenerator } from '../../../packages/search-core/src/webgpu-frontier-target-generator.js?v=20260810-targetdiag5';
 import { createWebGpuFrontierTargetPool } from '../../../packages/search-core/src/webgpu-frontier-target-pool.js';
 import { createWebGpuFrontierMetrics } from '../../../packages/search-core/src/webgpu-frontier-metrics.js?v=20260810-gpu26';
 import { createWebGpuFieldMetrics } from '../../../packages/search-core/src/webgpu-field-metrics.js';
 import { createWebGpuLabeledFrontierState } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js?v=20260810-state3';
-import { createWebGpuFrontierTopology } from '../../../packages/search-core/src/webgpu-frontier-topology.js';
+import { createWebGpuFrontierTopology } from '../../../packages/search-core/src/webgpu-frontier-topology.js?v=20260810-topology2';
 import { createWebGpuFrontierRanker } from '../../../packages/search-core/src/webgpu-frontier-ranker.js?v=20260810-gpu4';
 import { createWebGpuPersistentFrontierCompactor } from '../../../packages/search-core/src/webgpu-frontier-compactor.js?v=20260810-gpu4';
 import { createWebGpuFrontierDeduplicator } from '../../../packages/search-core/src/webgpu-frontier-deduplicator.js?v=20260810-gpu3';
 import { createWebGpuFrontierNavigator } from '../../../packages/search-core/src/webgpu-frontier-navigator.js';
-import { createWebGpuResidentFrontierState } from '../../../packages/search-core/src/webgpu-resident-frontier-state.js?v=20260810-gpu34';
+import { createWebGpuResidentFrontierState } from '../../../packages/search-core/src/webgpu-resident-frontier-state.js?v=20260810-gpu38';
 import { createWebGpuFrontierCandidateRecords } from '../../../packages/search-core/src/webgpu-frontier-candidate-records.js';
 import { createWebGpuFrontierScorer } from '../../../packages/search-core/src/webgpu-frontier-scorer.js';
 import { createWebGpuFrontierNavigationScheduler } from '../../../packages/search-core/src/webgpu-frontier-navigation-plan.js';
 import { createWebGpuDeviceCache } from '../../../packages/search-core/src/webgpu-device-cache.js';
 import { probeWebGpuExecutionCapabilities } from '../../../packages/search-core/src/webgpu-execution-probe.js?v=20260810-gpu35';
 import { createNavigationCoordinator } from '../../../packages/search-worker/src/navigation-coordinator.js';
-import { search } from './v2-legacy-search.js?v=20260810-gpu37';
+import { search } from './v2-legacy-search.js?v=20260810-gpu38';
 
 const deviceCache = createWebGpuDeviceCache({ gpu: globalThis.navigator?.gpu });
 const candidatePrefilter = createWebGpuCandidatePrefilter({ gpu: globalThis.navigator?.gpu, deviceCache });
@@ -32,7 +32,7 @@ const frontierTargetPool = createWebGpuFrontierTargetPool({ gpu: globalThis.navi
 const frontierMetrics = createWebGpuFrontierMetrics({ gpu: globalThis.navigator?.gpu, deviceCache });
 const fieldMetrics = createWebGpuFieldMetrics({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierState = createWebGpuLabeledFrontierState({ gpu: globalThis.navigator?.gpu, deviceCache });
-const residentFrontierState = createWebGpuResidentFrontierState({ gpu: globalThis.navigator?.gpu, deviceCache });
+const residentFrontierState = createWebGpuResidentFrontierState({ gpu: globalThis.navigator?.gpu });
 const frontierCandidateRecords = createWebGpuFrontierCandidateRecords({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierScorer = createWebGpuFrontierScorer({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierTopology = createWebGpuFrontierTopology({ gpu: globalThis.navigator?.gpu });

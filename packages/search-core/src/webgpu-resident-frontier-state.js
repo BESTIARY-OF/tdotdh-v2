@@ -1,6 +1,6 @@
 import { probeWebGpuCapabilities } from './webgpu-capability-probe.js';
 import { DEFAULT_FRONTIER_GRID } from './webgpu-frontier-validator.js';
-import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
+import { createWebGpuDeviceCache } from './webgpu-device-cache.js?v=20260810-limits1';
 import { REMAINING_MASK_WORD_COUNT, WEBGPU_LABELED_FRONTIER_STATE_SCHEMA, cpuTransitionLabeledFrontierStates } from './webgpu-labeled-frontier-state.js';
 
 export const WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA = 'tdotdh.webgpu-resident-frontier-state.v0';
@@ -184,15 +184,17 @@ async function readback(buffer, bytes) { await buffer.mapAsync(GPUMapMode.READ);
 
 async function dispatch(device, resources, candidates, pieceIds, outputIndices, grid) {
   const { buffers, pipeline, bindGroup, labelsPerState } = resources, count = candidates.length, labelBytes = count * labelsPerState * 4, maskBytes = count * grid.wordCount * 4, hashBytes = count * 4;
-  device.queue.writeBuffer(buffers.seedParents, 0, flatten(candidates, 'parentLabelMasks', labelsPerState));
+  // Resident children read their parent labels from residentParents. Roots
+  // read the explicit seed buffer; do not write and read residentParents in
+  // the same dispatch. Avoiding the full seed transfer is the fast path once
+  // a beam layer is resident on the GPU.
   device.queue.writeBuffer(buffers.candidateMasks, 0, flatten(candidates, 'candidateMask', grid.wordCount));
   device.queue.writeBuffer(buffers.candidatePieceIndices, 0, Uint32Array.from(candidates.map(candidate => candidate.candidatePieceIndex)));
   device.queue.writeBuffer(buffers.remainingMasks, 0, flatten(candidates, 'remainingMask', REMAINING_MASK_WORD_COUNT));
   const parentStateIndices = candidates.map((candidate, index) => {
     if (candidate.parentStateIndex != null) return candidate.parentStateIndex;
-    const outputIndex = outputIndices[index];
-    device.queue.writeBuffer(buffers.residentParents, outputIndex * labelsPerState * 4, candidate.parentLabelMasks);
-    return outputIndex;
+    device.queue.writeBuffer(buffers.seedParents, index * labelsPerState * 4, candidate.parentLabelMasks);
+    return RESIDENT_PARENT_SENTINEL;
   });
   device.queue.writeBuffer(buffers.parentStateIndices, 0, Uint32Array.from(parentStateIndices));
   device.queue.writeBuffer(buffers.outputStateIndices, 0, Uint32Array.from(outputIndices));
@@ -210,12 +212,12 @@ async function dispatch(device, resources, candidates, pieceIds, outputIndices, 
  * swaps them. Parent references therefore remain GPU-local across a full beam
  * layer; only canonical replay arrays and hashes are read back for admission.
  */
-export function createWebGpuResidentFrontierState({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, deviceCache = createWebGpuDeviceCache({ gpu }), capacity = DEFAULT_RESIDENT_FRONTIER_CAPACITY, batchCapacity = DEFAULT_RESIDENT_FRONTIER_BATCH_CAPACITY, requiredLimits = { maxStorageBufferBindingSize: 33554432 }, shaderSource = SHADER } = {}) {
+export function createWebGpuResidentFrontierState({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, deviceCache = null, capacity = DEFAULT_RESIDENT_FRONTIER_CAPACITY, batchCapacity = DEFAULT_RESIDENT_FRONTIER_BATCH_CAPACITY, requiredLimits = { maxStorageBufferBindingSize: 33554432, maxStorageBuffersPerShaderStage: 14 }, shaderSource = SHADER } = {}) {
   if (!Number.isSafeInteger(capacity) || capacity <= 0) throw new TypeError('resident frontier capacity must be a positive safe integer');
   if (!Number.isSafeInteger(batchCapacity) || batchCapacity <= 0 || batchCapacity > capacity) throw new TypeError('resident frontier batch capacity is invalid');
-  const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits };
+  const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits }, residentDeviceCache = deviceCache || createWebGpuDeviceCache({ gpu, requiredLimits: limits });
   let resources = null, pieceIds = null, epoch = 0, residentCount = 0, layer = null;
-  const reset = () => { destroyResources(resources); resources = null; pieceIds = null; epoch = 0; residentCount = 0; layer = null; deviceCache.reset(); };
+  const reset = () => { destroyResources(resources); resources = null; pieceIds = null; epoch = 0; residentCount = 0; layer = null; residentDeviceCache.reset(); };
   const availability = async () => { const probe = await probeWebGpuCapabilities({ gpu, requiredLimits: limits }); return probe.adapterAvailable && probe.requiredLimitsSatisfied ? Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'available', backend: 'webgpu', capacity, batchCapacity, grid: normalizedGrid }) : Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: probe.adapterAvailable ? 'webgpu-required-limits-unsatisfied' : 'webgpu-adapter-unavailable', capacity, batchCapacity, grid: normalizedGrid }); };
   const beginLayer = () => { if (layer) throw new Error('resident frontier layer is already active'); layer = { nextSlot: 0, pieceIds: null, pendingEpoch: epoch + 1 }; return Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'layer-open', epoch, nextEpoch: layer.pendingEpoch }); };
   const commitLayer = () => { if (!layer) return Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'idle', epoch }); const committed = Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'layer-committed', epoch: layer.pendingEpoch, outputCount: layer.nextSlot }); epoch = layer.pendingEpoch; residentCount = layer.nextSlot; layer = null; if (resources) { const old = resources.buffers.residentParents; resources.buffers.residentParents = resources.buffers.residentNext; resources.buffers.residentNext = old; const bindingBuffers = [resources.buffers.seedParents, resources.buffers.candidateMasks, resources.buffers.candidatePieceIndices, resources.buffers.remainingMasks, resources.buffers.nextLabels, resources.buffers.canonicalLabels, resources.buffers.absoluteHashes, resources.buffers.canonicalHashes, resources.buffers.params, resources.buffers.residentParents, resources.buffers.residentNext, resources.buffers.residentCanonical, resources.buffers.parentStateIndices, resources.buffers.outputStateIndices]; resources.bindGroup = resources.device.createBindGroup({ layout: resources.pipeline.getBindGroupLayout(0), entries: bindingBuffers.map((buffer, binding) => ({ binding, resource: { buffer } })) }); } return committed; };
@@ -236,7 +238,7 @@ export function createWebGpuResidentFrontierState({ gpu = globalThis.navigator?.
       if (layer.nextSlot + normalized.length > capacity) return unavailable('resident-frontier-capacity-exceeded', cpu, { capacity, epoch: layer.pendingEpoch });
       const status = await availability(); if (status.status !== 'available') return unavailable(status.reason, cpu, { capacity, epoch: layer.pendingEpoch });
       try {
-        const device = await deviceCache.getDevice();
+        const device = await residentDeviceCache.getDevice();
         if (!resources) { resources = makeResources(device, capacity, batchCapacity, cpu.pieceCount, normalizedGrid, shaderSource); resources.device = device; }
         if (resources.pieceCount !== cpu.pieceCount || resources.grid.wordCount !== cpu.wordCount) { reset(); return unavailable('resident-frontier-shape-changed', cpu); }
         for (const candidate of normalized) if (candidate.parentStateIndex != null && candidate.parentStateIndex >= residentCount) return unavailable('resident-parent-reference-not-in-input-layer', cpu, { capacity, epoch: layer.pendingEpoch, residentCount });

@@ -160,16 +160,19 @@ function cpuCandidate(normalized, targetIndex, sourceIndex) {
   if (maxX - minX + 1 > 24 || maxY - minY + 1 > 16) valid = false;
   return { origin, valid: valid ? 1 : 0 };
 }
-export function cpuGenerateFrontierTargetCandidates(input, grid = DEFAULT_FRONTIER_GRID) {
-  const normalizedGrid = normalizeGrid(grid), normalized = normalizeInput(input, normalizedGrid), origins = [], validity = [];
+function cpuGenerateFrontierTargetCandidatesNormalized(normalized) {
+  const origins = [], validity = [];
   for (let targetIndex = 0; targetIndex < normalized.targetCells.length; targetIndex += 1) for (let sourceIndex = 0; sourceIndex < normalized.pieceCells.length; sourceIndex += 1) {
     const result = cpuCandidate(normalized, targetIndex, sourceIndex); origins.push(result.origin); validity.push(result.valid);
   }
   return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'cpu-oracle', targetCount: normalized.targetCells.length, pieceCount: normalized.pieceCells.length, origins, validity, acceptedIndices: validity.flatMap((value, index) => value ? [index] : []), candidateCount: normalized.candidateCount, parity: 'oracle' });
 }
+export function cpuGenerateFrontierTargetCandidates(input, grid = DEFAULT_FRONTIER_GRID) {
+  return cpuGenerateFrontierTargetCandidatesNormalized(normalizeInput(input, normalizeGrid(grid)));
+}
 export function cpuGenerateFrontierTargetBatch(inputs, grid = DEFAULT_FRONTIER_GRID) {
   const normalizedGrid = normalizeGrid(grid), normalized = normalizeBatchInput(inputs, normalizedGrid);
-  return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'cpu-oracle', parity: 'oracle', candidateCount: normalized.candidateCount, items: Object.freeze(normalized.items.map(item => Object.freeze({ pieceId: item.pieceId, targetCount: item.targetCells.length, pieceCount: item.pieceCells.length, ...cpuGenerateFrontierTargetCandidates(item, normalizedGrid) }))) });
+  return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'cpu-oracle', parity: 'oracle', candidateCount: normalized.candidateCount, items: Object.freeze(normalized.items.map(item => Object.freeze({ pieceId: item.pieceId, targetCount: item.targetCells.length, pieceCount: item.pieceCells.length, ...cpuGenerateFrontierTargetCandidatesNormalized(item) }))) });
 }
 
 function parityMismatchReason(actualItems, expectedItems) {

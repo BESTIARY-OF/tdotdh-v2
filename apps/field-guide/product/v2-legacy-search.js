@@ -1044,7 +1044,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     const generatedByBeam = useGeneratedFrontier
       ? await generateFrontierTranslationsAcrossBeam(beamPlans, frontierGenerator, receipt => { frontierGenerationReceipt = receipt; }, frontierGeneratorStatus, frontierCandidateRecords)
       : null;
-    if (!useGeneratedFrontier && frontierGenerator?.generate && frontierGenerationReceipt.status === 'cpu-oracle') frontierGenerationReceipt = { status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', candidateCount: 0 };
+    if (!useTargetGeneratedFrontier && !useGeneratedFrontier && frontierGenerator?.generate && frontierGenerationReceipt.status === 'cpu-oracle') frontierGenerationReceipt = { status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', candidateCount: 0 };
     if (navigationBatchReceipt) {
       const annotate = receipt => receipt?.status ? { ...receipt, navigationBatch: navigationBatchReceipt } : receipt;
       frontierTargetPoolReceipt = annotate(frontierTargetPoolReceipt);

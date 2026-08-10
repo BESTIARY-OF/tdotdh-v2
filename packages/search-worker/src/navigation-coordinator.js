@@ -58,7 +58,7 @@ function summarizeStages(result) {
   for (const stage of NAVIGATION_STAGE_KEYS) {
     const receipt = result?.[stage];
     if (!receipt || receipt.status === 'cpu-oracle') continue;
-    if (receipt.status === 'used' && receipt.parity === 'verified' && ['webgpu', 'compute-shader', 'resident-webgpu'].includes(receipt.backend)) gpuStages.push(stage);
+    if (receipt.status === 'used' && ['verified', 'labels-verified'].includes(receipt.parity) && ['webgpu', 'compute-shader', 'resident-webgpu'].includes(receipt.backend)) gpuStages.push(stage);
     else cpuFallbackStages.push(stage);
   }
   return { gpuStages: Object.freeze(gpuStages), cpuFallbackStages: Object.freeze(cpuFallbackStages) };
