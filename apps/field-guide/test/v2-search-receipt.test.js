@@ -90,6 +90,10 @@ const singleResult = await search(pieces, [], { ...sharedOptions, frontierGenera
 const result = await search(pieces, [], { ...sharedOptions, frontierGenerator });
 const targetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator });
 const targetPoolResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator, frontierTargetPool });
+let checkpointCursor = null;
+const checkpointResult = await search(pieces, [], { ...sharedOptions, frontierGenerator, reportProgress: progress => { checkpointCursor = progress.cursor; } });
+assert.ok(checkpointCursor?.checkpoint);
+const resumedResult = await search(pieces, [], { ...sharedOptions, frontierGenerator, resumeCheckpoint: checkpointCursor.checkpoint });
 
 const lockedPieces = [
   { id: 3, cells },
@@ -144,6 +148,8 @@ assert.equal(targetPoolResult.frontierDedup.status, 'used');
 assert.equal(targetPoolResult.frontierDedup.backend, 'test-frontier-deduplicator');
 assert.deepEqual(targetPoolResult.placements, result.placements);
 assert.deepEqual(targetPoolResult.metrics, result.metrics);
+assert.deepEqual(resumedResult.placements, checkpointResult.placements);
+assert.deepEqual(resumedResult.metrics, checkpointResult.metrics);
 assert.ok(lockedTargetPoolCalls > 0);
 assert.equal(lockedResult.frontierTargetPool.status, 'used');
 assert.equal(lockedResult.frontierTargetPool.backend, 'test-frontier-target-pool');

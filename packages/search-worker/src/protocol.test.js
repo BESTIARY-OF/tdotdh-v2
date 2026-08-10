@@ -50,7 +50,7 @@ const gate = new Promise((resolve) => { release = resolve; });
 const runtime = createWorkerRuntime({
   postMessage: (event) => events.push(event),
   execute: async (_input, context) => {
-    context.reportProgress({ nodes: 1, depth: 1, frontier: 2, families: 1, cursor: { depth: 1, nodeOffset: 1, rootChoice: 2 } });
+    context.reportProgress({ nodes: 1, depth: 1, frontier: 2, families: 1, cursor: { depth: 1, nodeOffset: 1, rootChoice: 2, checkpoint: { schema: 'test.checkpoint.v0', depth: 1, beam: [{ placements: [{ id: 3, cells: [{ x: 0, y: 0 }] }] }] } } });
     await gate;
     return context.isCancelled() ? null : { placements: [{ id: 3, cells: [{ x: 0, y: 0 }] }], nodes: 1 };
   },
@@ -67,8 +67,8 @@ assert.deepEqual(events.map((event) => event.type), ["started", "progress", "can
 assert.deepEqual(events.map((event) => event.sequence), [1, 2, 3]);
 assert.deepEqual(events.map((event) => event.mode), [DEFAULT_SEARCH_MODE, DEFAULT_SEARCH_MODE, DEFAULT_SEARCH_MODE]);
 assert.deepEqual(events[1].ticket, baseCommand.ticket);
-assert.deepEqual(events[1].cursor, { depth: 1, nodeOffset: 1, rootChoice: 2 });
-assert.deepEqual(events[2].cursor, { depth: 1, nodeOffset: 1, rootChoice: 2 });
+assert.deepEqual(events[1].cursor, { depth: 1, nodeOffset: 1, rootChoice: 2, checkpoint: { schema: 'test.checkpoint.v0', depth: 1, beam: [{ placements: [{ id: 3, cells: [{ x: 0, y: 0 }] }] }] } });
+assert.deepEqual(events[2].cursor, { depth: 1, nodeOffset: 1, rootChoice: 2, checkpoint: { schema: 'test.checkpoint.v0', depth: 1, beam: [{ placements: [{ id: 3, cells: [{ x: 0, y: 0 }] }] }] } });
 assert.equal(runtime.getActiveRequestId(), null);
 
 const failed = [];

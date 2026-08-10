@@ -34,6 +34,7 @@ async function runProductSearch(request, context) {
     knownSignatures: request.knownSignatureHints,
     searchSalt: request.seed,
     rootChoice: request.ticket.rootChoice ?? request.cursor.rootChoice,
+    resumeCheckpoint: request.cursor.checkpoint,
     candidatePrefilter,
     frontierValidator,
     frontierEvaluator,

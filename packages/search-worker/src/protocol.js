@@ -21,6 +21,7 @@ const MAX_PIECES = 64;
 const MAX_CELLS_PER_PIECE = 256;
 const MAX_BUDGET_NODES = 10_000_000;
 const MAX_BUDGET_MILLISECONDS = 15 * 60 * 1000;
+const MAX_CHECKPOINT_BYTES = 768 * 1024;
 const FRONTIER_BATCH_OPERATION = 'frontier-batch';
 
 import { normalizeFrontierBatch } from './frontier-batch-contract.js';
@@ -84,11 +85,23 @@ function normalizeTicket(value, presetFingerprint) {
 
 function normalizeCursor(value = {}) {
   const cursor = requireObject(value, "cursor");
-  return {
+  const normalized = {
     depth: finiteInteger(cursor.depth ?? 0, "cursor.depth"),
     nodeOffset: finiteInteger(cursor.nodeOffset ?? 0, "cursor.nodeOffset"),
     rootChoice: finiteInteger(cursor.rootChoice ?? 0, "cursor.rootChoice"),
   };
+  if (cursor.checkpoint != null) {
+    const checkpoint = cloneJson(cursor.checkpoint, "cursor.checkpoint");
+    const bytes = byteLength(checkpoint);
+    if (bytes > MAX_CHECKPOINT_BYTES) {
+      throw new WorkerProtocolError("CHECKPOINT_PAYLOAD_LIMIT", `cursor.checkpoint exceeds ${MAX_CHECKPOINT_BYTES} bytes.`, {
+        bytes,
+        maximum: MAX_CHECKPOINT_BYTES,
+      });
+    }
+    normalized.checkpoint = checkpoint;
+  }
+  return normalized;
 }
 
 function normalizeMode(value) {

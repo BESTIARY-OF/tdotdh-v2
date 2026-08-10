@@ -17,9 +17,12 @@ The GPU may return compact candidates and scores, but it must return canonical
 arrangement signatures that the CPU can replay. A signature mismatch is a
 correctness failure, not a performance tradeoff. If an adapter is unavailable
 or fails parity, the coordinator falls back to CPU and records that fact in the
-receipt. Ticketing, cursor advancement, cancellation acknowledgement,
-checkpoint persistence, and final canonical acceptance remain CPU-owned until
-the end-to-end navigator parity gate is closed.
+receipt. Ticketing, cursor arbitration, cancellation acknowledgement,
+checkpoint serialization, and final canonical acceptance remain CPU-owned
+until the end-to-end navigator parity gate is closed. The product worker now
+carries a bounded versioned beam checkpoint through the cursor and persists it
+across a reload; GPU state is recomputed on resume rather than trusted from
+storage.
 
 The worker boundary remains responsible for cancellation acknowledgement,
 checkpoint persistence, and ordered result delivery. GPU dispatch must not make
@@ -42,7 +45,8 @@ back into v2 solver semantics.
 4. CPU/GPU parity fixture for each navigation stage.
 5. Real worker receipt proving the adapters execute inside the product worker.
 6. End-to-end navigator parity: batch candidate expansion, deduplication,
-   ranking, cursor advancement, cancellation, and canonical signatures.
+   ranking, cursor advancement, cancellation, checkpoint resume, and
+   canonical signatures.
 7. Only then: WebGPU throughput benchmark and windowed renderer benchmark.
 
 ## Current receipt
