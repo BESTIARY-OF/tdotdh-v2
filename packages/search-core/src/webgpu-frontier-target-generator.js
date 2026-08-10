@@ -1,6 +1,7 @@
 import { probeWebGpuCapabilities } from './webgpu-capability-probe.js';
 import { DEFAULT_FRONTIER_GRID } from './webgpu-frontier-validator.js';
 import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
+import { createWebGpuFrontierBatchLayout } from './webgpu-frontier-batch-layout.js';
 
 export const WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA = 'tdotdh.webgpu-frontier-target-generator.v0';
 export const MAX_FRONTIER_TARGET_GENERATION_CANDIDATES = 16384;
@@ -145,8 +146,6 @@ function normalizeBatchInput(inputs, grid) {
   return Object.freeze({ items: Object.freeze(items), candidateCount: candidateOffset });
 }
 function inGrid(x, y, grid) { return x >= grid.originX && x < grid.originX + grid.width && y >= grid.originY && y < grid.originY + grid.height; }
-function flattenCells(cells) { const flat = new Int32Array(cells.length * 2); cells.forEach((cell, index) => { flat[index * 2] = cell.x; flat[index * 2 + 1] = cell.y; }); return flat; }
-function createMask(cells, grid) { const mask = new Uint32Array(grid.wordCount); for (const cell of cells) if (inGrid(cell.x, cell.y, grid)) { const bit = (cell.y - grid.originY) * grid.width + (cell.x - grid.originX); mask[Math.floor(bit / 32)] |= 1 << (bit % 32); } return mask; }
 function cpuCandidate(normalized, targetIndex, sourceIndex) {
   const target = normalized.targetCells[targetIndex], source = normalized.pieceCells[sourceIndex], origin = { x: target.x - source.x, y: target.y - source.y }, field = new Set(normalized.fieldCells.map(cell => `${cell.x},${cell.y}`));
   let valid = normalized.lock.enabled === 0 || (origin.x === normalized.lock.x && origin.y === normalized.lock.y);
@@ -171,12 +170,9 @@ export function cpuGenerateFrontierTargetBatch(inputs, grid = DEFAULT_FRONTIER_G
   return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'cpu-oracle', parity: 'oracle', candidateCount: normalized.candidateCount, items: Object.freeze(normalized.items.map(item => Object.freeze({ pieceId: item.pieceId, targetCount: item.targetCells.length, pieceCount: item.pieceCells.length, ...cpuGenerateFrontierTargetCandidates(item, normalizedGrid) }))) });
 }
 
-function flattenMasks(items, grid) { const flat = new Uint32Array(items.length * grid.wordCount); items.forEach((item, index) => flat.set(createMask(item.fieldCells || [], grid), index * grid.wordCount)); return flat; }
-function flattenItemCells(items, property) { const offsets = []; let offset = 0; const flat = []; for (const item of items) { offsets.push(offset); for (const cell of item[property]) flat.push(cell.x, cell.y); offset += item[property].length; } return { offsets, values: Int32Array.from(flat) }; }
 async function runGpuBatch(device, normalized, grid, shaderSource) {
-  const targetValues = flattenItemCells(normalized.items, 'targetCells'), pieceValues = flattenItemCells(normalized.items, 'pieceCells'), fieldMasks = flattenMasks(normalized.items, grid), metaValues = [];
-  normalized.items.forEach(item => metaValues.push(item.targetCells.length, targetValues.offsets[normalized.items.indexOf(item)], pieceValues.offsets[normalized.items.indexOf(item)], item.pieceCells.length, normalized.items.indexOf(item) * grid.wordCount, item.candidateOffset, item.bounds.minX, item.bounds.maxX, item.bounds.minY, item.bounds.maxY, item.lock.x, item.lock.y, item.lock.enabled, 0));
-  const originBytes = Math.max(4, normalized.candidateCount * 2 * 4), countBytes = Math.max(4, normalized.candidateCount * 4), targetBytes = Math.max(4, targetValues.values.byteLength), pieceBytes = Math.max(4, pieceValues.values.byteLength), maskBytes = Math.max(4, fieldMasks.byteLength), metaBytes = Math.max(4, metaValues.length * 4);
+  const layout = createWebGpuFrontierBatchLayout(normalized.items, grid);
+  const originBytes = Math.max(4, normalized.candidateCount * 2 * 4), countBytes = Math.max(4, normalized.candidateCount * 4), targetBytes = Math.max(4, layout.targetValues.byteLength), pieceBytes = Math.max(4, layout.pieceValues.byteLength), maskBytes = Math.max(4, layout.fieldMasks.byteLength), metaBytes = Math.max(4, layout.metaValues.byteLength);
   const buffers = {
     targets: device.createBuffer({ size: targetBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
     pieces: device.createBuffer({ size: pieceBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
@@ -189,7 +185,7 @@ async function runGpuBatch(device, normalized, grid, shaderSource) {
     validityReadback: device.createBuffer({ size: countBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
   };
   try {
-    device.queue.writeBuffer(buffers.targets, 0, targetValues.values); device.queue.writeBuffer(buffers.pieces, 0, pieceValues.values); device.queue.writeBuffer(buffers.masks, 0, fieldMasks); device.queue.writeBuffer(buffers.metas, 0, Int32Array.from(metaValues)); device.queue.writeBuffer(buffers.params, 0, new Int32Array([normalized.items.length, normalized.candidateCount, grid.width, grid.height, grid.originX, grid.originY, 0, 0]));
+    device.queue.writeBuffer(buffers.targets, 0, layout.targetValues); device.queue.writeBuffer(buffers.pieces, 0, layout.pieceValues); device.queue.writeBuffer(buffers.masks, 0, layout.fieldMasks); device.queue.writeBuffer(buffers.metas, 0, layout.metaValues); device.queue.writeBuffer(buffers.params, 0, new Int32Array([layout.itemCount, layout.candidateCount, grid.width, grid.height, grid.originX, grid.originY, 0, 0]));
     const module = device.createShaderModule({ code: shaderSource }), pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } }), bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [0, 1, 2, 3, 4, 5, 6].map((binding, index) => ({ binding, resource: { buffer: [buffers.targets, buffers.pieces, buffers.masks, buffers.metas, buffers.origins, buffers.validity, buffers.params][index] } })) });
     const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(normalized.candidateCount / 64)); pass.end(); encoder.copyBufferToBuffer(buffers.origins, 0, buffers.originsReadback, 0, originBytes); encoder.copyBufferToBuffer(buffers.validity, 0, buffers.validityReadback, 0, countBytes); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
     await buffers.originsReadback.mapAsync(GPUMapMode.READ); const rawOrigins = Array.from(new Int32Array(buffers.originsReadback.getMappedRange().slice(0, normalized.candidateCount * 2 * 4))); buffers.originsReadback.unmap(); await buffers.validityReadback.mapAsync(GPUMapMode.READ); const validity = Array.from(new Uint32Array(buffers.validityReadback.getMappedRange().slice(0, normalized.candidateCount * 4))); buffers.validityReadback.unmap();
