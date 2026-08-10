@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { search } from '../../../apps/field-guide/product/v2-legacy-search.js';
 import { cpuEvaluateFrontierMetrics } from '../../../packages/search-core/src/webgpu-frontier-metrics.js';
+import { cpuTransitionFrontierStates } from '../../../packages/search-core/src/webgpu-frontier-state.js';
 
 globalThis.postMessage = () => {};
 
@@ -37,11 +38,25 @@ function createBenchFrontierMetrics() {
   };
 }
 
+function createBenchFrontierState() {
+  const receipt = { batches: 0, candidates: 0 };
+  return {
+    receipt,
+    transition: async candidates => {
+      receipt.batches += 1;
+      receipt.candidates += candidates.length;
+      const result = cpuTransitionFrontierStates(candidates);
+      return { ...result, backend: 'benchmark', parity: 'verified' };
+    },
+  };
+}
+
 async function run(mode, options = {}) {
   const candidatePrefilter = createBenchPrefilter();
   const frontierMetrics = createBenchFrontierMetrics();
+  const frontierState = createBenchFrontierState();
   const started = performance.now();
-  const result = await search(pieces, [], { searchStrategy: mode, candidatePrefilter, frontierMetrics, ...options });
+  const result = await search(pieces, [], { searchStrategy: mode, candidatePrefilter, frontierMetrics, frontierState, ...options });
   return {
     mode,
     elapsedMs: Number((performance.now() - started).toFixed(2)),
@@ -50,6 +65,7 @@ async function run(mode, options = {}) {
     prefilter: result.prefilter,
     ...candidatePrefilter.receipt,
     frontierMetrics: frontierMetrics.receipt,
+    frontierState: frontierState.receipt,
     result,
   };
 }

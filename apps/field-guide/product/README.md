@@ -9,10 +9,13 @@ The product keeps the CPU worker as the correctness oracle while moving the hot
 frontier path behind parity-gated WebGPU adapters. Candidate occupancy, frontier
 generation and deterministic compaction, frontier validity/scoring, and frontier
 geometry reduction (contact, centroid contact, ring coverage, open-ring count,
-combined bounds area, and beam geometry score) now have explicit GPU contracts.
+combined bounds area, and beam geometry score), and partial-field state
+transition (occupancy union, translation-normalized mask, and remaining-piece
+hash) now have explicit GPU contracts.
 When WebGPU is available and exact parity holds, the product uses those GPU results
 to rank the next beam; otherwise each slice reports an explicit CPU fallback. Full
 topology acceptance, ordered deduplication, cancellation/control flow, and the
-canonical oracle remain CPU-owned until the next GPU-resident state-transition
-slice. The worker also exposes a protocol-native `frontier-batch` operation with
+canonical oracle remain CPU-owned until piece-labeled GPU state and
+deduplication are verified. The worker also exposes a protocol-native
+`frontier-batch` operation with
 cursor-selected candidates, canonical signatures, and resumable receipts.
