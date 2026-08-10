@@ -399,7 +399,7 @@ async function evaluateFrontierOptions(entries, state, centroidId, frontierEvalu
   try {
     const parentCells = [...state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
     if (frontierEvaluator?.evaluate) {
-      const candidates = entries.map(entry => createFrontierEvaluationCandidate({ parentCells, candidateCells: entry.candidate.cells, scoreTerms: frontierScoreTerms(entry.metrics || fieldMetrics([...state.placements, entry.candidate], centroidId)) }));
+      const candidates = entries.map(entry => createFrontierEvaluationCandidate({ parentCells, candidateCells: entry.candidate.cells, scoreTerms: entry.metrics ? frontierScoreTerms(entry.metrics) : (entry.gpuGeometry || entry.gpuFieldMetrics) ? [0, 0, 0, 0, 0, 0, 0, 0] : frontierScoreTerms(fieldMetrics([...state.placements, entry.candidate], centroidId)) }));
       const result = await frontierEvaluator.evaluate(candidates);
       if (Array.isArray(result?.validity) && result.validity.length === entries.length && result.status === 'completed') {
         onFrontier({ status: result.parity === 'verified' ? 'used' : 'fallback', backend: result.backend || 'cpu-oracle', parity: result.parity, candidateCount: entries.length });
@@ -591,10 +591,10 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       if (!selectedTarget) continue;
       selectedOptions = await filterCandidates(selectedOptions);
       selectedOptions = await evaluateFrontierGeometry(selectedOptions, state, centroidId, frontierMetrics, receipt => { frontierMetricsReceipt = receipt; });
+      selectedOptions = await evaluateFieldAggregates(selectedOptions, state, centroidId, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; });
       selectedOptions = await evaluateFrontierOptions(selectedOptions, state, centroidId, frontierEvaluator, options.frontierValidator, receipt => { frontierReceipt = receipt; });
       selectedOptions = await evaluateFrontierState(selectedOptions, state, frontierState, receipt => { frontierStateReceipt = receipt; });
       selectedOptions = await evaluateFrontierTopology(selectedOptions, state, centroidId, frontierTopology, receipt => { frontierTopologyReceipt = receipt; }, frontierTopologyAvailabilityReceipt);
-      selectedOptions = await evaluateFieldAggregates(selectedOptions, state, centroidId, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; });
       if (!selectedOptions.length) continue;
       const rankedCandidates = selectedOptions.map(({ piece, candidate, gpuGeometry, gpuFieldMetrics, gpuState, gpuTopology }) => {
         const nextBounds = { minX: Math.min(state.bounds.minX, ...candidate.cells.map(c => c.x)), maxX: Math.max(state.bounds.maxX, ...candidate.cells.map(c => c.x)), minY: Math.min(state.bounds.minY, ...candidate.cells.map(c => c.y)), maxY: Math.max(state.bounds.maxY, ...candidate.cells.map(c => c.y)) };
