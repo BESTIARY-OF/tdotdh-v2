@@ -14,8 +14,11 @@ struct Params { batchCount: u32, cellCount: u32, wordCount: u32, width: u32, hei
 @group(0) @binding(3) var<storage, read_write> ringFlags: array<u32>;
 @group(0) @binding(4) var<uniform> params: Params;
 
-fn bitAt(mask: array<u32>, base: u32, offset: u32) -> bool {
-  return ((mask[base + offset / 32u] >> (offset % 32u)) & 1u) != 0u;
+fn parentAt(base: u32, offset: u32) -> bool {
+  return ((parentMasks[base + offset / 32u] >> (offset % 32u)) & 1u) != 0u;
+}
+fn centroidAt(base: u32, offset: u32) -> bool {
+  return ((centroidMasks[base + offset / 32u] >> (offset % 32u)) & 1u) != 0u;
 }
 
 @compute @workgroup_size(${FRONTIER_TARGET_POOL_WORKGROUP_SIZE})
@@ -27,7 +30,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let cellOffset = index % params.cellCount;
   let x = cellOffset % params.width;
   let y = cellOffset / params.width;
-  if (bitAt(parentMasks, stateIndex * params.wordCount, cellOffset)) {
+  if (parentAt(stateIndex * params.wordCount, cellOffset)) {
     frontierFlags[index] = 0u;
     ringFlags[index] = 0u;
     return;
@@ -43,8 +46,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (direction == 3u) { ny -= 1; }
     if (nx < 0 || nx >= i32(params.width) || ny < 0 || ny >= i32(params.height)) { continue; }
     let neighbor = u32(ny) * params.width + u32(nx);
-    frontier = frontier || bitAt(parentMasks, stateIndex * params.wordCount, neighbor);
-    ring = ring || bitAt(centroidMasks, stateIndex * params.wordCount, neighbor);
+    frontier = frontier || parentAt(stateIndex * params.wordCount, neighbor);
+    ring = ring || centroidAt(stateIndex * params.wordCount, neighbor);
   }
   frontierFlags[index] = select(0u, 1u, frontier);
   ringFlags[index] = select(0u, 1u, ring);

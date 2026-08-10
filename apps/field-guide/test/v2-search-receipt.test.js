@@ -81,6 +81,28 @@ const result = await search(pieces, [], { ...sharedOptions, frontierGenerator })
 const targetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator });
 const targetPoolResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator, frontierTargetPool });
 
+const lockedPieces = [
+  { id: 3, cells },
+  { id: 1, cells },
+  { id: 2, cells },
+  { id: 4, cells },
+];
+let lockedTargetPoolCalls = 0;
+const lockedTargetPool = {
+  availability: async () => ({ status: 'available', backend: 'webgpu' }),
+  generateBatch: async inputs => {
+    lockedTargetPoolCalls += inputs.length;
+    return { ...cpuGenerateFrontierTargetPoolBatch(inputs), status: 'completed', backend: 'test-frontier-target-pool', parity: 'verified' };
+  },
+};
+const lockedResult = await search(lockedPieces, [], {
+  ...sharedOptions,
+  searchStrategy: 'breadth',
+  positionLocks: { 1: { dx: 3, dy: 0 } },
+  frontierGenerator: singleFrontierGenerator,
+  frontierTargetPool: lockedTargetPool,
+});
+
 assert.equal(result.type, 'done');
 assert.deepEqual(singleResult.prefilter, { status: 'used', backend: 'test-compute-shader', candidateCount: 6 });
 assert.deepEqual(result.prefilter, { status: 'used', backend: 'test-compute-shader', candidateCount: 3 });
@@ -109,4 +131,8 @@ assert.equal(targetPoolResult.frontierTargetPool.backend, 'test-frontier-target-
 assert.equal(targetPoolResult.frontierTargetPool.batch, 'beam');
 assert.deepEqual(targetPoolResult.placements, result.placements);
 assert.deepEqual(targetPoolResult.metrics, result.metrics);
+assert.ok(lockedTargetPoolCalls > 0);
+assert.equal(lockedResult.frontierTargetPool.status, 'used');
+assert.equal(lockedResult.frontierTargetPool.backend, 'test-frontier-target-pool');
+assert.equal(lockedResult.frontierTargetPool.batch, 'locked-branch');
 console.log('v2 product search receipt test passed');

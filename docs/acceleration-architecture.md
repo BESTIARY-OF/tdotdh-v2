@@ -4,13 +4,21 @@ The v2 acceleration boundary has two independent surfaces.
 
 ## Search
 
-The CPU implementation is the oracle. A future compute-shader adapter receives
-the same deterministic family ticket, mode (`breadth` or `depth`), run seed,
-and resumable cursor. It may batch candidate generation and occupancy checks on
-the GPU, but it must return canonical arrangement signatures that the CPU can
-replay. A signature mismatch is a correctness failure, not a performance
-tradeoff. If the adapter is unavailable, the coordinator falls back to CPU and
-records that fact in the receipt.
+The CPU implementation is the oracle. Compute-shader adapters receive the same
+deterministic family ticket, mode (`breadth` or `depth`), run seed, and
+resumable cursor. The current navigation path batches occupancy prefiltering,
+frontier generation, target-pool classification, field aggregates, geometry,
+state transitions, topology, and frontier ranking on the GPU when each adapter
+passes parity. Family/locked branches use the target-pool contract too; they no
+longer have a special implicit CPU-only target gate.
+
+The GPU may return compact candidates and scores, but it must return canonical
+arrangement signatures that the CPU can replay. A signature mismatch is a
+correctness failure, not a performance tradeoff. If an adapter is unavailable
+or fails parity, the coordinator falls back to CPU and records that fact in the
+receipt. Ticketing, cursor advancement, cancellation acknowledgement,
+checkpoint persistence, and final canonical acceptance remain CPU-owned until
+the end-to-end navigator parity gate is closed.
 
 The worker boundary remains responsible for cancellation acknowledgement,
 checkpoint persistence, and ordered result delivery. GPU dispatch must not make
@@ -30,13 +38,16 @@ back into v2 solver semantics.
 1. CPU fixture and canonical signature.
 2. Worker receipt and cancellation behavior.
 3. Adapter contract and unavailable fallback.
-4. CPU/GPU parity fixture.
-5. Only then: WebGPU throughput benchmark and windowed renderer benchmark.
+4. CPU/GPU parity fixture for each navigation stage.
+5. Real worker receipt proving the adapters execute inside the product worker.
+6. End-to-end navigator parity: batch candidate expansion, deduplication,
+   ranking, cursor advancement, cancellation, and canonical signatures.
+7. Only then: WebGPU throughput benchmark and windowed renderer benchmark.
 
 ## Current receipt
 
-The v2 workline has completed gates 1–3 and has working parity-gated slices for
-gate 4:
+The v2 workline has completed gates 1–5 for the current adapter slices and has
+not completed gate 6:
 
 - 560c1ff executes a real WebGPU candidate-scoring dispatch with a CPU hash
   reference.
@@ -47,7 +58,12 @@ gate 4:
 - 4ec5083 adds the coordinate-preserving renderer capability boundary.
 - e4dcba4 adds an end-to-end worker receipt test proving the adapter hook is
   consulted.
+- 90f9c19 moves beam target selection behind a parity-gated GPU target pool,
+  including the family/locked branch path.
+- 9e985c7 covers WGSL compound-statement portability and empty-field bounds
+  parity in the field-metrics shader.
 
-The browser must still demonstrate the GPU validity mask matching the CPU
-oracle on a real field-guide candidate batch before the UI may claim accelerated
-search. Until then the product remains correctly labeled CPU-oracle-first.
+Committed runtime receipts in `docs/receipts/` prove real Chrome/D3D11 dispatch
+for the candidate scorer and occupancy prefilter, including a measured
+prefilter improvement on that fixture. They do not prove the full variable-field
+navigator is GPU-first yet; gate 6 remains the active milestone.

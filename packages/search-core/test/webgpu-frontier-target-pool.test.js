@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
-import { cpuGenerateFrontierTargetPool, cpuGenerateFrontierTargetPoolBatch, createWebGpuFrontierTargetPool } from '../src/webgpu-frontier-target-pool.js';
+import { cpuGenerateFrontierTargetPool, cpuGenerateFrontierTargetPoolBatch, createWebGpuFrontierTargetPool, DEFAULT_SHADER } from '../src/webgpu-frontier-target-pool.js';
+
+assert.match(DEFAULT_SHADER, /fn parentAt\(/);
+assert.match(DEFAULT_SHADER, /fn centroidAt\(/);
+assert.doesNotMatch(DEFAULT_SHADER, /fn bitAt\(mask: array<u32>/);
 
 const input = {
   stateId: 'state-1',

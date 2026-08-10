@@ -4,6 +4,7 @@ import { createRendererAdapter } from '../../../packages/browser-handoff/src/ren
 import { createCpuOracleFirstAdapter } from '../../../packages/search-core/src/compute-adapter.js';
 import { createWebGpuCandidateScorer, cpuCandidateScores } from '../../../packages/search-core/src/webgpu-candidate-scorer.js';
 import { createWebGpuCandidatePrefilter, cpuCandidatePrefilter } from '../../../packages/search-core/src/webgpu-candidate-prefilter.js';
+import { createWebGpuFrontierTargetPool, cpuGenerateFrontierTargetPoolBatch } from '../../../packages/search-core/src/webgpu-frontier-target-pool.js';
 
 const geometry = createDisplayGeometry({ kind: 'flatland', dimension: 2 });
 const rendererAdapter = createRendererAdapter();
@@ -20,6 +21,7 @@ const workerUrl = new URL('./v2-search-worker.js', import.meta.url);
 const cpuWorker = new Worker(workerUrl, { type: 'module' });
 const gpuScorer = createWebGpuCandidateScorer();
 const gpuCandidatePrefilter = createWebGpuCandidatePrefilter();
+const gpuFrontierTargetPool = createWebGpuFrontierTargetPool();
 
 async function runCandidateParity(candidates) {
   const cpu = cpuCandidatePrefilter(candidates);
@@ -41,6 +43,7 @@ window.__TDOTDH_V2_RUNTIME__ = Object.freeze({
   cpuWorker,
   gpuScorer,
   gpuCandidatePrefilter,
+  gpuFrontierTargetPool,
   runCandidateParity,
   rendererAdapter,
   workerUrl: workerUrl.href,
@@ -50,14 +53,14 @@ window.__TDOTDH_V2_RUNTIME__ = Object.freeze({
 
 const status = document.querySelector('#v2RuntimeStatus');
 if (status) {
-  status.textContent = 'V2 product · CPU oracle active · probing WebGPU';
-  status.title = 'Chrome graphics acceleration is not sufficient evidence by itself; this label changes only after this page dispatches a WebGPU kernel and verifies CPU parity.';
+  status.textContent = 'V2 product · CPU oracle active · probing GPU navigation';
+  status.title = 'Chrome graphics acceleration is not sufficient evidence by itself; this label changes only after the page dispatches navigation kernels and verifies CPU parity.';
   status.dataset.backend = 'cpu-oracle';
 }
 
 cpuWorker.addEventListener('message', event => {
   if (event.data?.type !== 'started') return;
-  if (status && status.dataset.backend !== 'webgpu') status.textContent = 'V2 product · CPU oracle worker wired · probing WebGPU';
+  if (status && status.dataset.backend !== 'webgpu') status.textContent = 'V2 product · CPU oracle worker wired · probing GPU navigation';
 });
 
 cpuWorker.postMessage({
@@ -94,11 +97,28 @@ void gpuScorer.availability().then(async capability => {
   const prefilterResult = await gpuCandidatePrefilter.prefilter(candidates);
   const prefilterParity = prefilterResult.status === 'completed'
     && JSON.stringify(prefilterResult.validity) === JSON.stringify(cpuCandidatePrefilter(candidates).validity);
-  status.textContent = prefilterParity
-    ? 'V2 product · WebGPU dispatch + occupancy parity verified · CPU oracle fallback ready'
-    : 'V2 product · WebGPU occupancy parity failed · CPU oracle active';
-  status.title = prefilterParity
-    ? 'This page dispatched WebGPU scorer and occupancy-prefilter kernels and matched both results against the CPU oracle.'
-    : 'The occupancy-prefilter dispatch did not match the CPU oracle, so the product refused to use it.';
-  status.dataset.backend = prefilterParity ? 'webgpu' : 'cpu-oracle';
+  const targetPoolInput = [{
+    stateId: 'runtime-smoke',
+    fieldCells: [{ x: 0, y: 0 }],
+    centroidCells: [{ x: 0, y: 0 }],
+  }];
+  const targetPoolResult = await gpuFrontierTargetPool.generateBatch(targetPoolInput);
+  const targetPoolCpu = cpuGenerateFrontierTargetPoolBatch(targetPoolInput);
+  const targetPoolParity = targetPoolResult.status === 'completed'
+    && targetPoolResult.parity === 'verified'
+    && JSON.stringify(targetPoolResult.items?.map(item => ({ frontierCells: item.frontierCells, ringCells: item.ringCells })))
+      === JSON.stringify(targetPoolCpu.items.map(item => ({ frontierCells: item.frontierCells, ringCells: item.ringCells })));
+  if (prefilterParity && targetPoolParity) {
+    status.textContent = 'V2 product · GPU navigation parity verified · CPU oracle fallback ready';
+    status.title = 'This page dispatched GPU scorer, occupancy-prefilter, and target-navigation kernels and matched each result against the CPU oracle.';
+    status.dataset.backend = 'webgpu';
+  } else if (prefilterParity) {
+    status.textContent = `V2 product · GPU scorer/prefilter verified · target navigation unavailable (${targetPoolResult.reason || 'parity failed'})`;
+    status.title = 'GPU scorer and occupancy prefilter passed parity, but target navigation did not; the product kept the CPU oracle in control.';
+    status.dataset.backend = 'cpu-oracle';
+  } else {
+    status.textContent = 'V2 product · CPU oracle active · GPU navigation parity failed';
+    status.title = 'A GPU navigation dispatch did not match the CPU oracle, so the product refused to use the accelerated result.';
+    status.dataset.backend = 'cpu-oracle';
+  }
 }).catch(() => {});
