@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createLabeledFrontierStateCandidate, cpuTransitionLabeledFrontierStates } from '../src/webgpu-labeled-frontier-state.js';
-import { createWebGpuResidentFrontierState, WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA } from '../src/webgpu-resident-frontier-state.js';
+import { createWebGpuResidentFrontierState, WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, WEBGPU_RESIDENT_PARENT_REFERENCE_SCHEMA } from '../src/webgpu-resident-frontier-state.js';
 
 const candidate = createLabeledFrontierStateCandidate({
   pieceIds: [3, 49, 97],
@@ -37,6 +37,14 @@ try {
   assert.equal(first.resident, true);
   assert.deepEqual(first.residentStateIndices, [0]);
   assert.equal(first.residentEpoch, 1);
+  assert.deepEqual(first.parentReference, {
+    schema: WEBGPU_RESIDENT_PARENT_REFERENCE_SCHEMA,
+    mode: 'seed-labels',
+    candidateCount: 1,
+    referencedCount: 0,
+    seedCount: 1,
+    parentStateIndices: [null],
+  });
   const committed = resident.commitLayer();
   assert.equal(committed.schema, WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA);
   assert.equal(committed.epoch, 1);
@@ -46,6 +54,14 @@ try {
   assert.equal(second.status, 'completed');
   assert.equal(second.residentEpoch, 2);
   assert.deepEqual(second.nextLabels, cpu.nextLabels);
+  assert.deepEqual(second.parentReference, {
+    schema: WEBGPU_RESIDENT_PARENT_REFERENCE_SCHEMA,
+    mode: 'resident-slots',
+    candidateCount: 1,
+    referencedCount: 1,
+    seedCount: 0,
+    parentStateIndices: [0],
+  });
   assert.equal(seedParentWrites.length, 1, 'resident child must not re-upload its CPU parent labels');
   assert.equal(createdBuffers, 18, 'resident pool must reuse its double-buffered allocation');
   resident.commitLayer();

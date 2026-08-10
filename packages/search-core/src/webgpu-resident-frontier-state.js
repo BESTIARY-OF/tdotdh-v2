@@ -4,6 +4,7 @@ import { createWebGpuDeviceCache } from './webgpu-device-cache.js?v=20260810-lim
 import { REMAINING_MASK_WORD_COUNT, WEBGPU_LABELED_FRONTIER_STATE_SCHEMA, cpuTransitionLabeledFrontierStates } from './webgpu-labeled-frontier-state.js';
 
 export const WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA = 'tdotdh.webgpu-resident-frontier-state.v0';
+export const WEBGPU_RESIDENT_PARENT_REFERENCE_SCHEMA = 'tdotdh.webgpu-resident-parent-reference.v0';
 export const DEFAULT_RESIDENT_FRONTIER_CAPACITY = 4096;
 export const DEFAULT_RESIDENT_FRONTIER_BATCH_CAPACITY = 64;
 
@@ -120,6 +121,18 @@ function normalizeCandidates(candidates, grid) {
   });
 }
 
+function parentReferenceReceipt(candidates) {
+  const parentStateIndices = candidates.map(candidate => candidate.parentStateIndex), referencedCount = parentStateIndices.filter(index => index != null).length, seedCount = candidates.length - referencedCount;
+  return Object.freeze({
+    schema: WEBGPU_RESIDENT_PARENT_REFERENCE_SCHEMA,
+    mode: referencedCount === candidates.length ? 'resident-slots' : referencedCount === 0 ? 'seed-labels' : 'mixed',
+    candidateCount: candidates.length,
+    referencedCount,
+    seedCount,
+    parentStateIndices,
+  });
+}
+
 function flatten(candidates, property, width) { const flat = new Uint32Array(candidates.length * width); candidates.forEach((candidate, index) => flat.set(candidate[property], index * width)); return flat; }
 function equalArrays(left, right) { return JSON.stringify(left) === JSON.stringify(right); }
 function parityMismatchReason(actual, expected, context = {}) {
@@ -229,26 +242,26 @@ export function createWebGpuResidentFrontierState({ gpu = globalThis.navigator?.
     reset,
     epoch: () => epoch,
     async transition(candidates) {
-      const normalized = normalizeCandidates(candidates, normalizedGrid), cpu = cpuTransitionLabeledFrontierStates(candidates, normalizedGrid);
+      const normalized = normalizeCandidates(candidates, normalizedGrid), cpu = cpuTransitionLabeledFrontierStates(candidates, normalizedGrid), parentReference = parentReferenceReceipt(normalized);
       if (!layer) beginLayer();
       if (!pieceIds) pieceIds = normalized[0].pieceIds;
-      if (JSON.stringify(pieceIds) !== JSON.stringify(normalized[0].pieceIds)) return unavailable('piece-id-set-changed', cpu);
-      if (layer.pieceIds && JSON.stringify(layer.pieceIds) !== JSON.stringify(normalized[0].pieceIds)) return unavailable('layer-piece-id-set-changed', cpu);
+      if (JSON.stringify(pieceIds) !== JSON.stringify(normalized[0].pieceIds)) return unavailable('piece-id-set-changed', cpu, { parentReference });
+      if (layer.pieceIds && JSON.stringify(layer.pieceIds) !== JSON.stringify(normalized[0].pieceIds)) return unavailable('layer-piece-id-set-changed', cpu, { parentReference });
       layer.pieceIds = normalized[0].pieceIds;
-      if (layer.nextSlot + normalized.length > capacity) return unavailable('resident-frontier-capacity-exceeded', cpu, { capacity, epoch: layer.pendingEpoch });
-      const status = await availability(); if (status.status !== 'available') return unavailable(status.reason, cpu, { capacity, epoch: layer.pendingEpoch });
+      if (layer.nextSlot + normalized.length > capacity) return unavailable('resident-frontier-capacity-exceeded', cpu, { capacity, epoch: layer.pendingEpoch, parentReference });
+      const status = await availability(); if (status.status !== 'available') return unavailable(status.reason, cpu, { capacity, epoch: layer.pendingEpoch, parentReference });
       try {
         const device = await residentDeviceCache.getDevice();
         if (!resources) { resources = makeResources(device, capacity, batchCapacity, cpu.pieceCount, normalizedGrid, shaderSource); resources.device = device; }
-        if (resources.pieceCount !== cpu.pieceCount || resources.grid.wordCount !== cpu.wordCount) { reset(); return unavailable('resident-frontier-shape-changed', cpu); }
-        for (const candidate of normalized) if (candidate.parentStateIndex != null && candidate.parentStateIndex >= residentCount) return unavailable('resident-parent-reference-not-in-input-layer', cpu, { capacity, epoch: layer.pendingEpoch, residentCount });
+        if (resources.pieceCount !== cpu.pieceCount || resources.grid.wordCount !== cpu.wordCount) { reset(); return unavailable('resident-frontier-shape-changed', cpu, { parentReference }); }
+        for (const candidate of normalized) if (candidate.parentStateIndex != null && candidate.parentStateIndex >= residentCount) return unavailable('resident-parent-reference-not-in-input-layer', cpu, { capacity, epoch: layer.pendingEpoch, residentCount, parentReference });
         const nextLabels = [], canonicalLabels = [], absoluteHashes = [], canonicalHashes = [], residentStateIndices = [];
         for (let offset = 0; offset < normalized.length; offset += batchCapacity) { const batch = normalized.slice(offset, offset + batchCapacity), outputIndices = batch.map((_, index) => layer.nextSlot + offset + index); const result = await dispatch(device, resources, batch, cpu.pieceIds, outputIndices, normalizedGrid); nextLabels.push(...result.nextLabels); canonicalLabels.push(...result.canonicalLabels); absoluteHashes.push(...result.absoluteHashes); canonicalHashes.push(...result.canonicalHashes); residentStateIndices.push(...outputIndices); }
         const actual = { nextLabels, canonicalLabels, absoluteHashes, canonicalHashes }, expected = { nextLabels: cpu.nextLabels, canonicalLabels: cpu.canonicalLabels, absoluteHashes: cpu.absoluteHashes, canonicalHashes: cpu.canonicalHashes };
-        if (!equalArrays(nextLabels, cpu.nextLabels) || !equalArrays(canonicalLabels, cpu.canonicalLabels) || !equalArrays(absoluteHashes, cpu.absoluteHashes) || !equalArrays(canonicalHashes, cpu.canonicalHashes)) return unavailable(parityMismatchReason(actual, expected, { labelsPerState: cpu.pieceCount * cpu.wordCount, pieceCount: cpu.pieceCount, wordCount: cpu.wordCount, parentStateIndices: normalized.map(candidate => candidate.parentStateIndex), candidatePieceIndices: normalized.map(candidate => candidate.candidatePieceIndex), seedParents: normalized.map(candidate => candidate.parentLabelMasks), candidateMasks: normalized.map(candidate => candidate.candidateMask) }), cpu, { capacity, epoch: layer.pendingEpoch });
+        if (!equalArrays(nextLabels, cpu.nextLabels) || !equalArrays(canonicalLabels, cpu.canonicalLabels) || !equalArrays(absoluteHashes, cpu.absoluteHashes) || !equalArrays(canonicalHashes, cpu.canonicalHashes)) return unavailable(parityMismatchReason(actual, expected, { labelsPerState: cpu.pieceCount * cpu.wordCount, pieceCount: cpu.pieceCount, wordCount: cpu.wordCount, parentStateIndices: normalized.map(candidate => candidate.parentStateIndex), candidatePieceIndices: normalized.map(candidate => candidate.candidatePieceIndex), seedParents: normalized.map(candidate => candidate.parentLabelMasks), candidateMasks: normalized.map(candidate => candidate.candidateMask) }), cpu, { capacity, epoch: layer.pendingEpoch, parentReference });
         layer.nextSlot += normalized.length;
-        return Object.freeze({ schema: WEBGPU_LABELED_FRONTIER_STATE_SCHEMA, status: 'completed', backend: 'webgpu', pieceIds: cpu.pieceIds, nextLabels, canonicalLabels, absoluteHashes, canonicalHashes, candidateCount: normalized.length, wordCount: cpu.wordCount, pieceCount: cpu.pieceCount, parity: 'verified', persistent: true, resident: true, residentEpoch: layer.pendingEpoch, residentStateIndices, bufferCapacity: capacity, batchCapacity });
-      } catch (error) { reset(); return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, cpu); }
+        return Object.freeze({ schema: WEBGPU_LABELED_FRONTIER_STATE_SCHEMA, status: 'completed', backend: 'webgpu', pieceIds: cpu.pieceIds, nextLabels, canonicalLabels, absoluteHashes, canonicalHashes, candidateCount: normalized.length, wordCount: cpu.wordCount, pieceCount: cpu.pieceCount, parity: 'verified', persistent: true, resident: true, residentEpoch: layer.pendingEpoch, residentStateIndices, bufferCapacity: capacity, batchCapacity, parentReference });
+      } catch (error) { reset(); return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, cpu, { parentReference }); }
     },
   });
 }
