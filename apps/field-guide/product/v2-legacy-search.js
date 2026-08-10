@@ -367,6 +367,33 @@ async function evaluateFieldAggregates(entries, state, centroidId, fieldMetricsA
   return entries;
 }
 
+async function evaluateFieldAggregatesAcrossBeam(jobs, centroidId, fieldMetricsAdapter, onMetrics = () => {}) {
+  if (!fieldMetricsAdapter?.evaluate || !jobs.length) return jobs;
+  try {
+    if (fieldMetricsAdapter.availability) {
+      let availabilityPromise = fieldMetricsAvailability.get(fieldMetricsAdapter);
+      if (!availabilityPromise) { availabilityPromise = fieldMetricsAdapter.availability(); fieldMetricsAvailability.set(fieldMetricsAdapter, availabilityPromise); }
+      const availability = await availabilityPromise;
+      if (availability?.status !== 'available') { onMetrics({ status: 'fallback', backend: 'cpu-oracle', reason: availability?.reason || 'field-metrics-unavailable', candidateCount: jobs.reduce((sum, job) => sum + job.entries.length, 0) }); return jobs; }
+    }
+    const pending = [];
+    for (const [jobIndex, job] of jobs.entries()) {
+      const parentCells = [...job.state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
+      const centroidCells = job.state.placements.find(placement => placement.id === centroidId)?.cells || [];
+      for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, candidate: entry, fieldCandidate: createFieldMetricsCandidate({ occupiedCells: [...parentCells, ...entry.candidate.cells], centroidCells }) });
+    }
+    if (!pending.length) return jobs;
+    const result = await fieldMetricsAdapter.evaluate(pending.map(item => item.fieldCandidate));
+    if (Array.isArray(result?.metrics) && result.metrics.length === pending.length) {
+      for (const [index, item] of pending.entries()) jobs[item.jobIndex].entries[item.entryIndex] = { ...item.candidate, gpuFieldMetrics: result.metrics[index] };
+      onMetrics({ status: result.status === 'completed' && result.parity === 'verified' ? 'used' : 'fallback', backend: result.backend || 'cpu-oracle', parity: result.parity, reason: result.reason, candidateCount: pending.length, batch: 'beam' });
+      return jobs;
+    }
+    onMetrics({ status: 'fallback', reason: result?.reason || 'field-metrics-unavailable', candidateCount: pending.length, batch: 'beam' });
+  } catch (error) { onMetrics({ status: 'fallback', reason: `field-metrics-failed:${error.message}`, batch: 'beam' }); }
+  return jobs;
+}
+
 async function evaluateFrontierState(entries, state, frontierState, onState = () => {}) {
   if (!frontierState?.transition || !entries.length) return entries;
   try {
@@ -595,6 +622,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     const nextBeam = [];
     const gpuStateBuckets = new Map();
     const cpuStateKeys = new Set();
+    const beamJobs = [];
     for (const state of beam) {
       if (isCancelled()) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt };
       if (nodes >= NODE_LIMIT) break;
@@ -626,7 +654,12 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       if (!selectedTarget) continue;
       selectedOptions = await filterCandidates(selectedOptions);
       selectedOptions = await evaluateFrontierGeometry(selectedOptions, state, centroidId, frontierMetrics, receipt => { frontierMetricsReceipt = receipt; });
-      selectedOptions = await evaluateFieldAggregates(selectedOptions, state, centroidId, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; });
+      if (selectedOptions.length) beamJobs.push({ state, entries: selectedOptions });
+    }
+    await evaluateFieldAggregatesAcrossBeam(beamJobs, centroidId, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; });
+    for (const job of beamJobs) {
+      const state = job.state;
+      let selectedOptions = job.entries;
       selectedOptions = await evaluateFrontierOptions(selectedOptions, state, centroidId, frontierEvaluator, options.frontierValidator, receipt => { frontierReceipt = receipt; });
       selectedOptions = await evaluateFrontierState(selectedOptions, state, frontierState, receipt => { frontierStateReceipt = receipt; });
       selectedOptions = await evaluateFrontierTopology(selectedOptions, state, centroidId, frontierTopology, receipt => { frontierTopologyReceipt = receipt; }, frontierTopologyAvailabilityReceipt);

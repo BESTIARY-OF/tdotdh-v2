@@ -16,6 +16,11 @@ The v2 search worker now exposes `tdotdh.webgpu-field-metrics.v0`.
 - Seed-lock and target-family construction now submit candidate groups through
   the same aggregate adapter; the SEDLEC receipt therefore covers those paths
   as well as breadth/depth beam expansion.
+- Beam-depth orchestration flattens field candidates across retained states:
+  the CPU-backed receipt observed 14 aggregate batches for 3,376 breadth
+  candidates and 14 for 3,443 depth candidates, versus one dispatch per state
+  before this boundary. This is a dispatch-efficiency receipt, not a hardware
+  speed claim.
 
 Focused receipts pass with `node packages/search-core/test/webgpu-field-metrics.test.js`,
 `node apps/field-guide/test/v2-search-receipt.test.js`, and `npm run check`.
