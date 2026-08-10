@@ -12,6 +12,7 @@ import { createWebGpuFrontierTopology } from '../../../packages/search-core/src/
 import { createWebGpuFrontierRanker } from '../../../packages/search-core/src/webgpu-frontier-ranker.js';
 import { createWebGpuPersistentFrontierCompactor } from '../../../packages/search-core/src/webgpu-frontier-compactor.js';
 import { createWebGpuFrontierDeduplicator } from '../../../packages/search-core/src/webgpu-frontier-deduplicator.js';
+import { createWebGpuFrontierNavigator } from '../../../packages/search-core/src/webgpu-frontier-navigator.js';
 import { createWebGpuDeviceCache } from '../../../packages/search-core/src/webgpu-device-cache.js';
 import { createNavigationCoordinator } from '../../../packages/search-worker/src/navigation-coordinator.js';
 import { search } from './v2-legacy-search.js';
@@ -33,6 +34,7 @@ const frontierDeduplicator = createWebGpuFrontierDeduplicator({ gpu: globalThis.
 async function runProductSearch(request, context) {
   const steering = request.steering || {};
   const navigation = createNavigationCoordinator({ ticket: request.ticket, cursor: request.cursor });
+  const frontierNavigator = createWebGpuFrontierNavigator({ stateAdapter: frontierState, ticket: request.ticket, cursor: request.cursor, isCancelled: context.isCancelled });
   const result = await search(request.pieces, steering.knownCentroidFamilies || [], {
     ...steering,
     knownSignatures: request.knownSignatureHints,
@@ -51,6 +53,7 @@ async function runProductSearch(request, context) {
     frontierMetrics,
     fieldMetrics,
     frontierState,
+    frontierNavigator,
     frontierTopology,
     frontierRanker,
     frontierCompactor,

@@ -38,6 +38,14 @@ reused across transition batches. The CPU transition remains the canonical
 parity gate; a device failure destroys the allocation and falls back without
 changing the search result or checkpoint shape.
 
+The product worker also routes the beam state transition through the resident
+frontier navigator. Its runtime-local epoch and digest are used for GPU
+residency only; ticket/cursor/checkpoint data remain serializable and no GPU
+handle is persisted. Cancellation is checked before dispatch and before epoch
+commit. The next GPU-first seam is direct parent-label references from the
+next beam into the resident epoch, so canonical label arrays are read back
+only for replay/acceptance rather than as the normal inter-layer transport.
+
 ## Live product acceptance
 
 - Preview: `http://127.0.0.1:5174/`

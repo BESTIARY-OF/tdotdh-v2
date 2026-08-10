@@ -104,6 +104,17 @@ parity in the field-metrics shader.
   remains the exact parity gate. This is the first persistent GPU state seam
   used by the product worker, not just an isolated contract test.
 
+The resident frontier navigator now wraps that adapter in the product worker.
+It owns a runtime-local epoch and digest-bound GPU residency token, exchanges
+deterministic batch tickets and monotonic cursors, refuses stale cursor reuse,
+and checkpoints before cancellation can commit a new epoch. The token never
+crosses `postMessage`, localStorage, or a durable checkpoint: only its digest,
+cursor, and canonical replay receipt do. This makes GPU ownership observable in
+the live search path while keeping the CPU arrays as the exact replay oracle.
+The remaining gate is to make the next beam's parent labels reference the
+resident GPU epoch directly, eliminating the current per-transition label
+materialization rather than merely hiding it behind the navigator.
+
 The live 5174 runtime receipt for this seam is recorded in
 `docs/receipts/webgpu-deduplicator-runtime-2026-08-10.md`.
 

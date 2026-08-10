@@ -548,7 +548,7 @@ async function evaluateFieldAggregatesAcrossBeam(jobs, centroidId, fieldMetricsA
 }
 
 async function evaluateFrontierState(entries, state, frontierState, onState = () => {}) {
-  if (!frontierState?.transition || !entries.length) return entries;
+  if (!frontierState?.transition && !frontierState?.expand || !entries.length) return entries;
   try {
     const pieceIds = [...new Set([...state.placements.map(placement => placement.id), ...state.remaining.map(piece => piece.id)])].sort((a, b) => a - b);
     const candidates = entries.map(entry => createLabeledFrontierStateCandidate({
@@ -557,9 +557,9 @@ async function evaluateFrontierState(entries, state, frontierState, onState = ()
       pieceIds,
       remainingIds: state.remaining.filter(piece => piece.id !== entry.piece.id).map(piece => piece.id),
     }));
-    const result = await frontierState.transition(candidates);
+    const result = frontierState.expand ? await frontierState.expand(candidates) : await frontierState.transition(candidates);
     if (result?.status === 'completed' && result.parity === 'verified' && Array.isArray(result.absoluteHashes) && result.absoluteHashes.length === entries.length) {
-      onState({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, persistent: result.persistent === true, bufferCapacity: result.bufferCapacity, candidateCount: entries.length });
+      onState({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, persistent: result.persistent === true, resident: result.navigator?.status === 'resident', navigatorEpoch: result.navigator?.epoch, bufferCapacity: result.bufferCapacity, candidateCount: entries.length });
       const wordCount = Number(result.wordCount) || 0;
       const labelsPerCandidate = result.pieceIds.length * wordCount;
       return entries.map((entry, index) => {
@@ -577,7 +577,7 @@ async function evaluateFrontierState(entries, state, frontierState, onState = ()
 
 async function evaluateFrontierStateAcrossBeam(jobs, frontierState, onState = () => {}) {
   if (!jobs.length || !jobs.some(job => job.entries.length)) return jobs;
-  if (!frontierState?.transition) return jobs;
+  if (!frontierState?.transition && !frontierState?.expand) return jobs;
   try {
     const pending = [];
     for (const [jobIndex, job] of jobs.entries()) {
@@ -585,14 +585,14 @@ async function evaluateFrontierStateAcrossBeam(jobs, frontierState, onState = ()
       for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, entry, candidate: createLabeledFrontierStateCandidate({ parentPlacements: job.state.placements, candidate: { id: entry.piece.id, cells: entry.candidate.cells }, pieceIds, remainingIds: job.state.remaining.filter(piece => piece.id !== entry.piece.id).map(piece => piece.id) }) });
     }
     if (!pending.length) return jobs;
-    const result = await frontierState.transition(pending.map(item => item.candidate));
+    const result = frontierState.expand ? await frontierState.expand(pending.map(item => item.candidate)) : await frontierState.transition(pending.map(item => item.candidate));
     if (result?.status === 'completed' && result.parity === 'verified' && Array.isArray(result.absoluteHashes) && result.absoluteHashes.length === pending.length) {
       const wordCount = Number(result.wordCount) || 0, labelsPerCandidate = result.pieceIds.length * wordCount;
       for (const [index, item] of pending.entries()) {
         const labelStart = index * labelsPerCandidate;
         jobs[item.jobIndex].entries[item.entryIndex] = { ...item.entry, gpuState: { absoluteHash: result.absoluteHashes[index], canonicalHash: result.canonicalHashes[index], nextLabels: result.nextLabels.slice(labelStart, labelStart + labelsPerCandidate), canonicalLabels: result.canonicalLabels.slice(labelStart, labelStart + labelsPerCandidate), pieceIds: result.pieceIds, wordCount, remainingMask: Array.from(item.candidate.remainingMask) } };
       }
-      onState({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, persistent: result.persistent === true, bufferCapacity: result.bufferCapacity, candidateCount: pending.length, batch: 'beam' });
+      onState({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, persistent: result.persistent === true, resident: result.navigator?.status === 'resident', navigatorEpoch: result.navigator?.epoch, bufferCapacity: result.bufferCapacity, candidateCount: pending.length, batch: 'beam' });
       return jobs;
     }
     onState({ status: 'fallback', reason: result?.reason || 'frontier-state-unavailable', candidateCount: pending.length, batch: 'beam' });
@@ -816,6 +816,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const frontierMetrics = options.frontierMetrics;
   const fieldMetricsAdapter = options.fieldMetrics;
   const frontierState = options.frontierState;
+  const frontierNavigator = options.frontierNavigator;
   const frontierTopology = options.frontierTopology;
   const frontierRanker = options.frontierRanker;
   const frontierCompactor = options.frontierCompactor;
@@ -969,7 +970,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     await evaluateFrontierGeometryAcrossBeam(beamJobs, centroidId, frontierMetrics, receipt => { frontierMetricsReceipt = receipt; });
     await evaluateFieldAggregatesAcrossBeam(beamJobs, centroidId, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; });
     await evaluateFrontierOptionsAcrossBeam(beamJobs, centroidId, frontierEvaluator, options.frontierValidator, receipt => { frontierReceipt = { ...receipt, ...(navigationTicket ? { ticket: navigationTicket } : {}), ...(navigationCursor ? { cursor: { ...navigationCursor, depth, nodeOffset: navigationCursor.nodeOffset + nodes } } : {}) }; });
-    await evaluateFrontierStateAcrossBeam(beamJobs, frontierState, receipt => { frontierStateReceipt = receipt; });
+    await evaluateFrontierStateAcrossBeam(beamJobs, frontierNavigator || frontierState, receipt => { frontierStateReceipt = receipt; });
     const cancelledAfterGpu = isCancelled();
     if (navigationCancellation) navigationCancellation(cancelledAfterGpu);
     if (cancelledAfterGpu) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierDedup: frontierDedupReceipt };
