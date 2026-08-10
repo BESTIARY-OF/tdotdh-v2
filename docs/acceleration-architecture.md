@@ -10,7 +10,9 @@ resumable cursor. The current navigation path batches occupancy prefiltering,
 frontier generation, target-pool classification, field aggregates, geometry,
 state transitions, topology, ranking, and hash-first frontier deduplication on
 the GPU when each adapter
-passes parity. Family/locked branches use the target-pool contract too; they no
+passes parity. Depth-mode beam retention now uses a GPU top-K compactor after
+the ranker, returning only the bounded winner set; its CPU oracle verifies the
+exact index order. Family/locked branches use the target-pool contract too; they no
 longer have a special implicit CPU-only target gate.
 
 The GPU may return compact candidates and scores, but it must return canonical

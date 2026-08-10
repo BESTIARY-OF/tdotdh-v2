@@ -6,6 +6,7 @@ import { cpuTransitionLabeledFrontierStates } from '../../../packages/search-cor
 import { cpuFrontierTopology } from '../../../packages/search-core/src/webgpu-frontier-topology.js';
 import { cpuGenerateFrontierTargetBatch } from '../../../packages/search-core/src/webgpu-frontier-target-generator.js';
 import { cpuGenerateFrontierTargetPoolBatch } from '../../../packages/search-core/src/webgpu-frontier-target-pool.js';
+import { cpuCompactFrontierRows } from '../../../packages/search-core/src/webgpu-frontier-compactor.js';
 
 globalThis.postMessage = () => {};
 
@@ -111,6 +112,20 @@ function createBenchFrontierTopology() {
   };
 }
 
+function createBenchFrontierCompactor() {
+  const receipt = { batches: 0, candidates: 0, selected: 0 };
+  return {
+    receipt,
+    compact: async (rows, retain) => {
+      receipt.batches += 1;
+      receipt.candidates += rows.length;
+      const result = cpuCompactFrontierRows(rows, retain);
+      receipt.selected += result.selectedCount;
+      return { ...result, backend: 'benchmark', parity: 'verified', algorithm: 'oracle-top-k-probe' };
+    },
+  };
+}
+
 async function run(mode, options = {}) {
   const candidatePrefilter = createBenchPrefilter();
   const frontierMetrics = createBenchFrontierMetrics();
@@ -119,8 +134,9 @@ async function run(mode, options = {}) {
   const frontierTargetGenerator = createBenchFrontierTargetGenerator();
   const frontierTargetPool = createBenchFrontierTargetPool();
   const frontierTopology = createBenchFrontierTopology();
+  const frontierCompactor = createBenchFrontierCompactor();
   const started = performance.now();
-  const result = await search(pieces, [], { searchStrategy: mode, candidatePrefilter, frontierMetrics, fieldMetrics, frontierState, frontierTargetGenerator, frontierTargetPool, frontierTopology, ...options });
+  const result = await search(pieces, [], { searchStrategy: mode, candidatePrefilter, frontierMetrics, fieldMetrics, frontierState, frontierTargetGenerator, frontierTargetPool, frontierTopology, frontierCompactor, ...options });
   return {
     mode,
     elapsedMs: Number((performance.now() - started).toFixed(2)),
@@ -134,6 +150,7 @@ async function run(mode, options = {}) {
     frontierTargetGeneration: frontierTargetGenerator.receipt,
     frontierTargetPool: frontierTargetPool.receipt,
     frontierTopology: frontierTopology.receipt,
+    frontierCompactor: frontierCompactor.receipt,
     result,
   };
 }

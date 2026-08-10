@@ -16,12 +16,12 @@ keys are used for safe beam deduplication: absolute piece labels plus remaining
 pieces are required, so translated or differently assigned fields are never
 conflated.
 When WebGPU is available and exact parity holds, the product uses those GPU results
-to rank the next beam; otherwise each slice reports an explicit CPU fallback. Full
+to rank and, in depth mode, top-K compact the next beam; otherwise each slice reports an explicit CPU fallback. Full
 topology acceptance now has a final parity-gated GPU occupancy reduction; its
 Perimeter, centroid edge/corner coast, and bounding-box area remain
 CPU-oracle-derived inside that adapter,
 while component labels and empty-region flood labels now drive parity-gated
-hole/connectivity reduction. Ordered deduplication,
+hole/connectivity reduction.
 When the adapter is available, candidate frontiers are submitted through its
 batch topology contract for GPU ranking; unavailable adapters return before
 doing per-candidate topology work. Cancellation/control flow, and persistence remain CPU-owned, while final
@@ -64,6 +64,13 @@ by JavaScript. The CPU ordering oracle rejects any divergent index order.
 The search receipt calls this `GPU deterministic ranking`; unavailable or
 device-capacity-limited batches use the same CPU comparator without changing
 beam semantics.
+
+Depth-mode beam retention has a separate `webgpu-frontier-compactor.v0` contract.
+The bitonic shader returns only the deterministic top-K state indices, and the
+CPU oracle compares that bounded result before state remapping. Breadth mode is
+intentionally not routed through this seam: its family-quota policy is a
+semantic selection rule, not ordinary top-K ranking, and remains the next
+GPU-owned policy boundary.
 
 The next field-wide seam is now explicit as `webgpu-field-metrics.v0`. For every
 surviving branch it batches the occupied and centroid masks and computes the
