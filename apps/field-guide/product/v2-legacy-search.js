@@ -103,7 +103,8 @@ async function generateFrontierTranslations(piece, state, bounds, frontierGenera
   }
   const fieldCells = [...state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
   const result = await frontierGenerator.generate({ fieldCells, pieceCells: applyLock(piece), bounds });
-  onGeneration({ status: result?.parity === 'verified' ? 'used' : 'fallback', backend: result?.backend || 'cpu-oracle', parity: result?.parity, candidateCount: result?.candidateCount || 0 });
+  onGeneration({ status: result?.parity === 'verified' ? 'used' : 'fallback', backend: result?.backend || 'cpu-oracle', parity: result?.parity, compaction: result?.compaction, candidateCount: result?.candidateCount || 0 });
+  if (Array.isArray(result?.compactedOrigins)) return result.compactedOrigins.filter(origin => origin && Number.isSafeInteger(origin.x) && Number.isSafeInteger(origin.y)).map(origin => ({ id: piece.id, origin, cells: placedCells(piece, origin) }));
   if (!Array.isArray(result?.origins) || !Array.isArray(result?.validity)) return candidateTranslations(piece, state.field, bounds);
   const translations = new Map();
   result.origins.forEach((origin, index) => {

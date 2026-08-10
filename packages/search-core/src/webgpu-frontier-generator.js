@@ -67,7 +67,31 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (nextMaxX - nextMinX + 1 > params.maxWidth || nextMaxY - nextMinY + 1 > params.maxHeight) { valid = false; }
   origins[id.x * 2u] = originX;
   origins[id.x * 2u + 1u] = originY;
-  validity[id.x] = select(0u, 1u, valid);
+validity[id.x] = select(0u, 1u, valid);
+}`;
+
+const COMPACTION_SHADER = `
+struct Params { candidateCount: u32, reserved0: u32, reserved1: u32, reserved2: u32, };
+@group(0) @binding(0) var<storage, read> origins: array<i32>;
+@group(0) @binding(1) var<storage, read> validity: array<u32>;
+@group(0) @binding(2) var<storage, read_write> compactedOrigins: array<i32>;
+@group(0) @binding(3) var<storage, read_write> compactedCount: array<u32>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= params.candidateCount) { return; }
+  var prefix: u32 = 0u;
+  for (var index: u32 = 0u; index < id.x; index++) { if (validity[index] != 0u) { prefix += 1u; } }
+  if (validity[id.x] != 0u) {
+    compactedOrigins[prefix * 2u] = origins[id.x * 2u];
+    compactedOrigins[prefix * 2u + 1u] = origins[id.x * 2u + 1u];
+  }
+  if (id.x == 0u) {
+    var total: u32 = 0u;
+    for (var index: u32 = 0u; index < params.candidateCount; index++) { if (validity[index] != 0u) { total += 1u; } }
+    compactedCount[0] = total;
+  }
 }`;
 
 function normalizeGrid(grid = DEFAULT_FRONTIER_GRID) {
@@ -115,7 +139,8 @@ export function cpuGenerateFrontierCandidates(input, grid = DEFAULT_FRONTIER_GRI
     if (maxX - minX + 1 > 24 || maxY - minY + 1 > 16) valid = false;
     origins.push(origin); validity.push(valid ? 1 : 0);
   }
-  return Object.freeze({ schema: WEBGPU_FRONTIER_GENERATOR_SCHEMA, status: 'completed', backend: 'cpu-oracle', origins, validity, acceptedIndices: validity.flatMap((value, index) => value ? [index] : []), candidateCount: normalized.candidateCount, parity: 'oracle' });
+  const acceptedIndices = validity.flatMap((value, index) => value ? [index] : []);
+  return Object.freeze({ schema: WEBGPU_FRONTIER_GENERATOR_SCHEMA, status: 'completed', backend: 'cpu-oracle', origins, validity, acceptedIndices, compactedOrigins: acceptedIndices.map(index => origins[index]), compactedCount: acceptedIndices.length, candidateCount: normalized.candidateCount, parity: 'oracle' });
 }
 
 function flattenCells(cells) { const flat = new Int32Array(cells.length * 2); cells.forEach((cell, index) => { flat[index * 2] = cell.x; flat[index * 2 + 1] = cell.y; }); return flat; }
@@ -130,9 +155,13 @@ async function runGpu(device, normalized, grid, shaderSource) {
   const maskBuffer = device.createBuffer({ size: maskBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   const originsBuffer = device.createBuffer({ size: originBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
   const validityBuffer = device.createBuffer({ size: countBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  const compactedOriginsBuffer = device.createBuffer({ size: originBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  const compactedCountBuffer = device.createBuffer({ size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
   const paramsBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const originsReadback = device.createBuffer({ size: originBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
   const validityReadback = device.createBuffer({ size: countBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  const compactedOriginsReadback = device.createBuffer({ size: originBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  const compactedCountReadback = device.createBuffer({ size: 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
   try {
     device.queue.writeBuffer(fieldBuffer, 0, fieldCells); device.queue.writeBuffer(pieceBuffer, 0, pieceCells); device.queue.writeBuffer(maskBuffer, 0, fieldMask);
     const params = new Int32Array([normalized.fieldCells.length, normalized.pieceCells.length, grid.width, grid.height, grid.originX, grid.originY, normalized.bounds.minX, normalized.bounds.maxX, normalized.bounds.minY, normalized.bounds.maxY, 24, 16]);
@@ -141,10 +170,15 @@ async function runGpu(device, normalized, grid, shaderSource) {
     const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
       { binding: 0, resource: { buffer: fieldBuffer } }, { binding: 1, resource: { buffer: pieceBuffer } }, { binding: 2, resource: { buffer: maskBuffer } }, { binding: 3, resource: { buffer: originsBuffer } }, { binding: 4, resource: { buffer: validityBuffer } }, { binding: 5, resource: { buffer: paramsBuffer } },
     ] });
-    const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end(); encoder.copyBufferToBuffer(originsBuffer, 0, originsReadback, 0, originBytes); encoder.copyBufferToBuffer(validityBuffer, 0, validityReadback, 0, countBytes); device.queue.submit([encoder.finish()]);
+    const compactionModule = device.createShaderModule({ code: COMPACTION_SHADER }), compactionPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: compactionModule, entryPoint: 'main' } });
+    const compactionBindGroup = device.createBindGroup({ layout: compactionPipeline.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: { buffer: originsBuffer } }, { binding: 1, resource: { buffer: validityBuffer } }, { binding: 2, resource: { buffer: compactedOriginsBuffer } }, { binding: 3, resource: { buffer: compactedCountBuffer } }, { binding: 4, resource: { buffer: paramsBuffer } },
+    ] });
+    const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end(); const compactionPass = encoder.beginComputePass(); compactionPass.setPipeline(compactionPipeline); compactionPass.setBindGroup(0, compactionBindGroup); compactionPass.dispatchWorkgroups(Math.ceil(count / 64)); compactionPass.end(); encoder.copyBufferToBuffer(originsBuffer, 0, originsReadback, 0, originBytes); encoder.copyBufferToBuffer(validityBuffer, 0, validityReadback, 0, countBytes); encoder.copyBufferToBuffer(compactedOriginsBuffer, 0, compactedOriginsReadback, 0, originBytes); encoder.copyBufferToBuffer(compactedCountBuffer, 0, compactedCountReadback, 0, 4); device.queue.submit([encoder.finish()]);
     await device.queue.onSubmittedWorkDone(); await originsReadback.mapAsync(GPUMapMode.READ); const rawOrigins = Array.from(new Int32Array(originsReadback.getMappedRange().slice(0, count * 2 * 4))); originsReadback.unmap(); await validityReadback.mapAsync(GPUMapMode.READ); const validity = Array.from(new Uint32Array(validityReadback.getMappedRange().slice(0, count * 4))); validityReadback.unmap();
-    return { origins: Array.from({ length: count }, (_, index) => ({ x: rawOrigins[index * 2], y: rawOrigins[index * 2 + 1] })), validity };
-  } finally { for (const buffer of [fieldBuffer, pieceBuffer, maskBuffer, originsBuffer, validityBuffer, paramsBuffer, originsReadback, validityReadback]) buffer.destroy(); }
+    await compactedCountReadback.mapAsync(GPUMapMode.READ); const compactedCount = new Uint32Array(compactedCountReadback.getMappedRange().slice(0, 4))[0]; compactedCountReadback.unmap(); await compactedOriginsReadback.mapAsync(GPUMapMode.READ); const rawCompactedOrigins = Array.from(new Int32Array(compactedOriginsReadback.getMappedRange().slice(0, compactedCount * 2 * 4))); compactedOriginsReadback.unmap();
+    return { origins: Array.from({ length: count }, (_, index) => ({ x: rawOrigins[index * 2], y: rawOrigins[index * 2 + 1] })), validity, compactedOrigins: Array.from({ length: compactedCount }, (_, index) => ({ x: rawCompactedOrigins[index * 2], y: rawCompactedOrigins[index * 2 + 1] })), compactedCount };
+  } finally { for (const buffer of [fieldBuffer, pieceBuffer, maskBuffer, originsBuffer, validityBuffer, compactedOriginsBuffer, compactedCountBuffer, paramsBuffer, originsReadback, validityReadback, compactedOriginsReadback, compactedCountReadback]) buffer.destroy(); }
 }
 
 export function createWebGpuFrontierGenerator({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 65536 }, shaderSource = SHADER } = {}) {
@@ -158,15 +192,15 @@ export function createWebGpuFrontierGenerator({ gpu = globalThis.navigator?.gpu,
     availability,
     async generate(input) {
       const normalized = normalizeInput(input, normalizedGrid), cpu = cpuGenerateFrontierCandidates(normalized, normalizedGrid), status = await availability();
-      if (status.status !== 'available') return Object.freeze({ ...status, origins: cpu.origins, validity: cpu.validity, acceptedIndices: cpu.acceptedIndices, candidateCount: cpu.candidateCount });
+      if (status.status !== 'available') return Object.freeze({ ...status, origins: cpu.origins, validity: cpu.validity, acceptedIndices: cpu.acceptedIndices, compactedOrigins: cpu.compactedOrigins, compactedCount: cpu.compactedCount, candidateCount: cpu.candidateCount });
       let device;
       try {
         if (!devicePromise) devicePromise = gpu.requestAdapter().then(adapter => { if (!adapter) throw new Error('webgpu-adapter-unavailable'); return adapter.requestDevice(); }).catch(error => { devicePromise = null; throw error; });
         device = await devicePromise;
-        const result = await runGpu(device, normalized, normalizedGrid, shaderSource), parity = JSON.stringify(result.origins) === JSON.stringify(cpu.origins) && JSON.stringify(result.validity) === JSON.stringify(cpu.validity);
-        if (!parity) return Object.freeze({ schema: WEBGPU_FRONTIER_GENERATOR_SCHEMA, status: 'rejected', backend: 'webgpu', reason: 'oracle-parity-mismatch', origins: cpu.origins, validity: cpu.validity, acceptedIndices: cpu.acceptedIndices, candidateCount: cpu.candidateCount });
-        return Object.freeze({ schema: WEBGPU_FRONTIER_GENERATOR_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'verified', ...result, acceptedIndices: result.validity.flatMap((value, index) => value ? [index] : []), candidateCount: cpu.candidateCount });
-      } catch (error) { devicePromise = null; return Object.freeze({ ...unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid), origins: cpu.origins, validity: cpu.validity, acceptedIndices: cpu.acceptedIndices, candidateCount: cpu.candidateCount }); }
+        const result = await runGpu(device, normalized, normalizedGrid, shaderSource), parity = JSON.stringify(result.origins) === JSON.stringify(cpu.origins) && JSON.stringify(result.validity) === JSON.stringify(cpu.validity) && JSON.stringify(result.compactedOrigins) === JSON.stringify(cpu.compactedOrigins);
+        if (!parity) return Object.freeze({ schema: WEBGPU_FRONTIER_GENERATOR_SCHEMA, status: 'rejected', backend: 'webgpu', reason: 'oracle-parity-mismatch', origins: cpu.origins, validity: cpu.validity, acceptedIndices: cpu.acceptedIndices, compactedOrigins: cpu.compactedOrigins, compactedCount: cpu.compactedCount, candidateCount: cpu.candidateCount });
+        return Object.freeze({ schema: WEBGPU_FRONTIER_GENERATOR_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'verified', compaction: 'verified', ...result, acceptedIndices: result.validity.flatMap((value, index) => value ? [index] : []), candidateCount: cpu.candidateCount });
+      } catch (error) { devicePromise = null; return Object.freeze({ ...unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid), origins: cpu.origins, validity: cpu.validity, acceptedIndices: cpu.acceptedIndices, compactedOrigins: cpu.compactedOrigins, compactedCount: cpu.compactedCount, candidateCount: cpu.candidateCount }); }
     },
   });
 }

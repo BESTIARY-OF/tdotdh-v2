@@ -1021,7 +1021,7 @@ function launchSearchPass() {
     const result = data.result || data;
     const prefilterLabel = result.prefilter?.status === 'used' ? ' · GPU occupancy prefilter' : result.prefilter?.status === 'fallback' ? ' · CPU occupancy fallback' : result.prefilter?.status === 'not-used' ? ' · CPU seed branch' : '';
     const frontierLabel = result.frontier?.status === 'used' ? ' · GPU frontier validation' : result.frontier?.status === 'fallback' ? ' · CPU frontier validation' : '';
-    const generationLabel = result.frontierGeneration?.status === 'used' ? ' · GPU frontier generation' : result.frontierGeneration?.status === 'fallback' ? ' · CPU frontier generation' : '';
+    const generationLabel = result.frontierGeneration?.compaction === 'verified' ? ' · GPU frontier generation + compaction' : result.frontierGeneration?.status === 'used' ? ' · GPU frontier generation' : result.frontierGeneration?.status === 'fallback' ? ' · CPU frontier generation' : '';
     const labels = `${prefilterLabel}${frontierLabel}${generationLabel}`;
     if (result.hasPlacement || (Array.isArray(result.placements) && result.placements.length)) { const added = addSnapshot(result.placements, result.nodes); document.querySelector('#searchStatus').textContent = added ? `Arrangement ${String(app.snapshots.length).padStart(2, '0')} captured · continuing search${labels}` : `Duplicate cover skipped · continuing search${labels}`; if (added) toast(`Arrangement ${String(app.snapshots.length).padStart(2, '0')} captured and ranked`); }
     else document.querySelector('#searchStatus').textContent = `Pass ${app.pass} complete · continuing search${labels}`;

@@ -44,8 +44,8 @@ const result = await search(pieces, [], {
 });
 
 assert.equal(result.type, 'done');
-assert.deepEqual(result.prefilter, { status: 'used', backend: 'test-compute-shader', candidateCount: 3 });
-assert.deepEqual(result.frontier, { status: 'used', backend: 'test-frontier-evaluator', parity: 'verified', candidateCount: 3 });
+assert.deepEqual(result.prefilter, { status: 'used', backend: 'test-compute-shader', candidateCount: 6 });
+assert.deepEqual(result.frontier, { status: 'used', backend: 'test-frontier-evaluator', parity: 'verified', candidateCount: 6 });
 assert.equal(result.frontierGeneration.status, 'used');
 assert.equal(result.frontierGeneration.backend, 'test-frontier-generator');
 assert.equal(result.frontierGeneration.parity, 'verified');

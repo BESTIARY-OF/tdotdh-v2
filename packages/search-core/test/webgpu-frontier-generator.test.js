@@ -19,4 +19,6 @@ assert.equal(fallback.status, 'unavailable');
 assert.deepEqual(fallback.origins, cpu.origins);
 assert.deepEqual(fallback.validity, cpu.validity);
 assert.deepEqual(fallback.acceptedIndices, cpu.acceptedIndices);
+assert.deepEqual(fallback.compactedOrigins, cpu.compactedOrigins);
+assert.equal(fallback.compactedCount, cpu.compactedCount);
 console.log(JSON.stringify({ candidateCount: cpu.candidateCount, accepted: cpu.acceptedIndices.length, result: 'passed' }));
