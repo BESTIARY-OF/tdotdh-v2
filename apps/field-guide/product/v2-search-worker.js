@@ -77,7 +77,7 @@ async function runProductSearch(request, context) {
   return {
     ...result,
     gpuExecution,
-    navigation: navigation.complete(result),
+    navigation: navigation.complete({ ...result, gpuExecution }),
     placements: Array.isArray(result?.placements) ? result.placements : [],
     hasPlacement: Array.isArray(result?.placements) && result.placements.length > 0,
     protocolOperation: 'product-search',

@@ -18,11 +18,29 @@ assert.equal(batch.ownership, 'gpu-first');
 assert.equal(batch.ticket.batchOrdinal, 0);
 assert.equal(batch.ticket.stage, 'frontier-expansion');
 assert.equal(batch.cursor.depth, 2);
-const gpuReceipt = coordinator.complete({ placements: [{ id: 3, cells: [{ x: 4, y: 6 }] }], frontierTargetGeneration: { status: 'used', backend: 'webgpu', parity: 'verified' } });
+const gpuReceipt = coordinator.complete({
+  placements: [{ id: 3, cells: [{ x: 4, y: 6 }] }],
+  gpuExecution: { deviceAvailable: true },
+  frontierTargetGeneration: { status: 'used', backend: 'webgpu', parity: 'verified' },
+  frontierState: { status: 'used', backend: 'webgpu', parity: 'verified' },
+});
 assert.equal(gpuReceipt.expansionBackend, 'webgpu');
 assert.equal(gpuReceipt.expansionParity, 'verified');
 assert.equal(gpuReceipt.expansionOwnership, 'gpu-owned');
+assert.equal(gpuReceipt.gpuExpansionComplete, true);
+assert.deepEqual(gpuReceipt.gpuStages, ['frontierTargetGeneration', 'frontierState']);
+assert.deepEqual(gpuReceipt.cpuFallbackStages, []);
 assert.equal(gpuReceipt.gpuExpansionBatches, 1);
+const gatedFallback = coordinator.complete({
+  placements: [{ id: 3, cells: [{ x: 4, y: 6 }] }],
+  gpuExecution: { deviceAvailable: false, reason: 'webgpu-adapter-unavailable' },
+  frontierTargetGeneration: { status: 'used', backend: 'webgpu', parity: 'verified' },
+  frontierState: { status: 'fallback', backend: 'cpu-oracle', parity: 'oracle' },
+});
+assert.equal(gatedFallback.gpuExpansionComplete, false);
+assert.equal(gatedFallback.expansionOwnership, 'cpu-oracle-fallback');
+assert.equal(gatedFallback.gpuExecution.reason, 'webgpu-adapter-unavailable');
+assert.deepEqual(gatedFallback.cpuFallbackStages, ['frontierState']);
 assert.deepEqual(coordinator.observeCancellation(false), { checked: true, cancelled: false, count: 1, cursor: coordinator.cursor() });
 assert.throws(() => coordinator.observeProgress({ depth: 1, nodeOffset: 16, rootChoice: 4 }), /depth cannot move backward/);
 assert.throws(() => coordinator.observeProgress({ depth: 3, nodeOffset: 16, rootChoice: 5 }), /rootChoice cannot change/);
