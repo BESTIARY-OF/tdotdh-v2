@@ -122,10 +122,11 @@ function normalizeMask(mask, wordCount, label) {
 
 function normalizeCandidate(candidate, grid, index) {
   if (!candidate || typeof candidate !== 'object') throw new TypeError(`field metric candidate ${index} must be an object`);
+  const occupiedMask = normalizeMask(candidate.occupiedMask, grid.wordCount, `field metric candidate ${index}.occupiedMask`);
   return Object.freeze({
-    occupiedMask: normalizeMask(candidate.occupiedMask, grid.wordCount, `field metric candidate ${index}.occupiedMask`),
+    occupiedMask,
     centroidMask: normalizeMask(candidate.centroidMask, grid.wordCount, `field metric candidate ${index}.centroidMask`),
-    outsideMask: normalizeMask(candidate.outsideMask, grid.wordCount, `field metric candidate ${index}.outsideMask`),
+    outsideMask: candidate.outsideMask == null ? outsideMaskFromOccupied(occupiedMask, grid) : normalizeMask(candidate.outsideMask, grid.wordCount, `field metric candidate ${index}.outsideMask`),
   });
 }
 
