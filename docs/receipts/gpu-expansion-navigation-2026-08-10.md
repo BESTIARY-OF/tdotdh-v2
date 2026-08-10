@@ -24,6 +24,13 @@ The benchmark adapters are CPU oracle implementations labelled as benchmark
 backends. They prove the ticket/cursor/cancellation/parity contract and must
 not be read as hardware-throughput measurements.
 
+The frontier compactor now reuses a bounded WebGPU allocation across calls:
+storage input/output buffers, uniform parameters, readback, and the bitonic
+pipeline are kept alive and reset on device loss. The CPU frontier objects
+still own the payload between expansion layers; the next seam is to move that
+payload into the persistent GPU buffer and exchange only bounded tickets,
+cursors, and parity-gated readback.
+
 ## Live product acceptance
 
 - Preview: `http://127.0.0.1:5174/`

@@ -708,7 +708,7 @@ async function compactFrontierRows(entries, retain, frontierCompactor, onCompact
   const cpu = () => entries.map((entry, index) => ({ entry, index })).sort((left, right) => left.entry.score - right.entry.score || left.index - right.index).slice(0, retain).map(row => row.entry);
   if (!frontierCompactor?.compact) { onCompact({ status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', candidateCount: entries.length, selectedCount: Math.min(entries.length, retain) }); return cpu(); }
   const result = await frontierCompactor.compact(entries.map((entry, index) => ({ score: entry.score, tie: entry.tie ?? index })), retain);
-  onCompact({ status: result?.parity === 'verified' ? 'used' : 'fallback', backend: result?.backend || 'cpu-oracle', parity: result?.parity, algorithm: result?.algorithm, candidateCount: entries.length, selectedCount: result?.selectedCount || 0, reason: result?.reason });
+  onCompact({ status: result?.parity === 'verified' ? 'used' : 'fallback', backend: result?.backend || 'cpu-oracle', parity: result?.parity, algorithm: result?.algorithm, persistent: result?.persistent === true, bufferCapacity: result?.bufferCapacity, candidateCount: entries.length, selectedCount: result?.selectedCount || 0, reason: result?.reason });
   if (Array.isArray(result?.indices) && result.indices.length <= retain) return result.indices.map(index => entries[index]).filter(Boolean);
   return cpu();
 }

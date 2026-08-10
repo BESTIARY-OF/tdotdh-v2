@@ -84,6 +84,41 @@ async function runGpu(device, rows, retain, shaderSource) {
   } finally { for (const buffer of [input, output, params, readback]) buffer.destroy(); }
 }
 
+function createPersistentResources(device, capacity, shaderSource) {
+  const paddedCapacity = nextPowerOfTwo(capacity), bytes = paddedCapacity * 16;
+  const input = device.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+  const output = device.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+  const params = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const readback = device.createBuffer({ size: Math.max(1, capacity) * 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  const module = device.createShaderModule({ code: shaderSource });
+  const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+  return { capacity, paddedCapacity, input, output, params, readback, pipeline };
+}
+
+function destroyPersistentResources(resources) {
+  if (!resources) return;
+  for (const buffer of [resources.input, resources.output, resources.params, resources.readback]) buffer.destroy();
+}
+
+async function runGpuPersistent(device, resources, rows, retain) {
+  device.queue.writeBuffer(resources.input, 0, packRows(rows, resources.paddedCapacity));
+  let source = resources.input, destination = resources.output;
+  for (let k = 2; k <= resources.paddedCapacity; k *= 2) for (let j = k / 2; j >= 1; j /= 2) {
+    device.queue.writeBuffer(resources.params, 0, new Uint32Array([resources.paddedCapacity, rows.length, j, k]));
+    const bindGroup = device.createBindGroup({ layout: resources.pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: source } }, { binding: 1, resource: { buffer: destination } }, { binding: 2, resource: { buffer: resources.params } }] });
+    const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(resources.pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(resources.paddedCapacity / FRONTIER_COMPACTOR_WORKGROUP_SIZE)); pass.end(); device.queue.submit([encoder.finish()]); [source, destination] = [destination, source];
+  }
+  const readbackBytes = Math.max(1, retain) * 16, encoder = device.createCommandEncoder();
+  encoder.copyBufferToBuffer(source, 0, resources.readback, 0, readbackBytes);
+  device.queue.submit([encoder.finish()]);
+  await device.queue.onSubmittedWorkDone();
+  await resources.readback.mapAsync(GPUMapMode.READ);
+  const view = new DataView(resources.readback.getMappedRange()), indices = [];
+  for (let index = 0; index < retain; index++) indices.push(view.getUint32(index * 16 + 8, true));
+  resources.readback.unmap();
+  return indices;
+}
+
 export function createWebGpuFrontierCompactor({ gpu = globalThis.navigator?.gpu, requiredLimits = { maxComputeWorkgroupSizeX: FRONTIER_COMPACTOR_WORKGROUP_SIZE }, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
   const limits = { ...requiredLimits }; let availabilityPromise = null;
   const availability = async () => {
@@ -101,6 +136,32 @@ export function createWebGpuFrontierCompactor({ gpu = globalThis.navigator?.gpu,
         const indices = await runGpu(device, normalized, limit, shaderSource), parity = JSON.stringify(indices) === JSON.stringify(cpu.indices);
         return parity ? makeResult('completed', 'webgpu', 'verified', normalized, indices, { algorithm: 'multi-pass-bitonic-top-k' }) : makeResult('unavailable', 'webgpu', 'oracle', normalized, cpu.indices, { reason: 'oracle-parity-mismatch' });
       } catch (error) { deviceCache.reset(); return makeResult('unavailable', 'webgpu', 'oracle', normalized, cpu.indices, { reason: `webgpu-execution-failed:${error?.message || String(error)}` }); }
+    },
+  });
+}
+
+export function createWebGpuPersistentFrontierCompactor({ gpu = globalThis.navigator?.gpu, capacity = MAX_FRONTIER_COMPACTOR_ROWS, requiredLimits = { maxComputeWorkgroupSizeX: FRONTIER_COMPACTOR_WORKGROUP_SIZE }, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
+  if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > MAX_FRONTIER_COMPACTOR_ROWS) throw new TypeError(`persistent frontier compactor capacity must be 1-${MAX_FRONTIER_COMPACTOR_ROWS}`);
+  const limits = { ...requiredLimits }; let availabilityPromise = null, resources = null;
+  const availability = async () => {
+    if (!availabilityPromise) availabilityPromise = probeWebGpuCapabilities({ gpu, requiredLimits: limits }).then(probe => probe.adapterAvailable && probe.requiredLimitsSatisfied ? Object.freeze({ schema: WEBGPU_FRONTIER_COMPACTOR_SCHEMA, status: 'available', backend: 'webgpu', algorithm: 'persistent-multi-pass-bitonic-top-k', capacity }) : Object.freeze({ schema: WEBGPU_FRONTIER_COMPACTOR_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: probe.adapterAvailable ? 'webgpu-required-limits-unsatisfied' : 'webgpu-adapter-unavailable', capacity }));
+    return availabilityPromise;
+  };
+  const reset = () => { destroyPersistentResources(resources); resources = null; deviceCache.reset(); };
+  return Object.freeze({
+    availability,
+    reset,
+    async compact(rows, retain) {
+      const normalized = normalizeRows(rows), limit = normalizeRetain(retain, normalized.length), cpu = cpuCompactFrontierRows(normalized, limit), status = await availability(), paddedCount = nextPowerOfTwo(normalized.length);
+      if (normalized.length > capacity || paddedCount > nextPowerOfTwo(capacity)) return makeResult('unavailable', 'webgpu', 'oracle', normalized, cpu.indices, { reason: 'persistent-frontier-capacity', persistent: true, bufferCapacity: capacity });
+      if (status.status !== 'available') return makeResult('unavailable', 'webgpu', 'oracle', normalized, cpu.indices, { reason: status.reason, persistent: true, bufferCapacity: capacity });
+      try {
+        const device = await deviceCache.getDevice(), maxStorageRows = Math.floor((Number(device.limits?.maxStorageBufferBindingSize) || 0) / 16), maxBufferRows = Math.floor((Number(device.limits?.maxBufferSize) || 0) / 16);
+        if (maxStorageRows < nextPowerOfTwo(capacity) || (maxBufferRows > 0 && maxBufferRows < nextPowerOfTwo(capacity))) return makeResult('unavailable', 'webgpu', 'oracle', normalized, cpu.indices, { reason: 'persistent-frontier-storage-capacity', persistent: true, bufferCapacity: capacity });
+        if (!resources) resources = createPersistentResources(device, capacity, shaderSource);
+        const indices = await runGpuPersistent(device, resources, normalized, limit), parity = JSON.stringify(indices) === JSON.stringify(cpu.indices);
+        return parity ? makeResult('completed', 'webgpu', 'verified', normalized, indices, { algorithm: 'persistent-multi-pass-bitonic-top-k', persistent: true, bufferCapacity: capacity }) : makeResult('unavailable', 'webgpu', 'oracle', normalized, cpu.indices, { reason: 'oracle-parity-mismatch', persistent: true, bufferCapacity: capacity });
+      } catch (error) { reset(); return makeResult('unavailable', 'webgpu', 'oracle', normalized, cpu.indices, { reason: `webgpu-execution-failed:${error?.message || String(error)}`, persistent: true, bufferCapacity: capacity }); }
     },
   });
 }

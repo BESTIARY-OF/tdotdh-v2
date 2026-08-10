@@ -90,8 +90,13 @@ parity in the field-metrics shader.
   not a second search of the candidate space.
 - `6094ddf` adds a bounded persistent-frontier payload with digest-bound cursor
   resume, stable CPU compaction oracle, and an explicit GPU compaction handoff.
-  It is a contract and persistence seam only; it does not claim that a GPU
-  buffer executor exists yet.
+- The follow-on persistent compactor keeps the WebGPU input/output storage
+  buffers, uniform buffer, readback buffer, and bitonic pipeline alive across
+  compaction calls. Each call overwrites the bounded allocation, performs the
+  GPU sort, and admits the result only after exact CPU index parity. Device
+  loss destroys the allocation and resets the shared device cache, so the next
+  call can re-probe cleanly. This is a real persistent allocation seam; it is
+  not yet the full GPU-resident frontier-state owner.
 
 The live 5174 runtime receipt for this seam is recorded in
 `docs/receipts/webgpu-deduplicator-runtime-2026-08-10.md`.
