@@ -3,7 +3,7 @@ import { DEFAULT_FRONTIER_GRID, createFrontierMaskFromCells } from './webgpu-fro
 import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
 
 export const WEBGPU_FIELD_METRICS_SCHEMA = 'tdotdh.webgpu-field-metrics.v0';
-export const FIELD_METRIC_COUNT = 13;
+export const FIELD_METRIC_COUNT = 15;
 
 /*
  * This pass deliberately emits integer aggregates only.  The search oracle
@@ -15,8 +15,9 @@ const SHADER = `
 struct Params { candidateCount: u32, wordCount: u32, width: u32, height: u32, originX: i32, originY: i32, reserved0: u32, reserved1: u32 };
 @group(0) @binding(0) var<storage, read> occupiedMasks: array<u32>;
 @group(0) @binding(1) var<storage, read> centroidMasks: array<u32>;
-@group(0) @binding(2) var<storage, read_write> outputMetrics: array<i32>;
-@group(0) @binding(3) var<uniform> params: Params;
+@group(0) @binding(2) var<storage, read> outsideMasks: array<u32>;
+@group(0) @binding(3) var<storage, read_write> outputMetrics: array<i32>;
+@group(0) @binding(4) var<uniform> params: Params;
 
 fn bitOffset(x: i32, y: i32) -> u32 {
   return u32(y - params.originY) * params.width + u32(x - params.originX);
@@ -30,6 +31,11 @@ fn centroidBit(base: u32, x: i32, y: i32) -> u32 {
   if (x < params.originX || y < params.originY || x >= params.originX + i32(params.width) || y >= params.originY + i32(params.height)) { return 0u; }
   let offset = bitOffset(x, y);
   return (centroidMasks[base + offset / 32u] >> (offset % 32u)) & 1u;
+}
+fn outsideBit(base: u32, x: i32, y: i32) -> u32 {
+  if (x < params.originX || y < params.originY || x >= params.originX + i32(params.width) || y >= params.originY + i32(params.height)) { return 0u; }
+  let offset = bitOffset(x, y);
+  return (outsideMasks[base + offset / 32u] >> (offset % 32u)) & 1u;
 }
 
 @compute @workgroup_size(64)
@@ -49,6 +55,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   var centroidSumY: i32 = 0;
   var centroidEdgeCoast: i32 = 0;
   var centroidCornerCoast: i32 = 0;
+  var inletCells: i32 = 0;
+  var inletEdges: i32 = 0;
   for (var y: i32 = params.originY; y < params.originY + i32(params.height); y++) {
     for (var x: i32 = params.originX; x < params.originX + i32(params.width); x++) {
     let occupied = occupiedBit(base, x, y);
@@ -72,6 +80,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
   }
   if (area == 0) { minX = 0; maxX = 0; minY = 0; maxY = 0; }
+  for (var y: i32 = minY; y <= maxY; y++) {
+    for (var x: i32 = minX; x <= maxX; x++) {
+      if (occupiedBit(base, x, y) == 0u && outsideBit(base, x, y) == 0u) {
+        var landNeighbors: i32 = 0;
+        landNeighbors += i32(occupiedBit(base, x + 1, y)); landNeighbors += i32(occupiedBit(base, x - 1, y)); landNeighbors += i32(occupiedBit(base, x, y + 1)); landNeighbors += i32(occupiedBit(base, x, y - 1));
+        if (landNeighbors >= 2) { inletCells += 1; inletEdges += landNeighbors; }
+      }
+    }
+  }
   let output = id.x * ${FIELD_METRIC_COUNT}u;
   outputMetrics[output + 0u] = area;
   outputMetrics[output + 1u] = perimeter;
@@ -86,6 +103,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   outputMetrics[output + 10u] = centroidSumY;
   outputMetrics[output + 11u] = centroidEdgeCoast;
   outputMetrics[output + 12u] = centroidCornerCoast;
+  outputMetrics[output + 13u] = inletCells;
+  outputMetrics[output + 14u] = inletEdges;
 }`;
 
 function normalizeGrid(grid = DEFAULT_FRONTIER_GRID) {
@@ -106,6 +125,7 @@ function normalizeCandidate(candidate, grid, index) {
   return Object.freeze({
     occupiedMask: normalizeMask(candidate.occupiedMask, grid.wordCount, `field metric candidate ${index}.occupiedMask`),
     centroidMask: normalizeMask(candidate.centroidMask, grid.wordCount, `field metric candidate ${index}.centroidMask`),
+    outsideMask: normalizeMask(candidate.outsideMask, grid.wordCount, `field metric candidate ${index}.outsideMask`),
   });
 }
 
@@ -114,6 +134,26 @@ function bit(mask, grid, x, y) {
   if (localX < 0 || localY < 0 || localX >= grid.width || localY >= grid.height) return 0;
   const offset = localY * grid.width + localX;
   return (mask[Math.floor(offset / 32)] >>> (offset % 32)) & 1;
+}
+
+function outsideMaskFromOccupied(occupiedMask, grid) {
+  const outside = new Uint32Array(grid.wordCount), queue = [], visited = new Set();
+  const enqueue = (x, y) => {
+    const localX = x - grid.originX, localY = y - grid.originY;
+    if (localX < 0 || localY < 0 || localX >= grid.width || localY >= grid.height || bit(occupiedMask, grid, x, y)) return;
+    const id = `${x},${y}`;
+    if (visited.has(id)) return;
+    visited.add(id); queue.push({ x, y });
+  };
+  for (let x = grid.originX; x < grid.originX + grid.width; x++) { enqueue(x, grid.originY); enqueue(x, grid.originY + grid.height - 1); }
+  for (let y = grid.originY + 1; y < grid.originY + grid.height - 1; y++) { enqueue(grid.originX, y); enqueue(grid.originX + grid.width - 1, y); }
+  while (queue.length) {
+    const current = queue.shift();
+    const offset = (current.y - grid.originY) * grid.width + current.x - grid.originX;
+    outside[Math.floor(offset / 32)] |= 1 << (offset % 32);
+    enqueue(current.x + 1, current.y); enqueue(current.x - 1, current.y); enqueue(current.x, current.y + 1); enqueue(current.x, current.y - 1);
+  }
+  return outside;
 }
 
 function cpuMetric(candidate, grid) {
@@ -127,7 +167,13 @@ function cpuMetric(candidate, grid) {
       for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) if ((dx || dy) && Math.abs(dx) === 1 && Math.abs(dy) === 1 && !bit(candidate.occupiedMask, grid, x + dx, y + dy)) centroidCornerCoast = 1;
     }
   }
-  return [area, perimeter, Number.isFinite(minX) ? minX : 0, Number.isFinite(maxX) ? maxX : 0, Number.isFinite(minY) ? minY : 0, Number.isFinite(maxY) ? maxY : 0, sumX, sumY, centroidCount, centroidSumX, centroidSumY, centroidEdgeCoast, centroidCornerCoast];
+  let inletCells = 0, inletEdges = 0;
+  if (area) for (let y = minY; y <= maxY; y++) for (let x = minX; x <= maxX; x++) if (!bit(candidate.occupiedMask, grid, x, y)) {
+    if (bit(candidate.outsideMask, grid, x, y)) continue;
+    const landNeighbors = bit(candidate.occupiedMask, grid, x + 1, y) + bit(candidate.occupiedMask, grid, x - 1, y) + bit(candidate.occupiedMask, grid, x, y + 1) + bit(candidate.occupiedMask, grid, x, y - 1);
+    if (landNeighbors >= 2) { inletCells++; inletEdges += landNeighbors; }
+  }
+  return [area, perimeter, Number.isFinite(minX) ? minX : 0, Number.isFinite(maxX) ? maxX : 0, Number.isFinite(minY) ? minY : 0, Number.isFinite(maxY) ? maxY : 0, sumX, sumY, centroidCount, centroidSumX, centroidSumY, centroidEdgeCoast, centroidCornerCoast, inletCells, inletEdges];
 }
 
 function normalizeCandidates(candidates, grid) {
@@ -135,11 +181,12 @@ function normalizeCandidates(candidates, grid) {
   return candidates.map((candidate, index) => normalizeCandidate(candidate, grid, index));
 }
 
-export function createFieldMetricsCandidate({ occupiedCells, centroidCells } = {}, grid = DEFAULT_FRONTIER_GRID) {
+export function createFieldMetricsCandidate({ occupiedCells = [], centroidCells = [], outsideCells = null } = {}, grid = DEFAULT_FRONTIER_GRID) {
   const normalizedGrid = normalizeGrid(grid);
   const centroidMask = new Uint32Array(normalizedGrid.wordCount);
   if (centroidCells?.length) centroidMask.set(createFrontierMaskFromCells(centroidCells, normalizedGrid));
-  return Object.freeze({ occupiedMask: createFrontierMaskFromCells(occupiedCells, normalizedGrid), centroidMask });
+  const occupiedMask = createFrontierMaskFromCells(occupiedCells, normalizedGrid);
+  return Object.freeze({ occupiedMask, centroidMask, outsideMask: outsideCells ? createFrontierMaskFromCells(outsideCells, normalizedGrid) : outsideMaskFromOccupied(occupiedMask, normalizedGrid) });
 }
 
 export function cpuEvaluateFieldMetrics(candidates, grid = DEFAULT_FRONTIER_GRID) {
@@ -155,14 +202,15 @@ async function runGpuBatch(device, normalized, grid, shaderSource) {
   const buffers = {
     occupied: device.createBuffer({ size: maskBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
     centroid: device.createBuffer({ size: maskBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+    outside: device.createBuffer({ size: maskBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
     output: device.createBuffer({ size: outputBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
     params: device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }),
     readback: device.createBuffer({ size: outputBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
   };
   try {
-    device.queue.writeBuffer(buffers.occupied, 0, flatten(normalized, 'occupiedMask', grid.wordCount)); device.queue.writeBuffer(buffers.centroid, 0, flatten(normalized, 'centroidMask', grid.wordCount));
+    device.queue.writeBuffer(buffers.occupied, 0, flatten(normalized, 'occupiedMask', grid.wordCount)); device.queue.writeBuffer(buffers.centroid, 0, flatten(normalized, 'centroidMask', grid.wordCount)); device.queue.writeBuffer(buffers.outside, 0, flatten(normalized, 'outsideMask', grid.wordCount));
     device.queue.writeBuffer(buffers.params, 0, new Int32Array([count, grid.wordCount, grid.width, grid.height, grid.originX, grid.originY, 0, 0]));
-    const module = device.createShaderModule({ code: shaderSource }), pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } }), bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.occupied } }, { binding: 1, resource: { buffer: buffers.centroid } }, { binding: 2, resource: { buffer: buffers.output } }, { binding: 3, resource: { buffer: buffers.params } }] });
+    const module = device.createShaderModule({ code: shaderSource }), pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } }), bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.occupied } }, { binding: 1, resource: { buffer: buffers.centroid } }, { binding: 2, resource: { buffer: buffers.outside } }, { binding: 3, resource: { buffer: buffers.output } }, { binding: 4, resource: { buffer: buffers.params } }] });
     const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end(); encoder.copyBufferToBuffer(buffers.output, 0, buffers.readback, 0, outputBytes); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone(); await buffers.readback.mapAsync(GPUMapMode.READ);
     const values = Array.from(new Int32Array(buffers.readback.getMappedRange().slice(0, count * FIELD_METRIC_COUNT * 4))); buffers.readback.unmap();
     return Array.from({ length: count }, (_, index) => values.slice(index * FIELD_METRIC_COUNT, (index + 1) * FIELD_METRIC_COUNT));

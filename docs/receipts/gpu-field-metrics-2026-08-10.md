@@ -4,8 +4,9 @@ The v2 search worker now exposes `tdotdh.webgpu-field-metrics.v0`.
 
 - Input: one occupied mask and one centroid mask per surviving branch.
 - GPU aggregate: area, perimeter, integer bounds, coordinate sums, centroid
-  sums, and centroid edge/corner coast flags.
-- Parity gate: the CPU oracle computes the same 13 integer values and rejects
+  sums, centroid edge/corner coast flags, and exterior-masked inlet-cell/inlet-edge
+  counts.
+- Parity gate: the CPU oracle computes the same 15 integer values and rejects
   any divergent WebGPU result before the branch uses it.
 - CPU-owned remainder: radius variance, quality weights, centroid family text/
   hash naming, hole flood semantics, persistence, and cancellation.

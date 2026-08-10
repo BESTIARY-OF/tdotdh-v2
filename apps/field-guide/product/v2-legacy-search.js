@@ -26,9 +26,9 @@ function transformCells(cells, transform = 'fixed') { if (transform === 'flip-x'
 function applyLock(piece) { return transformCells(piece.cells, piece.orientation || 'fixed'); }
 function placedCells(piece, origin) { return applyLock(piece).map(c => ({ x: origin.x + c.x, y: origin.y + c.y })); }
 function occupiedMap(placements) { const map = new Map(); placements.forEach(p => p.cells.forEach(c => map.set(key(c.x, c.y), p.id))); return map; }
-function fieldShapeMetrics(placements, map, outside, minX, maxX, minY, maxY, centroidId) {
-  let inletCells = 0, inletEdges = 0;
-  for (let y = minY; y <= maxY; y++) for (let x = minX; x <= maxX; x++) {
+function fieldShapeMetrics(placements, map, outside, minX, maxX, minY, maxY, centroidId, aggregate = null) {
+  let inletCells = aggregate ? aggregate[13] : 0, inletEdges = aggregate ? aggregate[14] : 0;
+  if (!aggregate) for (let y = minY; y <= maxY; y++) for (let x = minX; x <= maxX; x++) {
     const cellKey = key(x, y);
     if (map.has(cellKey) || outside.has(cellKey)) continue;
     const landNeighbors = adjacent({ x, y }).filter(next => map.has(key(next.x, next.y))).length;
@@ -73,7 +73,7 @@ function fieldMetrics(placements, centroidId = 3, aggregate = null, gpuState = n
   const centroidCornerCoast = aggregate ? Boolean(aggregate[12]) : centroid.some(c => adjacent8(c).some(next => Math.abs(next.x - c.x) === 1 && Math.abs(next.y - c.y) === 1 && !map.has(key(next.x, next.y))));
   const centroidCoast = centroidEdgeCoast || centroidCornerCoast;
   const enclosure = centroidEdgeCoast ? 'open' : centroidCornerCoast ? 'weak' : 'strong';
-  const topology = fieldShapeMetrics(placements, map, outside, minX, maxX, minY, maxY, centroidId);
+  const topology = fieldShapeMetrics(placements, map, outside, minX, maxX, minY, maxY, centroidId, aggregate);
   const centroidSeed = gpuState ? (centroidSeedInfoFromGpuState(placements, centroidId, gpuState) || centroidSeedInfo(placements, centroidId)) : centroidSeedInfo(placements, centroidId);
   const enclosurePenalty = centroidEdgeCoast ? Infinity : centroidCornerCoast ? 100000 : 0;
   const score = perimeter * 1000000 + enclosurePenalty + radialVariance * 1000 + centerOffset * 100 + centroidSquareOffset * 50 + centerSquareDistance * 10 + (1 - density) * 10;
