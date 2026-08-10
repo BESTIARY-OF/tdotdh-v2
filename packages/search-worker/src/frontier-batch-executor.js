@@ -1,4 +1,6 @@
-import { cpuValidateFrontierCandidates, createFrontierMaskFromCells } from '../../../packages/search-core/src/webgpu-frontier-validator.js';
+import { createFrontierMaskFromCells } from '../../../packages/search-core/src/webgpu-frontier-validator.js';
+import { createFrontierPrefilter } from '../../../packages/search-core/src/frontier-prefilter.js';
+import { sliceFrontierBatch } from '../../../packages/search-core/src/frontier-batch-contract.js';
 import { canonicalPlacementSignature } from './cpu-oracle-runner.js';
 import { FRONTIER_BATCH_OPERATION, normalizeFrontierBatch } from './frontier-batch-contract.js';
 
@@ -6,30 +8,43 @@ export async function runFrontierBatch(request, { isCancelled = () => false, rep
   if (request.operation !== FRONTIER_BATCH_OPERATION) throw new TypeError(`Unsupported frontier operation: ${request.operation}`);
   const batch = normalizeFrontierBatch(request.frontierBatch);
   const startedAt = now();
-  const start = request.cursor.nodeOffset;
-  const end = Math.min(batch.candidates.length, start + request.budget.maxNodes);
-  const window = batch.candidates.slice(start, end);
+  const windowResult = sliceFrontierBatch(batch, { nodeOffset: request.cursor.nodeOffset, maxNodes: request.budget.maxNodes });
+  const { start, candidates: window } = windowResult;
   if (isCancelled()) return null;
+  if (window.length === 0) {
+    return {
+      operation: FRONTIER_BATCH_OPERATION,
+      placements: [],
+      canonicalSignatures: [],
+      nodes: 0,
+      cursor: { ...request.cursor },
+      frontier: { status: 'complete', backend: 'cpu-oracle', reason: 'cursor-at-end' },
+      termination: { status: 'completed', elapsedMilliseconds: Math.max(0, now() - startedAt), maxMilliseconds: request.budget.maxMilliseconds },
+    };
+  }
 
-  const masks = window.map(candidate => ({
+  const masks = window.map((candidate, index) => ({
     parentMask: createFrontierMaskFromCells(candidate.parentCells),
     candidateMask: createFrontierMaskFromCells(candidate.candidateCells),
     depth: candidate.depth,
-    nodeCursor: start + candidate.id,
+    nodeCursor: start + index,
   }));
-  const cpu = cpuValidateFrontierCandidates(masks);
-  let validity = cpu.validity;
-  let frontier = { status: 'fallback', backend: 'cpu-oracle', reason: 'frontier-accelerator-unavailable' };
-  if (frontierValidator?.validate && !isCancelled()) {
-    const accelerated = await frontierValidator.validate(masks);
-    if (accelerated?.status === 'completed' && JSON.stringify(accelerated.validity) === JSON.stringify(cpu.validity)) {
-      validity = accelerated.validity;
-      frontier = { status: 'used', backend: accelerated.backend || 'webgpu', parity: 'verified', candidateCount: window.length };
-    } else if (accelerated?.status === 'completed') {
-      frontier = { status: 'rejected', backend: accelerated.backend || 'webgpu', reason: 'validity-mask-mismatch', candidateCount: window.length };
-    } else if (accelerated?.reason) {
-      frontier = { status: 'fallback', backend: 'cpu-oracle', reason: accelerated.reason };
-    }
+  const prefilter = createFrontierPrefilter({ accelerator: frontierValidator });
+  const filtered = await prefilter.prefilter(masks, { isCancelled });
+  if (filtered.status === 'cancelled' || isCancelled()) return null;
+  const validity = filtered.validity;
+  const frontier = filtered.prefilter;
+  if (now() - startedAt >= request.budget.maxMilliseconds) {
+    return {
+      operation: FRONTIER_BATCH_OPERATION,
+      placements: [],
+      canonicalSignatures: [],
+      nodes: 0,
+      cursor: { ...request.cursor },
+      mode: request.mode,
+      frontier,
+      termination: { status: 'time-budget', elapsedMilliseconds: Math.max(0, now() - startedAt), maxMilliseconds: request.budget.maxMilliseconds },
+    };
   }
 
   const signatures = [];
@@ -37,6 +52,7 @@ export async function runFrontierBatch(request, { isCancelled = () => false, rep
   let processed = 0;
   for (let index = 0; index < window.length; index += 1) {
     if (isCancelled()) break;
+    if (processed > 0 && now() - startedAt >= request.budget.maxMilliseconds) break;
     const candidate = window[index];
     if (validity[index] === 1) {
       const signature = canonicalPlacementSignature(candidate.placements);
@@ -56,6 +72,7 @@ export async function runFrontierBatch(request, { isCancelled = () => false, rep
     canonicalSignatures: signatures,
     nodes: processed,
     cursor: { ...request.cursor, nodeOffset: start + processed },
+    mode: request.mode,
     frontier,
     termination: { status: processed < window.length ? 'partial' : 'completed', elapsedMilliseconds: Math.max(0, now() - startedAt), maxMilliseconds: request.budget.maxMilliseconds },
   };
