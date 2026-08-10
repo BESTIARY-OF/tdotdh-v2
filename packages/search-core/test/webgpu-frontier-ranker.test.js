@@ -7,4 +7,8 @@ assert.deepEqual(cpu.indices, [2, 1, 0, 3]);
 const fallback = await createWebGpuFrontierRanker({ gpu: null }).rank(rows);
 assert.equal(fallback.status, 'unavailable');
 assert.deepEqual(fallback.indices, cpu.indices);
+const largeRows = Array.from({ length: 129 }, (_, index) => ({ score: 129 - index, tie: index }));
+const largeFallback = await createWebGpuFrontierRanker({ gpu: null }).rank(largeRows);
+assert.equal(largeFallback.rowCount, 129);
+assert.equal(largeFallback.indices.length, 129);
 console.log('WebGPU frontier ranker tests passed');

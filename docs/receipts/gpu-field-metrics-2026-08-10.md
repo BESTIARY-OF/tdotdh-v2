@@ -36,6 +36,11 @@ The v2 search worker now exposes `tdotdh.webgpu-field-metrics.v0`.
   81 batches / 1,170,369 candidates for breadth and 87 batches / 1,243,035
   candidates for depth, while preserving 3,376 / 3,443 search nodes and
   successful placements. The CPU harness is not a GPU timing claim.
+- Deterministic beam ranking is now a multi-pass bitonic GPU contract over
+  padded storage rows rather than a single 128-row workgroup. This removes the
+  former JavaScript-sort capacity cliff for large family buckets; parity with
+  the CPU ordering oracle remains mandatory, and device storage limits still
+  trigger an explicit CPU fallback.
 
 Focused receipts pass with `node packages/search-core/test/webgpu-field-metrics.test.js`,
 `node apps/field-guide/test/v2-search-receipt.test.js`, and `npm run check`.

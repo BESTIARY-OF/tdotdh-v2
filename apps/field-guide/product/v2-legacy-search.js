@@ -648,7 +648,7 @@ async function evaluateFrontierOptions(entries, state, centroidId, frontierEvalu
 async function orderFrontierRows(entries, frontierRanker, onRank = () => {}) {
   if (!entries.length) return entries;
   const cpu = () => [...entries].sort((a, b) => a.score - b.score || a.tie - b.tie);
-  if (!frontierRanker?.rank || entries.length > 128) { onRank({ status: 'fallback', backend: 'cpu-oracle', reason: entries.length > 128 ? 'frontier-ranker-capacity' : 'frontier-ranker-unavailable', candidateCount: entries.length }); return cpu(); }
+  if (!frontierRanker?.rank) { onRank({ status: 'fallback', backend: 'cpu-oracle', reason: 'frontier-ranker-unavailable', candidateCount: entries.length }); return cpu(); }
   const result = await frontierRanker.rank(entries.map((entry, index) => ({ score: entry.score, tie: index })));
   onRank({ status: result?.parity === 'verified' ? 'used' : 'fallback', backend: result?.backend || 'cpu-oracle', parity: result?.parity, candidateCount: entries.length });
   if (Array.isArray(result?.indices) && result.indices.length === entries.length) return result.indices.map(index => entries[index]);
@@ -875,9 +875,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         nextBeam.push({ placements, field, remaining: state.remaining.filter(p => p.id !== option.piece.id), bounds: metrics, score: option.score + (targetFamily && targetSeedCompatible(metrics.centroidSeed, targetSeed) ? -220 : 0), hintMatches: option.hintMatches, centroidFamily: metrics.centroidFamily, centroidFamilyId: familyId, centroidSeed: metrics.centroidSeed, gpuState: option.gpuState || null });
       }
     }
-    nextBeam.sort((a, b) => a.score - b.score);
     const familyBuckets = new Map();
-    nextBeam.sort((a, b) => a.score - b.score);
     for (const state of nextBeam) { if (!familyBuckets.has(state.centroidFamilyId)) familyBuckets.set(state.centroidFamilyId, []); familyBuckets.get(state.centroidFamilyId).push(state); }
     if (searchStrategy === 'breadth') {
       for (const [familyId, bucket] of familyBuckets) familyBuckets.set(familyId, await orderFrontierRows(bucket, frontierRanker, receipt => { frontierRankerReceipt = receipt; }));
@@ -898,7 +896,8 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       return a[0].score - b[0].score;
     }), retained = [], retainedSet = new Set(), seedCounts = new Map();
     if (searchStrategy === 'depth') {
-      for (const state of nextBeam.slice(0, BEAM_LIMIT)) { retained.push(state); retainedSet.add(state); seedCounts.set(state.centroidFamilyId, (seedCounts.get(state.centroidFamilyId) || 0) + 1); }
+      const rankedBeam = await orderFrontierRows(nextBeam.map((state, index) => ({ state, score: state.score, tie: index })), frontierRanker, receipt => { frontierRankerReceipt = receipt; });
+      for (const { state } of rankedBeam.slice(0, BEAM_LIMIT)) { retained.push(state); retainedSet.add(state); seedCounts.set(state.centroidFamilyId, (seedCounts.get(state.centroidFamilyId) || 0) + 1); }
     } else {
       const seedQuota = searchStrategy === 'breadth' ? 3 : 8;
       for (let round = 0; round < seedQuota && retained.length < BEAM_LIMIT; round++) for (const bucket of orderedBuckets) {

@@ -46,10 +46,12 @@ all-frontier generator remains available for recursive compatibility and
 fallback.
 
 The branch-ranking boundary is also parity-gated. Candidate scores and stable
-ties are submitted to a bounded bitonic WebGPU workgroup (up to 128 rows), and
-the CPU ordering oracle rejects any divergent index order. The search receipt
-calls this `GPU deterministic ranking`; unavailable or oversized batches use the
-same CPU comparator without changing beam semantics.
+ties are submitted to a multi-pass bitonic WebGPU sort over a padded storage
+buffer, so family buckets are no longer capped at 128 rows or silently sorted
+by JavaScript. The CPU ordering oracle rejects any divergent index order.
+The search receipt calls this `GPU deterministic ranking`; unavailable or
+device-capacity-limited batches use the same CPU comparator without changing
+beam semantics.
 
 The next field-wide seam is now explicit as `webgpu-field-metrics.v0`. For every
 surviving branch it batches the occupied and centroid masks and computes the
