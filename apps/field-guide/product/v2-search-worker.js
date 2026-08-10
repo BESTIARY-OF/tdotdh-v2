@@ -13,6 +13,7 @@ import { createWebGpuFrontierRanker } from '../../../packages/search-core/src/we
 import { createWebGpuFrontierCompactor } from '../../../packages/search-core/src/webgpu-frontier-compactor.js';
 import { createWebGpuFrontierDeduplicator } from '../../../packages/search-core/src/webgpu-frontier-deduplicator.js';
 import { createWebGpuDeviceCache } from '../../../packages/search-core/src/webgpu-device-cache.js';
+import { createNavigationCoordinator } from '../../../packages/search-worker/src/navigation-coordinator.js';
 import { search } from './v2-legacy-search.js';
 
 const deviceCache = createWebGpuDeviceCache({ gpu: globalThis.navigator?.gpu });
@@ -31,6 +32,7 @@ const frontierCompactor = createWebGpuFrontierCompactor({ gpu: globalThis.naviga
 const frontierDeduplicator = createWebGpuFrontierDeduplicator({ gpu: globalThis.navigator?.gpu, deviceCache });
 async function runProductSearch(request, context) {
   const steering = request.steering || {};
+  const navigation = createNavigationCoordinator({ ticket: request.ticket, cursor: request.cursor });
   const result = await search(request.pieces, steering.knownCentroidFamilies || [], {
     ...steering,
     knownSignatures: request.knownSignatureHints,
@@ -54,10 +56,11 @@ async function runProductSearch(request, context) {
     frontierCompactor,
     frontierDeduplicator,
     isCancelled: context.isCancelled,
-    reportProgress: progress => context.reportProgress(progress),
+    reportProgress: progress => context.reportProgress({ ...progress, cursor: navigation.observeProgress(progress.cursor) }),
   });
   return {
     ...result,
+    navigation: navigation.complete(result),
     placements: Array.isArray(result?.placements) ? result.placements : [],
     hasPlacement: Array.isArray(result?.placements) && result.placements.length > 0,
     protocolOperation: 'product-search',

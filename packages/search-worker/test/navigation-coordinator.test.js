@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import { createNavigationCoordinator, NAVIGATION_COORDINATOR_SCHEMA } from '../src/navigation-coordinator.js';
+
+const ticket = { presetFingerprint: 'preset-v0', familyId: 'F-0RHDG0U', pass: 2, threadId: 7 };
+const checkpoint = { schema: 'test.checkpoint.v0', depth: 2, beam: [{ placements: [{ id: 3, cells: [{ x: 0, y: 0 }] }] }] };
+const coordinator = createNavigationCoordinator({ ticket, cursor: { depth: 1, nodeOffset: 10, rootChoice: 4 } });
+coordinator.observeProgress({ depth: 2, nodeOffset: 15, rootChoice: 4, checkpoint });
+const receipt = coordinator.complete({ placements: [{ id: 3, cells: [{ x: 4, y: 6 }] }] });
+assert.equal(receipt.schema, NAVIGATION_COORDINATOR_SCHEMA);
+assert.equal(receipt.status, 'completed');
+assert.equal(receipt.canonicalReplay, 'verified');
+assert.equal(receipt.cursor.checkpoint.schema, checkpoint.schema);
+assert.equal(receipt.ticket.threadId, 7);
+assert.throws(() => coordinator.observeProgress({ depth: 1, nodeOffset: 16, rootChoice: 4 }), /depth cannot move backward/);
+assert.throws(() => coordinator.observeProgress({ depth: 3, nodeOffset: 16, rootChoice: 5 }), /rootChoice cannot change/);
+console.log('navigation coordinator tests passed');
