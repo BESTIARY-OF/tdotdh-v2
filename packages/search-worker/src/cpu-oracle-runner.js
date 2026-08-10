@@ -11,16 +11,22 @@ function canonicalPlacementSignature(placements) {
   if (!Array.isArray(placements) || placements.length === 0) {
     throw new TypeError('candidate placements must be a non-empty array');
   }
+  const cells = placements.flatMap(placement => placement?.cells ?? []);
+  if (cells.length === 0) throw new TypeError('candidate placements must contain cells');
+  const origin = cells.reduce((bounds, cell) => {
+    const { x, y } = cellKey(cell).split(',').map(Number);
+    return { minX: Math.min(bounds.minX, x), minY: Math.min(bounds.minY, y) };
+  }, { minX: Number.POSITIVE_INFINITY, minY: Number.POSITIVE_INFINITY });
   return [...placements]
     .map((placement, index) => {
       const pieceId = String(placement?.pieceId ?? placement?.id ?? index);
-      const cells = [...(placement?.cells ?? [])].map(cellKey).sort((a, b) => {
+      const normalizedCells = [...(placement?.cells ?? [])].map(cell => `${cell.x - origin.minX},${cell.y - origin.minY}`).sort((a, b) => {
         const [ax, ay] = a.split(',').map(Number);
         const [bx, by] = b.split(',').map(Number);
         return ay - by || ax - bx;
       });
-      if (cells.length === 0) throw new TypeError(`placement ${pieceId} must contain cells`);
-      return `${pieceId}:${cells.join(';')}`;
+      if (normalizedCells.length === 0) throw new TypeError(`placement ${pieceId} must contain cells`);
+      return `${pieceId}:${normalizedCells.join(';')}`;
     })
     .sort()
     .join('|');

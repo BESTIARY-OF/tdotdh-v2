@@ -5,6 +5,8 @@ import { canonicalPlacementSignature, runCpuOracleBatch } from '../src/cpu-oracl
 const first = [{ pieceId: 2, cells: [{ x: 1, y: 0 }, { x: 0, y: 0 }] }, { pieceId: 1, cells: [{ x: 0, y: 1 }] }];
 const equivalent = [{ pieceId: 1, cells: [{ x: 0, y: 1 }] }, { pieceId: 2, cells: [{ x: 0, y: 0 }, { x: 1, y: 0 }] }];
 assert.equal(canonicalPlacementSignature(first), canonicalPlacementSignature(equivalent));
+const translated = first.map(placement => ({ ...placement, cells: placement.cells.map(cell => ({ x: cell.x + 17, y: cell.y - 9 })) }));
+assert.equal(canonicalPlacementSignature(first), canonicalPlacementSignature(translated));
 
 const request = createSearchRequest({
   type: 'start',
