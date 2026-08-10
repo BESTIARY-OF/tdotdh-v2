@@ -15,7 +15,13 @@ assert.deepEqual(unavailable, {
 });
 
 let deviceRequests = 0;
-const device = { label: 'fake-device' };
+const device = {
+  label: 'fake-device',
+  createShaderModule() { return {}; },
+  createComputePipeline() { return {}; },
+  createCommandEncoder() { return { beginComputePass() { return { setPipeline() {}, dispatchWorkgroups() {}, end() {} }; }, finish() { return {}; } }; },
+  queue: { submit() {}, async onSubmittedWorkDone() {} },
+};
 const cache = {
   async getDevice() { deviceRequests += 1; return device; },
   reset() { throw new Error('reset must not run for an available device'); },
@@ -31,6 +37,7 @@ assert.deepEqual(available, {
   deviceAvailable: true,
   requiredLimits: { maxStorageBufferBindingSize: 65536 },
   requiredLimitsSatisfied: true,
+  smoke: 'compute-dispatch-verified',
 });
 assert.equal(deviceRequests, 1);
 
@@ -47,5 +54,14 @@ assert.equal(rejected.schema, WEBGPU_EXECUTION_PROBE_SCHEMA);
 assert.equal(rejected.deviceAvailable, false);
 assert.equal(rejected.reason, 'webgpu-device-request-failed:device denied');
 assert.equal(resets, 1);
+
+const noSmoke = await probeWebGpuExecutionCapabilities({
+  gpu: { requestAdapter: async () => ({ limits: { maxStorageBufferBindingSize: 131072 } }) },
+  requiredLimits: { maxStorageBufferBindingSize: 65536 },
+  deviceCache: { async getDevice() { return { label: 'minimal-device' }; }, reset() {} },
+  smokeTest: false,
+});
+assert.equal(noSmoke.deviceAvailable, true);
+assert.equal(noSmoke.smoke, undefined);
 
 console.log('WebGPU execution probe tests passed');
