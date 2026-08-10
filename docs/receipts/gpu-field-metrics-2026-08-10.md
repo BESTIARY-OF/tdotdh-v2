@@ -13,6 +13,9 @@ The v2 search worker now exposes `tdotdh.webgpu-field-metrics.v0`.
 - Product receipt: `fieldMetrics: used` becomes `GPU field aggregates`; an
   unavailable adapter is reported as `fieldMetrics: fallback` and does not
   claim hardware execution.
+- Seed-lock and target-family construction now submit candidate groups through
+  the same aggregate adapter; the SEDLEC receipt therefore covers those paths
+  as well as breadth/depth beam expansion.
 
 Focused receipts pass with `node packages/search-core/test/webgpu-field-metrics.test.js`,
 `node apps/field-guide/test/v2-search-receipt.test.js`, and `npm run check`.

@@ -50,6 +50,8 @@ coordinate sums, and edge/corner coast flags. The CPU uses those verified
   aggregates to finish floating-point quality terms and family naming. The pass
   includes area, perimeter, bounds, coordinate sums, coast flags, and exact
   exterior-masked inlet-cell/inlet-edge counts. This keeps
+  locked-seed and target-family construction on the same batched contract as
+  breadth/depth beam expansion.
 the GPU path broad without accepting adapter-dependent floating-point ordering;
 the receipt reports `GPU field aggregates` only after exact integer parity.
 
