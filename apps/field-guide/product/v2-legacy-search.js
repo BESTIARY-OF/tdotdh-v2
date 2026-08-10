@@ -16,7 +16,7 @@ import { canonicalSignatureFromLabeledFrontierState } from '../../../packages/se
 import { DEFAULT_FRONTIER_GRID } from '../../../packages/search-core/src/webgpu-frontier-topology.js';
 import { MAX_FRONTIER_GENERATION_CANDIDATES } from '../../../packages/search-core/src/webgpu-frontier-generator.js';
 import { MAX_FRONTIER_TARGET_GENERATION_CANDIDATES } from '../../../packages/search-core/src/webgpu-frontier-target-generator.js';
-import { createWebGpuFrontierNavigationScheduler } from '../../../packages/search-core/src/webgpu-frontier-navigation-plan.js';
+import { createWebGpuFrontierNavigationScheduler, decodeWebGpuFrontierNavigationRow } from '../../../packages/search-core/src/webgpu-frontier-navigation-plan.js';
 
 function key(x, y) { return `${x},${y}`; }
 function adjacent(p) { return [{ x: p.x + 1, y: p.y }, { x: p.x - 1, y: p.y }, { x: p.x, y: p.y + 1 }, { x: p.x, y: p.y - 1 }]; }
@@ -1074,9 +1074,15 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         }
       }
     } else {
-      const navigationRows = [], navigationRefs = [];
+      const navigationRows = [], navigationRefs = [], targetPlanEntries = [], targetPieces = new Map();
+      const useFlatTargetPlan = useTargetGeneratedFrontier && typeof navigationScheduler.selectCandidateRecords === 'function';
       for (const [planIndex, plan] of beamPlans.entries()) {
         const state = plan.state, generatedByPiece = generatedByBeam?.[planIndex] || null, generatedByTarget = generatedByTargetBeam?.[planIndex] || null;
+        if (useFlatTargetPlan) {
+          targetPlanEntries.push({ planIndex, records: generatedByTarget?.records || [], targetPool: plan.targetPool });
+          targetPieces.set(planIndex, new Map(state.remaining.map(piece => [piece.id, piece])));
+          continue;
+        }
         if (useTargetGeneratedFrontier) {
           const remainingById = new Map(state.remaining.map(piece => [piece.id, piece]));
           for (const record of generatedByTarget?.records || []) {
@@ -1103,10 +1109,20 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
           }
         }
       }
-      const navigationPlan = await navigationScheduler.select(navigationRows, { planCount: beamPlans.length });
-      navigationPlanReceipt = { status: navigationPlan.status === 'completed' && navigationPlan.backend === 'webgpu' && navigationPlan.parity === 'verified' ? 'used' : navigationPlan.status, backend: navigationPlan.backend, parity: navigationPlan.parity, rowCount: navigationPlan.rowCount, selectedCount: navigationPlan.selectedCount, planCount: navigationPlan.planCount, inputDigest: navigationPlan.inputDigest, inputRepresentation: useTargetGeneratedFrontier ? 'flat-target-records' : 'materialized-candidates', ...(navigationPlan.reason ? { reason: navigationPlan.reason } : {}), ...(navigationPlan.dispatch ? { dispatch: navigationPlan.dispatch } : {}) };
+      const navigationPlan = useFlatTargetPlan
+        ? await navigationScheduler.selectCandidateRecords(targetPlanEntries, { planCount: beamPlans.length })
+        : await navigationScheduler.select(navigationRows, { planCount: beamPlans.length });
+      navigationPlanReceipt = { status: navigationPlan.status === 'completed' && navigationPlan.backend === 'webgpu' && navigationPlan.parity === 'verified' ? 'used' : navigationPlan.status, backend: navigationPlan.backend, parity: navigationPlan.parity, rowCount: navigationPlan.rowCount, selectedCount: navigationPlan.selectedCount, planCount: navigationPlan.planCount, inputDigest: navigationPlan.inputDigest, inputRepresentation: useFlatTargetPlan ? 'gpu-flat-target-records' : useTargetGeneratedFrontier ? 'flat-target-records' : 'materialized-candidates', ...(navigationPlan.reason ? { reason: navigationPlan.reason } : {}), ...(navigationPlan.dispatch ? { dispatch: navigationPlan.dispatch } : {}) };
       const selectedByPlan = new Map();
       for (const rowIndex of navigationPlan.selectedRows || []) {
+        if (useFlatTargetPlan) {
+          const row = decodeWebGpuFrontierNavigationRow(navigationPlan.plan, rowIndex), piece = targetPieces.get(row.planIndex)?.get(row.pieceId);
+          if (!piece) continue;
+          const entries = selectedByPlan.get(row.planIndex) || [];
+          entries.push({ piece, candidate: { id: piece.id, origin: { x: row.originX, y: row.originY }, cells: placedCells(piece, { x: row.originX, y: row.originY }) } });
+          selectedByPlan.set(row.planIndex, entries);
+          continue;
+        }
         const ref = navigationRefs[rowIndex];
         if (!ref) continue;
         const entries = selectedByPlan.get(ref.planIndex) || [];

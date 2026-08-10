@@ -92,10 +92,15 @@ function rowAt(plan, index) {
   };
 }
 
-export function createWebGpuFrontierNavigationPlan(rows = []) {
-  if (!Array.isArray(rows)) throw new TypeError('navigation plan rows must be an array');
-  const normalized = rows.map(normalizeRow), values = new Int32Array(normalized.length * FRONTIER_NAVIGATION_PLAN_STRIDE);
-  const groupMap = new Map(), groupIndices = new Uint32Array(normalized.length), groupRows = [];
+function finalizeNavigationPlan(values, groupIndices, groupRows) {
+  const rowCount = values.length / FRONTIER_NAVIGATION_PLAN_STRIDE;
+  const groupValues = new Uint32Array(groupRows.length * FRONTIER_NAVIGATION_GROUP_STRIDE);
+  groupRows.forEach((group, index) => groupValues.set([group.planIndex, group.targetOrdinal, group.count], index * FRONTIER_NAVIGATION_GROUP_STRIDE));
+  return Object.freeze({ schema: WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA, rowCount, stride: FRONTIER_NAVIGATION_PLAN_STRIDE, values, groupCount: groupRows.length, groupStride: FRONTIER_NAVIGATION_GROUP_STRIDE, groupIndices, groupValues, inputDigest: digest(values) });
+}
+
+function buildNavigationPlanFromNormalizedRows(normalized) {
+  const values = new Int32Array(normalized.length * FRONTIER_NAVIGATION_PLAN_STRIDE), groupMap = new Map(), groupIndices = new Uint32Array(normalized.length), groupRows = [];
   normalized.forEach((row, index) => {
     const base = index * FRONTIER_NAVIGATION_PLAN_STRIDE;
     values.set([row.planIndex, row.targetOrdinal, row.pieceId, row.candidateIndex, row.originX, row.originY, row.targetX, row.targetY], base);
@@ -109,9 +114,47 @@ export function createWebGpuFrontierNavigationPlan(rows = []) {
     groupIndices[index] = groupIndex;
     groupRows[groupIndex].count += 1;
   });
-  const groupValues = new Uint32Array(groupRows.length * FRONTIER_NAVIGATION_GROUP_STRIDE);
-  groupRows.forEach((group, index) => groupValues.set([group.planIndex, group.targetOrdinal, group.count], index * FRONTIER_NAVIGATION_GROUP_STRIDE));
-  return Object.freeze({ schema: WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA, rowCount: normalized.length, stride: FRONTIER_NAVIGATION_PLAN_STRIDE, values, groupCount: groupRows.length, groupStride: FRONTIER_NAVIGATION_GROUP_STRIDE, groupIndices, groupValues, inputDigest: digest(values) });
+  return finalizeNavigationPlan(values, groupIndices, groupRows);
+}
+
+export function createWebGpuFrontierNavigationPlan(rows = []) {
+  if (!Array.isArray(rows)) throw new TypeError('navigation plan rows must be an array');
+  return buildNavigationPlanFromNormalizedRows(rows.map(normalizeRow));
+}
+
+export function createWebGpuFrontierNavigationPlanFromCandidateRecords(entries = []) {
+  if (!Array.isArray(entries)) throw new TypeError('candidate-record navigation entries must be an array');
+  for (const [entryIndex, entry] of entries.entries()) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new TypeError(`candidate-record navigation entry ${entryIndex} must be an object`);
+    const records = entry.records, targetPool = entry.targetPool;
+    if (!Array.isArray(records)) throw new TypeError(`candidate-record navigation entry ${entryIndex}.records must be an array`);
+    if (!Array.isArray(targetPool)) throw new TypeError(`candidate-record navigation entry ${entryIndex}.targetPool must be an array`);
+    for (const [recordIndex, record] of records.entries()) {
+      if (!record || typeof record !== 'object' || Array.isArray(record)) throw new TypeError(`candidate record ${entryIndex}.${recordIndex} must be an object`);
+      const target = targetPool[record.targetOrdinal];
+      if (!target || !Number.isSafeInteger(target.x) || !Number.isSafeInteger(target.y)) throw new RangeError(`candidate record ${entryIndex}.${recordIndex} targetOrdinal is outside targetPool`);
+    }
+  }
+  const values = [], groupIndices = [], groupMap = new Map(), groupRows = [];
+  let rowIndex = 0;
+  for (const [entryIndex, entry] of entries.entries()) {
+    const planIndex = uint(entry.planIndex, 'planIndex', entryIndex);
+    for (const [recordIndex, record] of entry.records.entries()) {
+      const target = entry.targetPool[record.targetOrdinal], targetOrdinal = uint(record.targetOrdinal, 'targetOrdinal', recordIndex), pieceId = uint(record.pieceId, 'pieceId', recordIndex), candidateIndex = uint(record.inputOrdinal, 'inputOrdinal', recordIndex), originX = sint(record.originX, 'originX', recordIndex), originY = sint(record.originY, 'originY', recordIndex), targetX = sint(target.x, 'targetX', recordIndex), targetY = sint(target.y, 'targetY', recordIndex);
+      values.push(planIndex, targetOrdinal, pieceId, candidateIndex, originX, originY, targetX, targetY);
+      const groupKey = `${planIndex}:${targetOrdinal}`;
+      let groupIndex = groupMap.get(groupKey);
+      if (groupIndex == null) {
+        groupIndex = groupRows.length;
+        groupMap.set(groupKey, groupIndex);
+        groupRows.push({ planIndex, targetOrdinal, count: 0 });
+      }
+      groupIndices[rowIndex] = groupIndex;
+      groupRows[groupIndex].count += 1;
+      rowIndex += 1;
+    }
+  }
+  return finalizeNavigationPlan(new Int32Array(values), Uint32Array.from(groupIndices), groupRows);
 }
 
 export function cpuSelectFrontierNavigationRows(plan, { planCount = null } = {}) {
@@ -171,10 +214,8 @@ export function createWebGpuFrontierNavigationScheduler({ gpu = globalThis.navig
     if (!availabilityPromise) availabilityPromise = probeWebGpuCapabilities({ gpu, requiredLimits }).then(probe => probe.adapterAvailable && probe.requiredLimitsSatisfied ? Object.freeze({ schema: WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA, status: 'available', backend: 'webgpu' }) : Object.freeze({ schema: WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: probe.adapterAvailable ? 'webgpu-required-limits-unsatisfied' : 'webgpu-adapter-unavailable' }));
     return availabilityPromise;
   };
-  return Object.freeze({
-    availability,
-    async select(rows, options = {}) {
-      const plan = createWebGpuFrontierNavigationPlan(rows), oracle = cpuSelectFrontierNavigationRows(plan, options);
+  async function selectPlan(plan, options = {}) {
+      const oracle = cpuSelectFrontierNavigationRows(plan, options);
       if (!plan.rowCount || !oracle.planCount) return Object.freeze(oracle);
       if (typeof accelerator !== 'function') {
         const status = await availability();
@@ -189,6 +230,14 @@ export function createWebGpuFrontierNavigationScheduler({ gpu = globalThis.navig
         deviceCache.reset();
         return Object.freeze({ ...oracle, status: 'fallback', backend: 'cpu-oracle', reason: `navigation-accelerator-failed:${error?.message || String(error)}` });
       }
+  }
+  return Object.freeze({
+    availability,
+    async select(rows, options = {}) { return selectPlan(createWebGpuFrontierNavigationPlan(rows), options); },
+    async selectCandidateRecords(entries, options = {}) {
+      const plan = createWebGpuFrontierNavigationPlanFromCandidateRecords(entries);
+      const result = await selectPlan(plan, options);
+      return Object.freeze({ ...result, plan });
     },
   });
 }

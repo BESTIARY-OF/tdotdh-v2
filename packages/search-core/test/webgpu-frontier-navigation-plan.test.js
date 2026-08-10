@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createWebGpuFrontierNavigationPlan, createWebGpuFrontierNavigationScheduler, cpuSelectFrontierNavigationRows, decodeWebGpuFrontierNavigationRow, FRONTIER_NAVIGATION_GROUP_STRIDE, FRONTIER_NAVIGATION_PLAN_SHADER, WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA } from '../src/webgpu-frontier-navigation-plan.js';
+import { createWebGpuFrontierNavigationPlan, createWebGpuFrontierNavigationPlanFromCandidateRecords, createWebGpuFrontierNavigationScheduler, cpuSelectFrontierNavigationRows, decodeWebGpuFrontierNavigationRow, FRONTIER_NAVIGATION_GROUP_STRIDE, FRONTIER_NAVIGATION_PLAN_SHADER, WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA } from '../src/webgpu-frontier-navigation-plan.js';
 
 const rows = [
   { planIndex: 0, targetOrdinal: 1, pieceId: 4, candidateIndex: 0, originX: 2, originY: 3, targetX: 2, targetY: 4 },
@@ -29,4 +29,24 @@ assert.equal(verified.dispatch, 'fake-navigation-dispatch');
 const fallback = await createWebGpuFrontierNavigationScheduler().select(rows, { planCount: 2 });
 assert.equal(fallback.backend, 'cpu-oracle');
 assert.equal(fallback.parity, 'oracle');
+const flat = createWebGpuFrontierNavigationPlanFromCandidateRecords([
+  { planIndex: 0, records: [
+    { pieceId: 4, targetOrdinal: 1, originX: 2, originY: 3, inputOrdinal: 0 },
+    { pieceId: 5, targetOrdinal: 1, originX: 3, originY: 3, inputOrdinal: 1 },
+    { pieceId: 4, targetOrdinal: 0, originX: 1, originY: 3, inputOrdinal: 2 },
+  ], targetPool: [{ x: 1, y: 4 }, { x: 2, y: 4 }] },
+  { planIndex: 1, records: [{ pieceId: 7, targetOrdinal: 0, originX: -1, originY: 2, inputOrdinal: 0 }], targetPool: [{ x: -1, y: 3 }] },
+]);
+assert.equal(flat.rowCount, 4);
+assert.deepEqual(decodeWebGpuFrontierNavigationRow(flat, 0), { planIndex: 0, targetOrdinal: 1, pieceId: 4, candidateIndex: 0, originX: 2, originY: 3, targetX: 2, targetY: 4 });
+assert.deepEqual(Array.from(cpuSelectFrontierNavigationRows(flat, { planCount: 2 }).selectedRows), [2, 3]);
+const flatScheduler = createWebGpuFrontierNavigationScheduler({ accelerator: async ({ oracle: expected }) => ({ status: 'completed', selectedRows: expected.selectedRows, dispatch: 'fake-flat-record-dispatch' }) });
+const flatReceipt = await flatScheduler.selectCandidateRecords([
+  { planIndex: 0, records: [{ pieceId: 4, targetOrdinal: 0, originX: 1, originY: 3, inputOrdinal: 2 }], targetPool: [{ x: 1, y: 4 }] },
+  { planIndex: 1, records: [{ pieceId: 7, targetOrdinal: 0, originX: -1, originY: 2, inputOrdinal: 0 }], targetPool: [{ x: -1, y: 3 }] },
+], { planCount: 2 });
+assert.equal(flatReceipt.backend, 'webgpu');
+assert.equal(flatReceipt.parity, 'verified');
+assert.equal(flatReceipt.dispatch, 'fake-flat-record-dispatch');
+assert.equal(flatReceipt.plan.rowCount, 2);
 console.log('WebGPU frontier navigation-plan tests passed');
