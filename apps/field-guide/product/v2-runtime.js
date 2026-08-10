@@ -2,6 +2,8 @@ import { createDisplayGeometry } from '../../../packages/domain/src/display-geom
 import { createRendererRequest } from '../../../packages/browser-handoff/src/renderer-boundary.js';
 import { createRendererAdapter } from '../../../packages/browser-handoff/src/renderer-adapter-capability.js';
 import { createCpuOracleFirstAdapter } from '../../../packages/search-core/src/compute-adapter.js';
+import { createWebGpuDeviceCache } from '../../../packages/search-core/src/webgpu-device-cache.js';
+import { probeWebGpuExecutionCapabilities } from '../../../packages/search-core/src/webgpu-execution-probe.js';
 import { createWebGpuCandidateScorer, cpuCandidateScores } from '../../../packages/search-core/src/webgpu-candidate-scorer.js';
 import { createWebGpuCandidatePrefilter, cpuCandidatePrefilter } from '../../../packages/search-core/src/webgpu-candidate-prefilter.js';
 import { createWebGpuFrontierTargetPool, cpuGenerateFrontierTargetPoolBatch } from '../../../packages/search-core/src/webgpu-frontier-target-pool.js';
@@ -20,10 +22,11 @@ const cpuOracleFirst = createCpuOracleFirstAdapter({
 
 const workerUrl = new URL('./v2-search-worker.js', import.meta.url);
 const cpuWorker = new Worker(workerUrl, { type: 'module' });
-const gpuScorer = createWebGpuCandidateScorer();
-const gpuCandidatePrefilter = createWebGpuCandidatePrefilter();
-const gpuFrontierTargetPool = createWebGpuFrontierTargetPool();
-const gpuFrontierDeduplicator = createWebGpuFrontierDeduplicator();
+const gpuDeviceCache = createWebGpuDeviceCache();
+const gpuScorer = createWebGpuCandidateScorer({ deviceCache: gpuDeviceCache });
+const gpuCandidatePrefilter = createWebGpuCandidatePrefilter({ deviceCache: gpuDeviceCache });
+const gpuFrontierTargetPool = createWebGpuFrontierTargetPool({ deviceCache: gpuDeviceCache });
+const gpuFrontierDeduplicator = createWebGpuFrontierDeduplicator({ deviceCache: gpuDeviceCache });
 
 async function runCandidateParity(candidates) {
   const cpu = cpuCandidatePrefilter(candidates);
@@ -44,6 +47,7 @@ window.__TDOTDH_V2_RUNTIME__ = Object.freeze({
   cpuOracleFirst,
   cpuWorker,
   gpuScorer,
+  gpuDeviceCache,
   gpuCandidatePrefilter,
   gpuFrontierTargetPool,
   gpuFrontierDeduplicator,
@@ -84,6 +88,12 @@ cpuWorker.postMessage({
 void gpuScorer.availability().then(async capability => {
   if (capability.status !== 'available') {
     if (status) { status.textContent = `V2 product · CPU oracle active · WebGPU unavailable (${capability.reason || 'adapter unavailable'})`; status.title = 'This page did not obtain a usable WebGPU adapter. Chrome hardware acceleration can still be enabled independently.'; }
+    return;
+  }
+  const execution = await probeWebGpuExecutionCapabilities({ deviceCache: gpuDeviceCache, requiredLimits: { maxStorageBufferBindingSize: 65536 } });
+  window.__TDOTDH_V2_RUNTIME__ = Object.freeze({ ...window.__TDOTDH_V2_RUNTIME__, gpuExecution: execution });
+  if (!execution.deviceAvailable) {
+    if (status) { status.textContent = `V2 product · CPU oracle active · WebGPU unavailable (${execution.reason})`; status.title = 'The page exposed a WebGPU adapter but could not create a usable device, so accelerated search remains disabled.'; }
     return;
   }
   const values = [0, 1, 17, 255];
