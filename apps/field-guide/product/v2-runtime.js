@@ -1,6 +1,7 @@
 import { createDisplayGeometry } from '../../../packages/domain/src/display-geometry.js';
 import { createRendererRequest } from '../../../packages/browser-handoff/src/renderer-boundary.js';
 import { createCpuOracleFirstAdapter } from '../../../packages/search-core/src/compute-adapter.js';
+import { createWebGpuCandidateScorer, cpuCandidateScores } from '../../../packages/search-core/src/webgpu-candidate-scorer.js';
 
 const geometry = createDisplayGeometry({ kind: 'flatland', dimension: 2 });
 const cpuOracle = async request => ({
@@ -14,6 +15,7 @@ const cpuOracleFirst = createCpuOracleFirstAdapter({
 
 const workerUrl = new URL('./v2-search-worker.js', import.meta.url);
 const cpuWorker = new Worker(workerUrl, { type: 'module' });
+const gpuScorer = createWebGpuCandidateScorer();
 
 window.__TDOTDH_V2_RUNTIME__ = Object.freeze({
   product: 'nonomino-field-guide',
@@ -21,6 +23,7 @@ window.__TDOTDH_V2_RUNTIME__ = Object.freeze({
   geometry,
   cpuOracleFirst,
   cpuWorker,
+  gpuScorer,
   workerUrl: workerUrl.href,
   rendererRequest: cells => createRendererRequest({ geometry, cells }),
   acceleration: cpuOracleFirst.availability(),
@@ -52,3 +55,13 @@ cpuWorker.postMessage({
   constraints: { candidateArrangements: [[{ pieceId: 1, cells: [{ x: 0, y: 0 }] }]] },
   knownSignatureHints: [],
 });
+
+void gpuScorer.availability().then(async capability => {
+  if (capability.status !== 'available') return;
+  const values = [0, 1, 17, 255];
+  const gpuResult = await gpuScorer.score(values);
+  const parity = gpuResult.status === 'completed' && JSON.stringify(gpuResult.scores) === JSON.stringify(cpuCandidateScores(values));
+  if (status) status.textContent = parity
+    ? 'V2 product · WebGPU candidate parity verified · search still CPU-oracle'
+    : 'V2 product · WebGPU candidate parity failed · CPU oracle active';
+}).catch(() => {});
