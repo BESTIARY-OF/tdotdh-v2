@@ -5,6 +5,7 @@ import { cpuTransitionLabeledFrontierStates } from '../../../packages/search-cor
 import { cpuFrontierTopology } from '../../../packages/search-core/src/webgpu-frontier-topology.js';
 import { cpuEvaluateFieldMetrics } from '../../../packages/search-core/src/webgpu-field-metrics.js';
 import { cpuGenerateFrontierTargetBatch } from '../../../packages/search-core/src/webgpu-frontier-target-generator.js';
+import { cpuGenerateFrontierTargetPoolBatch } from '../../../packages/search-core/src/webgpu-frontier-target-pool.js';
 
 globalThis.postMessage = () => {};
 
@@ -59,6 +60,10 @@ const frontierTargetGenerator = {
   availability: async () => ({ status: 'available', backend: 'webgpu' }),
   generateBatch: async inputs => ({ ...cpuGenerateFrontierTargetBatch(inputs), status: 'completed', backend: 'test-frontier-target-generator', parity: 'verified' }),
 };
+const frontierTargetPool = {
+  availability: async () => ({ status: 'available', backend: 'webgpu' }),
+  generateBatch: async inputs => ({ ...cpuGenerateFrontierTargetPoolBatch(inputs), status: 'completed', backend: 'test-frontier-target-pool', parity: 'verified' }),
+};
 const frontierTopology = {
   evaluate: async input => ({ ...cpuFrontierTopology(input), backend: 'test-frontier-topology', parity: 'verified' }),
 };
@@ -74,6 +79,7 @@ const sharedOptions = {
 const singleResult = await search(pieces, [], { ...sharedOptions, frontierGenerator: singleFrontierGenerator });
 const result = await search(pieces, [], { ...sharedOptions, frontierGenerator });
 const targetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator });
+const targetPoolResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator, frontierTargetPool });
 
 assert.equal(result.type, 'done');
 assert.deepEqual(singleResult.prefilter, { status: 'used', backend: 'test-compute-shader', candidateCount: 6 });
@@ -98,4 +104,9 @@ assert.equal(targetResult.frontierTargetGeneration.status, 'used');
 assert.equal(targetResult.frontierTargetGeneration.backend, 'test-frontier-target-generator');
 assert.deepEqual(targetResult.placements, result.placements);
 assert.deepEqual(targetResult.metrics, result.metrics);
+assert.equal(targetPoolResult.frontierTargetPool.status, 'used');
+assert.equal(targetPoolResult.frontierTargetPool.backend, 'test-frontier-target-pool');
+assert.equal(targetPoolResult.frontierTargetPool.batch, 'beam');
+assert.deepEqual(targetPoolResult.placements, result.placements);
+assert.deepEqual(targetPoolResult.metrics, result.metrics);
 console.log('v2 product search receipt test passed');

@@ -41,6 +41,12 @@ The v2 search worker now exposes `tdotdh.webgpu-field-metrics.v0`.
   former JavaScript-sort capacity cliff for large family buckets; parity with
   the CPU ordering oracle remains mandatory, and device storage limits still
   trigger an explicit CPU fallback.
+- Beam target-pool construction is now a batched occupancy-neighborhood
+  contract: GPU masks classify open cells adjacent to the field and open cells
+  adjacent to the centroid. The CPU retains only the historical insertion
+  order while consuming those parity-verified masks. The benchmark receipt
+  records this separately as `frontierTargetPool`; it is a navigation contract,
+  not a hardware timing claim.
 
 Focused receipts pass with `node packages/search-core/test/webgpu-field-metrics.test.js`,
 `node apps/field-guide/test/v2-search-receipt.test.js`, and `npm run check`.

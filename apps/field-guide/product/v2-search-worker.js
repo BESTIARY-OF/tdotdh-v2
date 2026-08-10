@@ -4,6 +4,7 @@ import { createWebGpuFrontierValidator } from '../../../packages/search-core/src
 import { createWebGpuFrontierEvaluator } from '../../../packages/search-core/src/webgpu-frontier-evaluator.js';
 import { createWebGpuFrontierGenerator } from '../../../packages/search-core/src/webgpu-frontier-generator.js';
 import { createWebGpuFrontierTargetGenerator } from '../../../packages/search-core/src/webgpu-frontier-target-generator.js';
+import { createWebGpuFrontierTargetPool } from '../../../packages/search-core/src/webgpu-frontier-target-pool.js';
 import { createWebGpuFrontierMetrics } from '../../../packages/search-core/src/webgpu-frontier-metrics.js';
 import { createWebGpuFieldMetrics } from '../../../packages/search-core/src/webgpu-field-metrics.js';
 import { createWebGpuLabeledFrontierState } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
@@ -18,6 +19,7 @@ const frontierValidator = createWebGpuFrontierValidator({ gpu: globalThis.naviga
 const frontierEvaluator = createWebGpuFrontierEvaluator({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierGenerator = createWebGpuFrontierGenerator({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierTargetGenerator = createWebGpuFrontierTargetGenerator({ gpu: globalThis.navigator?.gpu, deviceCache });
+const frontierTargetPool = createWebGpuFrontierTargetPool({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierMetrics = createWebGpuFrontierMetrics({ gpu: globalThis.navigator?.gpu, deviceCache });
 const fieldMetrics = createWebGpuFieldMetrics({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierState = createWebGpuLabeledFrontierState({ gpu: globalThis.navigator?.gpu, deviceCache });
@@ -35,6 +37,7 @@ async function runProductSearch(request, context) {
     frontierEvaluator,
     frontierGenerator,
     frontierTargetGenerator,
+    frontierTargetPool,
     frontierMetrics,
     fieldMetrics,
     frontierState,
@@ -64,7 +67,7 @@ self.onmessage = event => {
     return;
   }
   try {
-      void search(message?.pieces, message?.knownCentroidFamilies || [], { ...message, candidatePrefilter, frontierValidator, frontierEvaluator, frontierGenerator, frontierTargetGenerator, frontierMetrics, fieldMetrics, frontierState, frontierTopology, frontierRanker })
+      void search(message?.pieces, message?.knownCentroidFamilies || [], { ...message, candidatePrefilter, frontierValidator, frontierEvaluator, frontierGenerator, frontierTargetGenerator, frontierTargetPool, frontierMetrics, fieldMetrics, frontierState, frontierTopology, frontierRanker })
       .then(result => self.postMessage(result))
       .catch(error => self.postMessage({ type: 'done', placements: null, metrics: null, nodes: 0, error: error.message }));
   } catch (error) {

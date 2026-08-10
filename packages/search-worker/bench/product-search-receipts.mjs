@@ -5,6 +5,7 @@ import { cpuEvaluateFieldMetrics } from '../../../packages/search-core/src/webgp
 import { cpuTransitionLabeledFrontierStates } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 import { cpuFrontierTopology } from '../../../packages/search-core/src/webgpu-frontier-topology.js';
 import { cpuGenerateFrontierTargetBatch } from '../../../packages/search-core/src/webgpu-frontier-target-generator.js';
+import { cpuGenerateFrontierTargetPoolBatch } from '../../../packages/search-core/src/webgpu-frontier-target-pool.js';
 
 globalThis.postMessage = () => {};
 
@@ -68,6 +69,21 @@ function createBenchFrontierTargetGenerator() {
   };
 }
 
+function createBenchFrontierTargetPool() {
+  const receipt = { batches: 0, states: 0, cells: 0 };
+  return {
+    receipt,
+    availability: async () => ({ status: 'available', backend: 'benchmark' }),
+    generateBatch: async inputs => {
+      receipt.batches += 1;
+      receipt.states += inputs.length;
+      const result = cpuGenerateFrontierTargetPoolBatch(inputs);
+      receipt.cells += result.items.reduce((sum, item) => sum + item.frontierCells.length + item.ringCells.length, 0);
+      return { ...result, backend: 'benchmark', parity: 'verified' };
+    },
+  };
+}
+
 function createBenchFieldMetrics() {
   const receipt = { batches: 0, candidates: 0 };
   return {
@@ -101,9 +117,10 @@ async function run(mode, options = {}) {
   const fieldMetrics = createBenchFieldMetrics();
   const frontierState = createBenchFrontierState();
   const frontierTargetGenerator = createBenchFrontierTargetGenerator();
+  const frontierTargetPool = createBenchFrontierTargetPool();
   const frontierTopology = createBenchFrontierTopology();
   const started = performance.now();
-  const result = await search(pieces, [], { searchStrategy: mode, candidatePrefilter, frontierMetrics, fieldMetrics, frontierState, frontierTargetGenerator, frontierTopology, ...options });
+  const result = await search(pieces, [], { searchStrategy: mode, candidatePrefilter, frontierMetrics, fieldMetrics, frontierState, frontierTargetGenerator, frontierTargetPool, frontierTopology, ...options });
   return {
     mode,
     elapsedMs: Number((performance.now() - started).toFixed(2)),
@@ -115,6 +132,7 @@ async function run(mode, options = {}) {
     fieldMetrics: fieldMetrics.receipt,
     frontierState: frontierState.receipt,
     frontierTargetGeneration: frontierTargetGenerator.receipt,
+    frontierTargetPool: frontierTargetPool.receipt,
     frontierTopology: frontierTopology.receipt,
     result,
   };

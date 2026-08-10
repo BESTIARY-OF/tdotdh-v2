@@ -45,6 +45,12 @@ direction and then rediscovering the selected target on the CPU. The older
 all-frontier generator remains available for recursive compatibility and
 fallback.
 
+Before target×piece generation, a target-pool contract now classifies every
+retained state's open cells into ordinary frontier cells and centroid-ring
+cells in one batched occupancy-neighborhood dispatch. The CPU preserves the
+legacy insertion order when consuming the parity-verified masks, so SEDLEC
+beam semantics remain unchanged while target eligibility is GPU-first.
+
 The branch-ranking boundary is also parity-gated. Candidate scores and stable
 ties are submitted to a multi-pass bitonic WebGPU sort over a padded storage
 buffer, so family buckets are no longer capped at 128 rows or silently sorted
