@@ -199,6 +199,13 @@ function centroidSeedInfoFromGpuState(placements, centroidId, gpuState) {
   const ids = [...touching.keys()].sort((a, b) => a - b), seed = ids.map(id => `#${String(id).padStart(2, '0')}[${touching.get(id).join(';')}]`).join('|') || 'none';
   return { family: ids.length ? ids.map(id => `#${String(id).padStart(2, '0')}`).join(' + ') : 'none', seed, id: seedFamilyId(seed), neighborCount: ids.length };
 }
+function sameGpuState(left, right) {
+  if (!left || !right || left.wordCount !== right.wordCount || left.pieceIds.length !== right.pieceIds.length || left.remainingMask.length !== right.remainingMask.length || left.nextLabels.length !== right.nextLabels.length) return false;
+  for (let index = 0; index < left.pieceIds.length; index++) if (left.pieceIds[index] !== right.pieceIds[index]) return false;
+  for (let index = 0; index < left.remainingMask.length; index++) if (left.remainingMask[index] !== right.remainingMask[index]) return false;
+  for (let index = 0; index < left.nextLabels.length; index++) if (left.nextLabels[index] !== right.nextLabels[index]) return false;
+  return true;
+}
 function seedFamilyId(seed) {
   let hash = 2166136261;
   for (let index = 0; index < seed.length; index++) { hash ^= seed.charCodeAt(index); hash = Math.imul(hash, 16777619); }
@@ -373,7 +380,7 @@ async function evaluateFrontierState(entries, state, frontierState, onState = ()
         const nextLabels = result.nextLabels.slice(labelStart, labelStart + labelsPerCandidate);
         const canonicalLabels = result.canonicalLabels.slice(labelStart, labelStart + labelsPerCandidate);
         const remainingMask = Array.from(candidates[index].remainingMask);
-        return { ...entry, gpuState: { absoluteHash: result.absoluteHashes[index], canonicalHash: result.canonicalHashes[index], nextLabels, canonicalLabels, pieceIds: result.pieceIds, wordCount, remainingMask, stateKey: `${result.pieceIds.join(',')}:${remainingMask.join(',')}:${nextLabels.join(',')}` } };
+        return { ...entry, gpuState: { absoluteHash: result.absoluteHashes[index], canonicalHash: result.canonicalHashes[index], nextLabels, canonicalLabels, pieceIds: result.pieceIds, wordCount, remainingMask } };
       });
     }
     onState({ status: 'fallback', reason: result?.reason || 'frontier-state-unavailable' });
@@ -577,7 +584,8 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   for (let depth = 0; depth < pieceCount - 1 && beam.length && nodes < NODE_LIMIT; depth++) {
     if (isCancelled()) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt };
     const nextBeam = [];
-    const stateKeys = new Set();
+    const gpuStateBuckets = new Map();
+    const cpuStateKeys = new Set();
     for (const state of beam) {
       if (isCancelled()) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt };
       if (nodes >= NODE_LIMIT) break;
@@ -636,8 +644,15 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       for (const option of ranked) {
         const placements = [...state.placements, option.candidate], metrics = option.metrics, field = new Set(state.field); option.candidate.cells.forEach(c => field.add(key(c.x, c.y)));
         if (metrics.holes > 0) continue;
-        if (option.gpuState?.stateKey && stateKeys.has(option.gpuState.stateKey)) continue;
-        if (option.gpuState?.stateKey) stateKeys.add(option.gpuState.stateKey);
+        if (option.gpuState) {
+          const hash = String(option.gpuState.absoluteHash >>> 0), bucket = gpuStateBuckets.get(hash) || [];
+          if (bucket.some(existing => sameGpuState(existing, option.gpuState))) continue;
+          bucket.push(option.gpuState); gpuStateBuckets.set(hash, bucket);
+        } else {
+          const cpuStateKey = arrangementSignature(placements);
+          if (cpuStateKeys.has(cpuStateKey)) continue;
+          cpuStateKeys.add(cpuStateKey);
+        }
         const familyId = metrics.centroidFamilyId;
         nextBeam.push({ placements, field, remaining: state.remaining.filter(p => p.id !== option.piece.id), bounds: metrics, score: option.score + (targetFamily && targetSeedCompatible(metrics.centroidSeed, targetSeed) ? -220 : 0), hintMatches: option.hintMatches, centroidFamily: metrics.centroidFamily, centroidFamilyId: familyId, centroidSeed: metrics.centroidSeed, gpuState: option.gpuState || null });
       }

@@ -55,3 +55,8 @@ Family derivation now consumes the labeled-state readback rather than rescanning
 all placed cells. Only the centroid boundary is inspected on the CPU to rebuild
 the existing contact signature and FNV family ID, so GPU-labeled state is the
 source of truth while the public family identifiers remain unchanged.
+
+Beam deduplication is likewise hash-guided: the GPU labeled-state pass supplies
+an absolute state hash, and the CPU performs the full label comparison only for
+hash collisions. No correctness decision relies on a hash alone, and the CPU
+fallback retains the previous exact arrangement-signature behavior.
