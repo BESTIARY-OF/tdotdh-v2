@@ -174,10 +174,10 @@ async function generateFrontierTranslationsAcrossBeam(plans, frontierGenerator, 
   const planGroups = [];
   for (const [planIndex, plan] of plans.entries()) {
     const fieldCells = [...plan.state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
-    let group = { inputs: [], refs: [], candidateCount: 0 };
+    let group = { planIndex, inputs: [], refs: [], candidateCount: 0 };
     for (const piece of plan.state.remaining) {
       const input = { pieceId: `${planIndex}:${piece.id}`, fieldCells, pieceCells: applyLock(piece), bounds: plan.state.bounds }, count = fieldCells.length * 4 * input.pieceCells.length;
-      if (group.inputs.length && group.candidateCount + count > MAX_FRONTIER_GENERATION_CANDIDATES) { planGroups.push(group); group = { inputs: [], refs: [], candidateCount: 0 }; }
+      if (group.inputs.length && group.candidateCount + count > MAX_FRONTIER_GENERATION_CANDIDATES) { planGroups.push(group); group = { planIndex, inputs: [], refs: [], candidateCount: 0 }; }
       group.inputs.push(input); group.refs.push({ planIndex, piece }); group.candidateCount += count;
     }
     if (group.inputs.length) planGroups.push(group);
@@ -185,9 +185,9 @@ async function generateFrontierTranslationsAcrossBeam(plans, frontierGenerator, 
   const chunks = [];
   for (const group of planGroups) {
     const previous = chunks[chunks.length - 1];
-    if (previous && previous.candidateCount + group.candidateCount <= MAX_FRONTIER_GENERATION_CANDIDATES) {
+    if (previous && previous.planIndex === group.planIndex && previous.candidateCount + group.candidateCount <= MAX_FRONTIER_GENERATION_CANDIDATES) {
       previous.inputs.push(...group.inputs); previous.refs.push(...group.refs); previous.candidateCount += group.candidateCount;
-    } else chunks.push({ inputs: [...group.inputs], refs: [...group.refs], candidateCount: group.candidateCount });
+    } else chunks.push({ planIndex: group.planIndex, inputs: [...group.inputs], refs: [...group.refs], candidateCount: group.candidateCount });
   }
   const items = [];
   let totalCandidateCount = 0, batches = 0, backend = 'compute-shader', parity = 'verified', recordBackend = 'cpu-oracle', recordParity = 'oracle', recordInputCount = 0, recordOutputCount = 0;
