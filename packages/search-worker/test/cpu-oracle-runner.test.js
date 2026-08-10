@@ -32,4 +32,12 @@ const resumed = await runCpuOracleBatch({ ...request, cursor: { ...request.curso
 assert.equal(resumed.canonicalSignatures.length, 1);
 assert.equal(resumed.cursor.nodeOffset, 3);
 
+const prefiltered = await runCpuOracleBatch(request, {
+  candidatePrefilter: { prefilter: async () => ({ status: 'completed', backend: 'webgpu', validity: [0, 1, 0] }) },
+});
+assert.equal(prefiltered.canonicalSignatures.length, 1);
+assert.equal(prefiltered.canonicalSignatures[0], canonicalPlacementSignature(equivalent));
+assert.equal(prefiltered.prefilter.status, 'used');
+assert.equal(prefiltered.nodes, 2);
+
 console.log('CPU oracle runner tests passed');

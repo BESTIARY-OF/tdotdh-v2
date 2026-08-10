@@ -38,7 +38,7 @@ function clone(value) {
  * establishes the v2 ticket/cursor/signature seam that a compute backend must
  * match exactly before it can be enabled.
  */
-export async function runCpuOracleBatch(input, { reportProgress = () => {}, isCancelled = () => false } = {}) {
+export async function runCpuOracleBatch(input, { reportProgress = () => {}, isCancelled = () => false, candidatePrefilter = null } = {}) {
   const request = input?.type === 'start' ? createSearchRequest(input) : input;
   if (!request?.ticket || !request?.cursor || !request?.budget) throw new TypeError('a normalized search request is required');
   const candidates = request.constraints?.candidateArrangements;
@@ -46,12 +46,29 @@ export async function runCpuOracleBatch(input, { reportProgress = () => {}, isCa
 
   const start = request.cursor.nodeOffset;
   const limit = Math.min(request.budget.maxNodes, candidates.length - start);
+  let prefilterReceipt = null;
+  let validity = null;
+  if (candidatePrefilter?.prefilter && typeof candidatePrefilter.prefilter === 'function') {
+    const candidateResult = await candidatePrefilter.prefilter(candidates);
+    if (candidateResult?.status === 'completed' && Array.isArray(candidateResult.validity) && candidateResult.validity.length === candidates.length) {
+      validity = candidateResult.validity;
+      prefilterReceipt = { status: 'used', backend: candidateResult.backend || 'compute-shader', candidateCount: candidates.length };
+    } else {
+      prefilterReceipt = { status: 'fallback', reason: candidateResult?.reason || 'prefilter-unavailable' };
+    }
+  }
   const signatures = [];
   let selectedPlacements = [];
   let nodes = 0;
 
   for (let index = 0; index < limit; index += 1) {
     if (isCancelled()) break;
+    if (validity && validity[start + index] !== 1) {
+      nodes += 1;
+      reportProgress({ nodes, depth: request.cursor.depth, frontier: 0, families: signatures.length, cursor: { ...request.cursor, nodeOffset: start + index + 1 } });
+      await Promise.resolve();
+      continue;
+    }
     const placements = clone(candidates[start + index]);
     const signature = canonicalPlacementSignature(placements);
     if (!signatures.includes(signature) && !request.knownSignatureHints.includes(signature)) {
@@ -70,6 +87,7 @@ export async function runCpuOracleBatch(input, { reportProgress = () => {}, isCa
     cursor: { ...request.cursor, nodeOffset: start + nodes },
     ticket: { ...request.ticket },
     cancelled: isCancelled(),
+    ...(prefilterReceipt ? { prefilter: prefilterReceipt } : {}),
   };
 }
 
