@@ -49,7 +49,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   var centroidSumY: i32 = 0;
   var centroidEdgeCoast: i32 = 0;
   var centroidCornerCoast: i32 = 0;
-  for (var y: i32 = params.originY; y < params.originY + i32(params.height); y++) for (var x: i32 = params.originX; x < params.originX + i32(params.width); x++) {
+  for (var y: i32 = params.originY; y < params.originY + i32(params.height); y++) {
+    for (var x: i32 = params.originX; x < params.originX + i32(params.width); x++) {
     let occupied = occupiedBit(base, x, y);
     let centroid = centroidBit(base, x, y);
     if (occupied == 1u) {
@@ -62,9 +63,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (centroid == 1u) {
       centroidCount += 1; centroidSumX += x; centroidSumY += y;
       if (occupiedBit(base, x + 1, y) == 0u || occupiedBit(base, x - 1, y) == 0u || occupiedBit(base, x, y + 1) == 0u || occupiedBit(base, x, y - 1) == 0u) { centroidEdgeCoast = 1; }
-      for (var dx: i32 = -1; dx <= 1; dx++) for (var dy: i32 = -1; dy <= 1; dy++) if ((dx != 0 || dy != 0) && abs(dx) == 1 && abs(dy) == 1 && occupiedBit(base, x + dx, y + dy) == 0u) { centroidCornerCoast = 1; }
+      for (var dx: i32 = -1; dx <= 1; dx++) {
+        for (var dy: i32 = -1; dy <= 1; dy++) {
+          if ((dx != 0 || dy != 0) && abs(dx) == 1 && abs(dy) == 1 && occupiedBit(base, x + dx, y + dy) == 0u) { centroidCornerCoast = 1; }
+        }
+      }
+    }
     }
   }
+  if (area == 0) { minX = 0; maxX = 0; minY = 0; maxY = 0; }
   let output = id.x * ${FIELD_METRIC_COUNT}u;
   outputMetrics[output + 0u] = area;
   outputMetrics[output + 1u] = perimeter;

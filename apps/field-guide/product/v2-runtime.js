@@ -89,6 +89,6 @@ void gpuScorer.availability().then(async capability => {
   const prefilterParity = prefilterResult.status === 'completed'
     && JSON.stringify(prefilterResult.validity) === JSON.stringify(cpuCandidatePrefilter(candidates).validity);
   status.textContent = prefilterParity
-    ? 'V2 product · WebGPU parity gates loaded · search still CPU-oracle'
+    ? 'V2 product · GPU-capable search worker loaded · CPU oracle fallback ready'
     : 'V2 product · WebGPU candidate parity failed · CPU oracle active';
 }).catch(() => {});

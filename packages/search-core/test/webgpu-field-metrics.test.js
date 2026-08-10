@@ -10,6 +10,8 @@ const candidate = createFieldMetricsCandidate({ occupiedCells, centroidCells });
 const cpu = cpuEvaluateFieldMetrics([candidate]);
 assert.equal(cpu.schema, WEBGPU_FIELD_METRICS_SCHEMA);
 assert.deepEqual(cpu.metrics[0].slice(0, 13), [6, 10, 0, 2, 0, 1, 6, 3, 1, 1, 0, 1, 1]);
+const empty = { occupiedMask: new Uint32Array(candidate.occupiedMask.length), centroidMask: new Uint32Array(candidate.centroidMask.length) };
+assert.deepEqual(cpuEvaluateFieldMetrics([empty]).metrics[0].slice(0, 6), [0, 0, 0, 0, 0, 0]);
 
 const unavailable = createWebGpuFieldMetrics({ gpu: null });
 const result = await unavailable.evaluate([candidate]);
