@@ -178,6 +178,15 @@ export function canonicalSignatureFromLabeledFrontierState({ pieceIds, canonical
 function unavailable(reason, grid, cpu, extra = {}) { return Object.freeze({ schema: WEBGPU_LABELED_FRONTIER_STATE_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: String(reason), grid, pieceIds: cpu.pieceIds, nextLabels: cpu.nextLabels, canonicalLabels: cpu.canonicalLabels, absoluteHashes: cpu.absoluteHashes, canonicalHashes: cpu.canonicalHashes, candidateCount: cpu.candidateCount, wordCount: cpu.wordCount, pieceCount: cpu.pieceCount, ...extra }); }
 
 function flatten(candidates, property, width) { const flat = new Uint32Array(candidates.length * width); candidates.forEach((candidate, index) => flat.set(candidate[property], index * width)); return flat; }
+function parityMismatchReason(actual, expected) {
+  for (const [name, values] of Object.entries(actual)) {
+    const target = expected[name];
+    if (!Array.isArray(values) || !Array.isArray(target) || values.length !== target.length) return `oracle-parity-mismatch:${name}:length:${values?.length ?? 'missing'}!=${target?.length ?? 'missing'}`;
+    const index = values.findIndex((value, offset) => value !== target[offset]);
+    if (index >= 0) return `oracle-parity-mismatch:${name}:${index}:${values[index]}!=${target[index]}`;
+  }
+  return 'oracle-parity-mismatch';
+}
 
 async function runGpuBatch(device, normalized, pieceIds, grid, shaderSource) {
   const count = normalized.length, labelsPerCandidate = pieceIds.length * grid.wordCount, labelBytes = Math.max(4, count * labelsPerCandidate * 4), maskBytes = Math.max(4, count * grid.wordCount * 4), remainingBytes = Math.max(4, count * REMAINING_MASK_WORD_COUNT * 4), hashBytes = Math.max(4, count * 4);
@@ -263,7 +272,8 @@ export function createWebGpuLabeledFrontierState({ gpu = globalThis.navigator?.g
         const device = await deviceCache.getDevice(), maxBinding = Number(device.limits?.maxStorageBufferBindingSize) || limits.maxStorageBufferBindingSize, labelsPerCandidate = cpu.pieceCount * normalizedGrid.wordCount, maxBatch = Math.max(1, Math.floor(maxBinding / Math.max(labelsPerCandidate * 4, 4))), persistentBatch = Math.min(capacity, maxBatch), nextLabels = [], canonicalLabels = [], absoluteHashes = [], canonicalHashes = [];
         if (!resources) resources = createPersistentResources(device, persistentBatch, cpu.pieceCount, normalizedGrid, shaderSource);
         for (let offset = 0; offset < normalized.length; offset += persistentBatch) { const result = await runGpuPersistentBatch(device, resources, normalized.slice(offset, offset + persistentBatch), cpu.pieceIds, normalizedGrid); nextLabels.push(...result.nextLabels); canonicalLabels.push(...result.canonicalLabels); absoluteHashes.push(...result.absoluteHashes); canonicalHashes.push(...result.canonicalHashes); }
-        if (JSON.stringify(nextLabels) !== JSON.stringify(cpu.nextLabels) || JSON.stringify(canonicalLabels) !== JSON.stringify(cpu.canonicalLabels) || JSON.stringify(absoluteHashes) !== JSON.stringify(cpu.absoluteHashes) || JSON.stringify(canonicalHashes) !== JSON.stringify(cpu.canonicalHashes)) return unavailable('oracle-parity-mismatch', normalizedGrid, cpu, { persistent: true, bufferCapacity: persistentBatch });
+        const actual = { nextLabels, canonicalLabels, absoluteHashes, canonicalHashes }, expected = { nextLabels: cpu.nextLabels, canonicalLabels: cpu.canonicalLabels, absoluteHashes: cpu.absoluteHashes, canonicalHashes: cpu.canonicalHashes };
+        if (JSON.stringify(nextLabels) !== JSON.stringify(cpu.nextLabels) || JSON.stringify(canonicalLabels) !== JSON.stringify(cpu.canonicalLabels) || JSON.stringify(absoluteHashes) !== JSON.stringify(cpu.absoluteHashes) || JSON.stringify(canonicalHashes) !== JSON.stringify(cpu.canonicalHashes)) return unavailable(parityMismatchReason(actual, expected), normalizedGrid, cpu, { persistent: true, bufferCapacity: persistentBatch });
         return Object.freeze({ schema: WEBGPU_LABELED_FRONTIER_STATE_SCHEMA, status: 'completed', backend: 'webgpu', pieceIds: cpu.pieceIds, nextLabels, canonicalLabels, absoluteHashes, canonicalHashes, candidateCount: normalized.length, wordCount: cpu.wordCount, pieceCount: cpu.pieceCount, parity: 'verified', persistent: true, bufferCapacity: persistentBatch });
       } catch (error) { reset(); return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid, cpu, { persistent: true, bufferCapacity: capacity }); }
     },

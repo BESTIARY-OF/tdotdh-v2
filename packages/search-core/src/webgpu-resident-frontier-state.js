@@ -109,6 +109,15 @@ function normalizeCandidates(candidates, grid) {
 
 function flatten(candidates, property, width) { const flat = new Uint32Array(candidates.length * width); candidates.forEach((candidate, index) => flat.set(candidate[property], index * width)); return flat; }
 function equalArrays(left, right) { return JSON.stringify(left) === JSON.stringify(right); }
+function parityMismatchReason(actual, expected) {
+  for (const [name, values] of Object.entries(actual)) {
+    const target = expected[name];
+    if (!Array.isArray(values) || !Array.isArray(target) || values.length !== target.length) return `oracle-parity-mismatch:${name}:length:${values?.length ?? 'missing'}!=${target?.length ?? 'missing'}`;
+    const index = values.findIndex((value, offset) => value !== target[offset]);
+    if (index >= 0) return `oracle-parity-mismatch:${name}:${index}:${values[index]}!=${target[index]}`;
+  }
+  return 'oracle-parity-mismatch';
+}
 function unavailable(reason, cpu, extra = {}) { return Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: String(reason), pieceIds: cpu.pieceIds, nextLabels: cpu.nextLabels, canonicalLabels: cpu.canonicalLabels, absoluteHashes: cpu.absoluteHashes, canonicalHashes: cpu.canonicalHashes, candidateCount: cpu.candidateCount, wordCount: cpu.wordCount, pieceCount: cpu.pieceCount, parity: 'oracle', ...extra }); }
 
 function makeResources(device, capacity, batchCapacity, pieceCount, grid, shaderSource) {
@@ -202,7 +211,8 @@ export function createWebGpuResidentFrontierState({ gpu = globalThis.navigator?.
         for (const candidate of normalized) if (candidate.parentStateIndex != null && candidate.parentStateIndex >= residentCount) return unavailable('resident-parent-reference-not-in-input-layer', cpu, { capacity, epoch: layer.pendingEpoch, residentCount });
         const nextLabels = [], canonicalLabels = [], absoluteHashes = [], canonicalHashes = [], residentStateIndices = [];
         for (let offset = 0; offset < normalized.length; offset += batchCapacity) { const batch = normalized.slice(offset, offset + batchCapacity), outputIndices = batch.map((_, index) => layer.nextSlot + offset + index); const result = await dispatch(device, resources, batch, cpu.pieceIds, outputIndices, normalizedGrid); nextLabels.push(...result.nextLabels); canonicalLabels.push(...result.canonicalLabels); absoluteHashes.push(...result.absoluteHashes); canonicalHashes.push(...result.canonicalHashes); residentStateIndices.push(...outputIndices); }
-        if (!equalArrays(nextLabels, cpu.nextLabels) || !equalArrays(canonicalLabels, cpu.canonicalLabels) || !equalArrays(absoluteHashes, cpu.absoluteHashes) || !equalArrays(canonicalHashes, cpu.canonicalHashes)) return unavailable('oracle-parity-mismatch', cpu, { capacity, epoch: layer.pendingEpoch });
+        const actual = { nextLabels, canonicalLabels, absoluteHashes, canonicalHashes }, expected = { nextLabels: cpu.nextLabels, canonicalLabels: cpu.canonicalLabels, absoluteHashes: cpu.absoluteHashes, canonicalHashes: cpu.canonicalHashes };
+        if (!equalArrays(nextLabels, cpu.nextLabels) || !equalArrays(canonicalLabels, cpu.canonicalLabels) || !equalArrays(absoluteHashes, cpu.absoluteHashes) || !equalArrays(canonicalHashes, cpu.canonicalHashes)) return unavailable(parityMismatchReason(actual, expected), cpu, { capacity, epoch: layer.pendingEpoch });
         layer.nextSlot += normalized.length;
         return Object.freeze({ schema: WEBGPU_LABELED_FRONTIER_STATE_SCHEMA, status: 'completed', backend: 'webgpu', pieceIds: cpu.pieceIds, nextLabels, canonicalLabels, absoluteHashes, canonicalHashes, candidateCount: normalized.length, wordCount: cpu.wordCount, pieceCount: cpu.pieceCount, parity: 'verified', persistent: true, resident: true, residentEpoch: layer.pendingEpoch, residentStateIndices, bufferCapacity: capacity, batchCapacity });
       } catch (error) { reset(); return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, cpu); }
