@@ -30,6 +30,12 @@ state. The worker also exposes a protocol-native
 `frontier-batch` operation with
 cursor-selected candidates, canonical signatures, and resumable receipts.
 
+During product search, the retained beam is flattened at each layer before
+frontier validity/scoring dispatch. The GPU receives one layer-sized batch
+across all beam states, while the product receipt carries the worker ticket
+and cursor used for that dispatch. Candidate-to-state remapping and CPU
+canonical admission remain deterministic after readback.
+
 When WebGPU is available, frontier generation is issued as one flattened batch
 for all retained beam states and their remaining pieces, chunked only at the
 adapter's storage safety limit. The batch shader emits deterministic origins

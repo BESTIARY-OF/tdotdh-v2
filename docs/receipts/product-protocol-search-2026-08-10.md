@@ -7,8 +7,9 @@ protocol with `operation: product-search`. The worker adapts the existing
 field-guide search into protocol progress/result/completed/cancelled events,
 while retaining the legacy message route as a compatibility fallback.
 
-The product search remains CPU-oracle authoritative. Its GPU occupancy and
-frontier adapters are parity-gated; unavailable WebGPU falls back explicitly.
+The product search remains CPU-oracle authoritative. Its GPU occupancy,
+frontier, beam-layer batching, and checkpoint adapters are parity-gated;
+unavailable WebGPU falls back explicitly.
 Cancellation is sent through the protocol and the search loop checks the
 cooperative cancellation predicate before continuing branches.
 
@@ -28,6 +29,6 @@ cooperative cancellation predicate before continuing branches.
 ## Boundary
 
 This is a product-path integration gate, not the final GPU-first engine. The
-remaining work is to move frontier generation, scoring, beam compaction, and
-ranking into GPU-resident buffers while preserving canonical CPU-oracle parity,
-deterministic ticketing, cursor resume, and renderer semantics.
+remaining work is to move beam compaction, family quota selection, and ticket
+arbitration into GPU-resident buffers while preserving canonical CPU-oracle
+parity, deterministic cursor resume, cancellation, and renderer semantics.

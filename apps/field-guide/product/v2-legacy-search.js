@@ -658,6 +658,38 @@ async function evaluateFrontierOptions(entries, state, centroidId, frontierEvalu
   return entries;
 }
 
+async function evaluateFrontierOptionsAcrossBeam(jobs, centroidId, frontierEvaluator, frontierValidator, onFrontier = () => {}) {
+  if (!jobs.length || !jobs.some(job => job.entries.length)) return jobs;
+  try {
+    const pending = [];
+    for (const [jobIndex, job] of jobs.entries()) {
+      const parentCells = [...job.state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
+      for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, entry, parentCells, candidateCells: entry.candidate.cells, candidate: createFrontierEvaluationCandidate({ parentCells, candidateCells: entry.candidate.cells, scoreTerms: entry.metrics ? frontierScoreTerms(entry.metrics) : (entry.gpuGeometry || entry.gpuFieldMetrics) ? [0, 0, 0, 0, 0, 0, 0, 0] : frontierScoreTerms(fieldMetrics([...job.state.placements, entry.candidate], centroidId)) }) });
+    }
+    if (!pending.length) return jobs;
+    if (frontierEvaluator?.evaluate) {
+      const result = await frontierEvaluator.evaluate(pending.map(item => item.candidate));
+      if (Array.isArray(result?.validity) && result.validity.length === pending.length && result.status === 'completed') {
+        for (const job of jobs) job.entries = [];
+        for (const [index, item] of pending.entries()) if (result.validity[index] === 1) jobs[item.jobIndex].entries.push({ ...item.entry, gpuScore: result.scores?.[index] });
+        onFrontier({ status: result.parity === 'verified' ? 'used' : 'fallback', backend: result.backend || 'cpu-oracle', parity: result.parity, candidateCount: pending.length, batch: 'beam' });
+        return jobs;
+      }
+      onFrontier({ status: 'fallback', reason: result?.reason || 'frontier-evaluator-unavailable', candidateCount: pending.length, batch: 'beam' });
+    }
+    if (!frontierValidator?.validate) return jobs;
+    const result = await frontierValidator.validate(pending.map(item => ({ parentMask: createFrontierMaskFromCells(item.parentCells), candidateMask: createFrontierMaskFromCells(item.candidateCells) })));
+    if (result?.status === 'completed' && Array.isArray(result.validity) && result.validity.length === pending.length) {
+      for (const job of jobs) job.entries = [];
+      for (const [index, item] of pending.entries()) if (result.validity[index] === 1) jobs[item.jobIndex].entries.push(item.entry);
+      onFrontier({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: pending.length, batch: 'beam' });
+      return jobs;
+    }
+    onFrontier({ status: 'fallback', reason: result?.reason || 'frontier-validator-unavailable', candidateCount: pending.length, batch: 'beam' });
+  } catch (error) { onFrontier({ status: 'fallback', reason: `frontier-evaluator-failed:${error.message}`, batch: 'beam' }); }
+  return jobs;
+}
+
 async function orderFrontierRows(entries, frontierRanker, onRank = () => {}) {
   if (!entries.length) return entries;
   const cpu = () => [...entries].sort((a, b) => a.score - b.score || a.tie - b.tie);
@@ -823,6 +855,8 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const positionLocks = options.positionLocks || {};
   const knownSignatures = new Set(options.knownSignatures || []);
   const isCancelled = typeof options.isCancelled === 'function' ? options.isCancelled : () => false;
+  const navigationTicket = options.navigationTicket || null;
+  const navigationCursor = options.navigationCursor || null;
   const reportProgress = typeof options.reportProgress === 'function'
     ? options.reportProgress
     : progress => postMessage({ type: 'progress', ...progress });
@@ -912,7 +946,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     }
     await evaluateFrontierGeometryAcrossBeam(beamJobs, centroidId, frontierMetrics, receipt => { frontierMetricsReceipt = receipt; });
     await evaluateFieldAggregatesAcrossBeam(beamJobs, centroidId, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; });
-    for (const job of beamJobs) job.entries = await evaluateFrontierOptions(job.entries, job.state, centroidId, frontierEvaluator, options.frontierValidator, receipt => { frontierReceipt = receipt; });
+    await evaluateFrontierOptionsAcrossBeam(beamJobs, centroidId, frontierEvaluator, options.frontierValidator, receipt => { frontierReceipt = { ...receipt, ...(navigationTicket ? { ticket: navigationTicket } : {}), ...(navigationCursor ? { cursor: { ...navigationCursor, depth, nodeOffset: navigationCursor.nodeOffset + nodes } } : {}) }; });
     await evaluateFrontierStateAcrossBeam(beamJobs, frontierState, receipt => { frontierStateReceipt = receipt; });
     for (const job of beamJobs) {
       const state = job.state;

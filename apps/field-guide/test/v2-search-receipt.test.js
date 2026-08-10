@@ -85,6 +85,8 @@ const sharedOptions = {
   frontierTopology,
   fieldMetrics,
   frontierDeduplicator,
+  navigationTicket: { presetFingerprint: 'test-preset', familyId: 'open', pass: 0, threadId: 0 },
+  navigationCursor: { depth: 0, nodeOffset: 0, rootChoice: 0 },
 };
 const singleResult = await search(pieces, [], { ...sharedOptions, frontierGenerator: singleFrontierGenerator });
 const result = await search(pieces, [], { ...sharedOptions, frontierGenerator });
@@ -120,8 +122,8 @@ const lockedResult = await search(lockedPieces, [], {
 assert.equal(result.type, 'done');
 assert.deepEqual(singleResult.prefilter, { status: 'used', backend: 'test-compute-shader', candidateCount: 6 });
 assert.deepEqual(result.prefilter, { status: 'used', backend: 'test-compute-shader', candidateCount: 3 });
-assert.deepEqual(singleResult.frontier, { status: 'used', backend: 'test-frontier-evaluator', parity: 'verified', candidateCount: 6 });
-assert.deepEqual(result.frontier, { status: 'used', backend: 'test-frontier-evaluator', parity: 'verified', candidateCount: 3 });
+assert.deepEqual(singleResult.frontier, { status: 'used', backend: 'test-frontier-evaluator', parity: 'verified', candidateCount: 6, batch: 'beam', ticket: { presetFingerprint: 'test-preset', familyId: 'open', pass: 0, threadId: 0 }, cursor: { depth: 0, nodeOffset: 0, rootChoice: 0 } });
+assert.deepEqual(result.frontier, { status: 'used', backend: 'test-frontier-evaluator', parity: 'verified', candidateCount: 3, batch: 'beam', ticket: { presetFingerprint: 'test-preset', familyId: 'open', pass: 0, threadId: 0 }, cursor: { depth: 0, nodeOffset: 0, rootChoice: 0 } });
 assert.equal(result.frontierGeneration.status, 'used');
 assert.equal(result.frontierGeneration.backend, 'test-frontier-generator');
 assert.equal(result.frontierGeneration.parity, 'verified');

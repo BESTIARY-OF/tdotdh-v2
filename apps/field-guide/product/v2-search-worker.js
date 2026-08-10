@@ -35,6 +35,8 @@ async function runProductSearch(request, context) {
     searchSalt: request.seed,
     rootChoice: request.ticket.rootChoice ?? request.cursor.rootChoice,
     threadId: request.ticket.threadId,
+    navigationTicket: request.ticket,
+    navigationCursor: request.cursor,
     resumeCheckpoint: request.cursor.checkpoint,
     candidatePrefilter,
     frontierValidator,
