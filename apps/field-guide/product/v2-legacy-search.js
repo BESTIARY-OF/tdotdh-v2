@@ -559,7 +559,7 @@ async function evaluateFrontierState(entries, state, frontierState, onState = ()
     }));
     const result = await frontierState.transition(candidates);
     if (result?.status === 'completed' && result.parity === 'verified' && Array.isArray(result.absoluteHashes) && result.absoluteHashes.length === entries.length) {
-      onState({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: entries.length });
+      onState({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, persistent: result.persistent === true, bufferCapacity: result.bufferCapacity, candidateCount: entries.length });
       const wordCount = Number(result.wordCount) || 0;
       const labelsPerCandidate = result.pieceIds.length * wordCount;
       return entries.map((entry, index) => {
@@ -592,7 +592,7 @@ async function evaluateFrontierStateAcrossBeam(jobs, frontierState, onState = ()
         const labelStart = index * labelsPerCandidate;
         jobs[item.jobIndex].entries[item.entryIndex] = { ...item.entry, gpuState: { absoluteHash: result.absoluteHashes[index], canonicalHash: result.canonicalHashes[index], nextLabels: result.nextLabels.slice(labelStart, labelStart + labelsPerCandidate), canonicalLabels: result.canonicalLabels.slice(labelStart, labelStart + labelsPerCandidate), pieceIds: result.pieceIds, wordCount, remainingMask: Array.from(item.candidate.remainingMask) } };
       }
-      onState({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: pending.length, batch: 'beam' });
+      onState({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, persistent: result.persistent === true, bufferCapacity: result.bufferCapacity, candidateCount: pending.length, batch: 'beam' });
       return jobs;
     }
     onState({ status: 'fallback', reason: result?.reason || 'frontier-state-unavailable', candidateCount: pending.length, batch: 'beam' });

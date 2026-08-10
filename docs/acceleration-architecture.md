@@ -97,6 +97,12 @@ parity in the field-metrics shader.
   loss destroys the allocation and resets the shared device cache, so the next
   call can re-probe cleanly. This is a real persistent allocation seam; it is
   not yet the full GPU-resident frontier-state owner.
+- The labeled frontier-state transition now uses a second persistent device
+  allocation for parent labels, candidate masks, remaining-piece masks,
+  output labels, hashes, parameters, and readback. Its pipeline and bind group
+  are reused across transition batches, and the CPU labeled-state transition
+  remains the exact parity gate. This is the first persistent GPU state seam
+  used by the product worker, not just an isolated contract test.
 
 The live 5174 runtime receipt for this seam is recorded in
 `docs/receipts/webgpu-deduplicator-runtime-2026-08-10.md`.

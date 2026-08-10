@@ -23,5 +23,38 @@ assert.deepEqual(unavailable.nextLabels, cpu.nextLabels);
 assert.deepEqual(unavailable.canonicalLabels, cpu.canonicalLabels);
 assert.deepEqual(unavailable.absoluteHashes, cpu.absoluteHashes);
 assert.deepEqual(unavailable.canonicalHashes, cpu.canonicalHashes);
+assert.equal(unavailable.persistent, true);
+
+const priorBufferUsage = globalThis.GPUBufferUsage, priorMapMode = globalThis.GPUMapMode;
+globalThis.GPUBufferUsage = { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, MAP_READ: 16 };
+globalThis.GPUMapMode = { READ: 1 };
+let createdBuffers = 0;
+const expected = { next: cpu.nextLabels, canonical: cpu.canonicalLabels, absolute: cpu.absoluteHashes, canonicalHash: cpu.canonicalHashes };
+const fakeAdapter = { limits: { maxStorageBufferBindingSize: 1024 * 1024 }, async requestDevice() { return {
+  limits: { maxStorageBufferBindingSize: 1024 * 1024 },
+  queue: { writeBuffer() {}, submit() {}, async onSubmittedWorkDone() {} },
+  createBuffer() {
+    createdBuffers += 1;
+    const kind = ['next', 'canonical', 'absolute', 'canonicalHash'][createdBuffers - 10] || 'scratch';
+    return { destroy() {}, async mapAsync() {}, getMappedRange() { return Uint32Array.from(expected[kind] || []).buffer; }, unmap() {} };
+  },
+  createShaderModule() { return {}; },
+  createComputePipeline() { return { getBindGroupLayout() { return {}; } }; },
+  createBindGroup() { return {}; },
+  createCommandEncoder() { return { beginComputePass() { return { setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() {}, end() {} }; }, copyBufferToBuffer() {}, finish() { return {}; } }; },
+}; } };
+try {
+  const persistent = createWebGpuLabeledFrontierState({ gpu: { async requestAdapter() { return fakeAdapter; } }, capacity: 2 });
+  const first = await persistent.transition([candidate]), second = await persistent.transition([candidate]);
+  assert.equal(first.status, 'completed');
+  assert.equal(first.parity, 'verified');
+  assert.equal(first.persistent, true);
+  assert.deepEqual(second.canonicalLabels, cpu.canonicalLabels);
+  assert.equal(createdBuffers, 13, 'persistent labeled state must reuse its device allocation');
+  persistent.reset();
+} finally {
+  if (priorBufferUsage === undefined) delete globalThis.GPUBufferUsage; else globalThis.GPUBufferUsage = priorBufferUsage;
+  if (priorMapMode === undefined) delete globalThis.GPUMapMode; else globalThis.GPUMapMode = priorMapMode;
+}
 
 console.log(JSON.stringify({ schema: cpu.schema, absoluteHash: cpu.absoluteHashes[0], canonicalHash: cpu.canonicalHashes[0], fallback: unavailable.reason }));

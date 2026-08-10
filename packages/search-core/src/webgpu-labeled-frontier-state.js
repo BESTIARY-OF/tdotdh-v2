@@ -5,6 +5,7 @@ import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
 export const WEBGPU_LABELED_FRONTIER_STATE_SCHEMA = 'tdotdh.webgpu-labeled-frontier-state.v0';
 export const REMAINING_MASK_WORD_COUNT = 4;
 export const MAX_PIECE_LABELS = 32;
+export const DEFAULT_PERSISTENT_STATE_CANDIDATE_CAPACITY = 64;
 
 const SHADER = `
 struct Params { candidateCount: u32, wordCount: u32, pieceCount: u32, width: u32, height: u32, originX: i32, originY: i32, reserved: u32 };
@@ -173,7 +174,7 @@ export function canonicalSignatureFromLabeledFrontierState({ pieceIds, canonical
   }).join('|');
 }
 
-function unavailable(reason, grid, cpu) { return Object.freeze({ schema: WEBGPU_LABELED_FRONTIER_STATE_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: String(reason), grid, pieceIds: cpu.pieceIds, nextLabels: cpu.nextLabels, canonicalLabels: cpu.canonicalLabels, absoluteHashes: cpu.absoluteHashes, canonicalHashes: cpu.canonicalHashes, candidateCount: cpu.candidateCount, wordCount: cpu.wordCount, pieceCount: cpu.pieceCount }); }
+function unavailable(reason, grid, cpu, extra = {}) { return Object.freeze({ schema: WEBGPU_LABELED_FRONTIER_STATE_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: String(reason), grid, pieceIds: cpu.pieceIds, nextLabels: cpu.nextLabels, canonicalLabels: cpu.canonicalLabels, absoluteHashes: cpu.absoluteHashes, canonicalHashes: cpu.canonicalHashes, candidateCount: cpu.candidateCount, wordCount: cpu.wordCount, pieceCount: cpu.pieceCount, ...extra }); }
 
 function flatten(candidates, property, width) { const flat = new Uint32Array(candidates.length * width); candidates.forEach((candidate, index) => flat.set(candidate[property], index * width)); return flat; }
 
@@ -191,14 +192,79 @@ async function runGpuBatch(device, normalized, pieceIds, grid, shaderSource) {
   } finally { Object.values(buffers).forEach(buffer => buffer.destroy()); }
 }
 
-export function createWebGpuLabeledFrontierState({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 1048576 }, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
+function createPersistentResources(device, capacity, pieceCount, grid, shaderSource) {
+  const labelsBytes = capacity * pieceCount * grid.wordCount * 4;
+  const maskBytes = capacity * grid.wordCount * 4;
+  const pieceIndexBytes = capacity * 4;
+  const remainingBytes = capacity * REMAINING_MASK_WORD_COUNT * 4;
+  const hashBytes = capacity * 4;
+  const buffers = {
+    parent: device.createBuffer({ size: labelsBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+    candidate: device.createBuffer({ size: maskBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+    pieceIndices: device.createBuffer({ size: pieceIndexBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+    remaining: device.createBuffer({ size: remainingBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+    next: device.createBuffer({ size: labelsBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
+    canonical: device.createBuffer({ size: labelsBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
+    absoluteHashes: device.createBuffer({ size: hashBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
+    canonicalHashes: device.createBuffer({ size: hashBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
+    params: device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }),
+    nextReadback: device.createBuffer({ size: labelsBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
+    canonicalReadback: device.createBuffer({ size: labelsBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
+    absoluteHashReadback: device.createBuffer({ size: hashBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
+    canonicalHashReadback: device.createBuffer({ size: hashBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
+  };
+  const module = device.createShaderModule({ code: shaderSource });
+  const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+  const bindings = [buffers.parent, buffers.candidate, buffers.pieceIndices, buffers.remaining, buffers.next, buffers.canonical, buffers.absoluteHashes, buffers.canonicalHashes, buffers.params];
+  const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: bindings.map((buffer, binding) => ({ binding, resource: { buffer } })) });
+  return { capacity, pieceCount, grid, buffers, pipeline, bindGroup };
+}
+
+function destroyPersistentResources(resources) {
+  if (!resources) return;
+  Object.values(resources.buffers).forEach(buffer => buffer.destroy());
+}
+
+async function runGpuPersistentBatch(device, resources, normalized, pieceIds, grid) {
+  const { buffers, pipeline, bindGroup } = resources;
+  const count = normalized.length, labelsPerCandidate = pieceIds.length * grid.wordCount, labelBytes = count * labelsPerCandidate * 4, maskBytes = count * grid.wordCount * 4, hashBytes = count * 4;
+  device.queue.writeBuffer(buffers.parent, 0, flatten(normalized, 'parentLabelMasks', labelsPerCandidate));
+  device.queue.writeBuffer(buffers.candidate, 0, flatten(normalized, 'candidateMask', grid.wordCount));
+  device.queue.writeBuffer(buffers.pieceIndices, 0, Uint32Array.from(normalized.map(candidate => candidate.candidatePieceIndex)));
+  device.queue.writeBuffer(buffers.remaining, 0, flatten(normalized, 'remainingMask', REMAINING_MASK_WORD_COUNT));
+  device.queue.writeBuffer(buffers.params, 0, new Int32Array([count, grid.wordCount, pieceIds.length, grid.width, grid.height, grid.originX, grid.originY, 0]));
+  const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
+  pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end();
+  encoder.copyBufferToBuffer(buffers.next, 0, buffers.nextReadback, 0, labelBytes);
+  encoder.copyBufferToBuffer(buffers.canonical, 0, buffers.canonicalReadback, 0, labelBytes);
+  encoder.copyBufferToBuffer(buffers.absoluteHashes, 0, buffers.absoluteHashReadback, 0, hashBytes);
+  encoder.copyBufferToBuffer(buffers.canonicalHashes, 0, buffers.canonicalHashReadback, 0, hashBytes);
+  device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
+  await buffers.nextReadback.mapAsync(GPUMapMode.READ); const nextLabels = Array.from(new Uint32Array(buffers.nextReadback.getMappedRange().slice(0, labelBytes))); buffers.nextReadback.unmap();
+  await buffers.canonicalReadback.mapAsync(GPUMapMode.READ); const canonicalLabels = Array.from(new Uint32Array(buffers.canonicalReadback.getMappedRange().slice(0, labelBytes))); buffers.canonicalReadback.unmap();
+  await buffers.absoluteHashReadback.mapAsync(GPUMapMode.READ); const absoluteHashes = Array.from(new Uint32Array(buffers.absoluteHashReadback.getMappedRange().slice(0, hashBytes))); buffers.absoluteHashReadback.unmap();
+  await buffers.canonicalHashReadback.mapAsync(GPUMapMode.READ); const canonicalHashes = Array.from(new Uint32Array(buffers.canonicalHashReadback.getMappedRange().slice(0, hashBytes))); buffers.canonicalHashReadback.unmap();
+  return { nextLabels, canonicalLabels, absoluteHashes, canonicalHashes };
+}
+
+export function createWebGpuLabeledFrontierState({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 1048576 }, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }), capacity = DEFAULT_PERSISTENT_STATE_CANDIDATE_CAPACITY } = {}) {
   if (typeof shaderSource !== 'string' || !shaderSource.trim()) throw new TypeError('shaderSource must be a non-empty string');
+  if (!Number.isSafeInteger(capacity) || capacity <= 0) throw new TypeError('persistent frontier state capacity must be a positive safe integer');
   const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits };
+  let resources = null;
+  const reset = () => { destroyPersistentResources(resources); resources = null; deviceCache.reset(); };
   return Object.freeze({
+    reset,
     async availability() { const probe = await probeWebGpuCapabilities({ gpu, requiredLimits: limits }); if (!probe.adapterAvailable) return Object.freeze({ schema: WEBGPU_LABELED_FRONTIER_STATE_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: 'webgpu-adapter-unavailable', grid: normalizedGrid }); if (!probe.requiredLimitsSatisfied) return Object.freeze({ schema: WEBGPU_LABELED_FRONTIER_STATE_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: 'webgpu-required-limits-unsatisfied', grid: normalizedGrid }); return Object.freeze({ schema: WEBGPU_LABELED_FRONTIER_STATE_SCHEMA, status: 'available', backend: 'webgpu', grid: normalizedGrid }); },
     async transition(candidates) {
-      const normalized = normalizeCandidates(candidates, normalizedGrid), cpu = cpuTransitionLabeledFrontierStates(candidates, normalizedGrid), status = await this.availability(); if (status.status !== 'available') return unavailable(status.reason, normalizedGrid, cpu);
-      try { const device = await deviceCache.getDevice(), maxBinding = Number(device.limits?.maxStorageBufferBindingSize) || limits.maxStorageBufferBindingSize, labelsPerCandidate = cpu.pieceCount * normalizedGrid.wordCount, maxBatch = Math.max(1, Math.floor(maxBinding / Math.max(labelsPerCandidate * 4, 4))), nextLabels = [], canonicalLabels = [], absoluteHashes = [], canonicalHashes = []; for (let offset = 0; offset < normalized.length; offset += maxBatch) { const result = await runGpuBatch(device, normalized.slice(offset, offset + maxBatch), cpu.pieceIds, normalizedGrid, shaderSource); nextLabels.push(...result.nextLabels); canonicalLabels.push(...result.canonicalLabels); absoluteHashes.push(...result.absoluteHashes); canonicalHashes.push(...result.canonicalHashes); } if (JSON.stringify(nextLabels) !== JSON.stringify(cpu.nextLabels) || JSON.stringify(canonicalLabels) !== JSON.stringify(cpu.canonicalLabels) || JSON.stringify(absoluteHashes) !== JSON.stringify(cpu.absoluteHashes) || JSON.stringify(canonicalHashes) !== JSON.stringify(cpu.canonicalHashes)) return unavailable('oracle-parity-mismatch', normalizedGrid, cpu); return Object.freeze({ schema: WEBGPU_LABELED_FRONTIER_STATE_SCHEMA, status: 'completed', backend: 'webgpu', pieceIds: cpu.pieceIds, nextLabels, canonicalLabels, absoluteHashes, canonicalHashes, candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, pieceCount: cpu.pieceCount, parity: 'verified' }); } catch (error) { deviceCache.reset(); return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid, cpu); }
+      const { normalized } = normalizeCandidates(candidates, normalizedGrid), cpu = cpuTransitionLabeledFrontierStates(candidates, normalizedGrid), status = await this.availability(); if (status.status !== 'available') return unavailable(status.reason, normalizedGrid, cpu, { persistent: true, bufferCapacity: capacity });
+      try {
+        const device = await deviceCache.getDevice(), maxBinding = Number(device.limits?.maxStorageBufferBindingSize) || limits.maxStorageBufferBindingSize, labelsPerCandidate = cpu.pieceCount * normalizedGrid.wordCount, maxBatch = Math.max(1, Math.floor(maxBinding / Math.max(labelsPerCandidate * 4, 4))), persistentBatch = Math.min(capacity, maxBatch), nextLabels = [], canonicalLabels = [], absoluteHashes = [], canonicalHashes = [];
+        if (!resources) resources = createPersistentResources(device, persistentBatch, cpu.pieceCount, normalizedGrid, shaderSource);
+        for (let offset = 0; offset < normalized.length; offset += persistentBatch) { const result = await runGpuPersistentBatch(device, resources, normalized.slice(offset, offset + persistentBatch), cpu.pieceIds, normalizedGrid); nextLabels.push(...result.nextLabels); canonicalLabels.push(...result.canonicalLabels); absoluteHashes.push(...result.absoluteHashes); canonicalHashes.push(...result.canonicalHashes); }
+        if (JSON.stringify(nextLabels) !== JSON.stringify(cpu.nextLabels) || JSON.stringify(canonicalLabels) !== JSON.stringify(cpu.canonicalLabels) || JSON.stringify(absoluteHashes) !== JSON.stringify(cpu.absoluteHashes) || JSON.stringify(canonicalHashes) !== JSON.stringify(cpu.canonicalHashes)) return unavailable('oracle-parity-mismatch', normalizedGrid, cpu, { persistent: true, bufferCapacity: persistentBatch });
+        return Object.freeze({ schema: WEBGPU_LABELED_FRONTIER_STATE_SCHEMA, status: 'completed', backend: 'webgpu', pieceIds: cpu.pieceIds, nextLabels, canonicalLabels, absoluteHashes, canonicalHashes, candidateCount: normalized.length, wordCount: cpu.wordCount, pieceCount: cpu.pieceCount, parity: 'verified', persistent: true, bufferCapacity: persistentBatch });
+      } catch (error) { reset(); return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid, cpu, { persistent: true, bufferCapacity: capacity }); }
     },
   });
 }

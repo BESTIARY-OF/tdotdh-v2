@@ -31,6 +31,13 @@ still own the payload between expansion layers; the next seam is to move that
 payload into the persistent GPU buffer and exchange only bounded tickets,
 cursors, and parity-gated readback.
 
+The labeled frontier-state transition now follows the same lifetime rule. Its
+parent labels, candidate masks, remaining-piece masks, output labels, hashes,
+uniform parameters, and readback buffers are allocated once per worker and
+reused across transition batches. The CPU transition remains the canonical
+parity gate; a device failure destroys the allocation and falls back without
+changing the search result or checkpoint shape.
+
 ## Live product acceptance
 
 - Preview: `http://127.0.0.1:5174/`
