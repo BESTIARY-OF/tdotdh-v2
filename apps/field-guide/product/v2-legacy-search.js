@@ -44,7 +44,7 @@ function fieldShapeMetrics(placements, map, outside, minX, maxX, minY, maxY, cen
   const inletRisk = inletCells + inletEdges * .25 + nestedPeninsulaDepth * 2 + terminalChains * 2;
   return { inletCells, inletEdges, peninsulaDepth, nestedPeninsulaDepth, terminalChains, inletRisk };
 }
-function fieldMetrics(placements, centroidId = 3, aggregate = null) {
+function fieldMetrics(placements, centroidId = 3, aggregate = null, gpuState = null) {
   const map = occupiedMap(placements), cells = [...map.keys()].map(k => { const [x, y] = k.split(',').map(Number); return { x, y }; });
   const minX = aggregate ? aggregate[2] : Math.min(...cells.map(c => c.x)), maxX = aggregate ? aggregate[3] : Math.max(...cells.map(c => c.x)), minY = aggregate ? aggregate[4] : Math.min(...cells.map(c => c.y)), maxY = aggregate ? aggregate[5] : Math.max(...cells.map(c => c.y));
   const outside = new Set([key(minX - 1, minY - 1)]), queue = [{ x: minX - 1, y: minY - 1 }];
@@ -74,7 +74,7 @@ function fieldMetrics(placements, centroidId = 3, aggregate = null) {
   const centroidCoast = centroidEdgeCoast || centroidCornerCoast;
   const enclosure = centroidEdgeCoast ? 'open' : centroidCornerCoast ? 'weak' : 'strong';
   const topology = fieldShapeMetrics(placements, map, outside, minX, maxX, minY, maxY, centroidId);
-  const centroidSeed = centroidSeedInfo(placements, centroidId);
+  const centroidSeed = gpuState ? (centroidSeedInfoFromGpuState(placements, centroidId, gpuState) || centroidSeedInfo(placements, centroidId)) : centroidSeedInfo(placements, centroidId);
   const enclosurePenalty = centroidEdgeCoast ? Infinity : centroidCornerCoast ? 100000 : 0;
   const score = perimeter * 1000000 + enclosurePenalty + radialVariance * 1000 + centerOffset * 100 + centroidSquareOffset * 50 + centerSquareDistance * 10 + (1 - density) * 10;
   return { map, cells, minX, maxX, minY, maxY, width, height, holes, centroidCoast, centroidEdgeCoast, centroidCornerCoast, enclosure, centroidFamily: centroidSeed.family, centroidFamilyId: centroidSeed.id, centroidSeed: centroidSeed.seed, centroidNeighborCount: centroidSeed.neighborCount, area: aggregate ? aggregate[0] : cells.length, perimeter, density, fieldCenter, centerSquare, centerSquareDistance, centroidPoint, centroidSquareOffset, centerOffset, radialVariance, gravityVariance, gravityOffset, gravityTension, score, ...topology };
@@ -179,6 +179,24 @@ function centroidSeedInfo(placements, centroidId = 3) {
   }
   const ids = [...touching.keys()].sort((a, b) => a - b);
   const seed = ids.map(id => `#${String(id).padStart(2, '0')}[${touching.get(id).join(';')}]`).join('|') || 'none';
+  return { family: ids.length ? ids.map(id => `#${String(id).padStart(2, '0')}`).join(' + ') : 'none', seed, id: seedFamilyId(seed), neighborCount: ids.length };
+}
+function gpuStateLabelBit(gpuState, pieceIndex, x, y) {
+  const grid = DEFAULT_FRONTIER_GRID, localX = x - grid.originX, localY = y - grid.originY;
+  if (localX < 0 || localY < 0 || localX >= grid.width || localY >= grid.height) return 0;
+  const offset = localY * grid.width + localX, wordIndex = Math.floor(offset / 32), word = gpuState.nextLabels[pieceIndex * gpuState.wordCount + wordIndex] >>> 0;
+  return (word >>> (offset % 32)) & 1;
+}
+function centroidSeedInfoFromGpuState(placements, centroidId, gpuState) {
+  if (!gpuState || !Array.isArray(gpuState.pieceIds) || !Array.isArray(gpuState.nextLabels) || !Number.isSafeInteger(gpuState.wordCount) || gpuState.wordCount <= 0) return null;
+  const centroid = placements.find(placement => placement.id === centroidId)?.cells || [], minX = centroid.length ? Math.min(...centroid.map(c => c.x)) : 0, minY = centroid.length ? Math.min(...centroid.map(c => c.y)) : 0, touching = new Map();
+  const pieceIds = gpuState.pieceIds.filter(id => id !== centroidId).sort((a, b) => a - b);
+  for (const id of pieceIds) {
+    const pieceIndex = gpuState.pieceIds.indexOf(id), contacts = [];
+    for (const center of centroid) for (const next of adjacent(center)) if (gpuStateLabelBit(gpuState, pieceIndex, next.x, next.y)) contacts.push(`${center.x - minX},${center.y - minY}>${next.x - center.x},${next.y - center.y}`);
+    if (contacts.length) touching.set(id, [...new Set(contacts)].sort());
+  }
+  const ids = [...touching.keys()].sort((a, b) => a - b), seed = ids.map(id => `#${String(id).padStart(2, '0')}[${touching.get(id).join(';')}]`).join('|') || 'none';
   return { family: ids.length ? ids.map(id => `#${String(id).padStart(2, '0')}`).join(' + ') : 'none', seed, id: seedFamilyId(seed), neighborCount: ids.length };
 }
 function seedFamilyId(seed) {
@@ -600,7 +618,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         const nextBounds = { minX: Math.min(state.bounds.minX, ...candidate.cells.map(c => c.x)), maxX: Math.max(state.bounds.maxX, ...candidate.cells.map(c => c.x)), minY: Math.min(state.bounds.minY, ...candidate.cells.map(c => c.y)), maxY: Math.max(state.bounds.maxY, ...candidate.cells.map(c => c.y)) };
         const contact = candidate.cells.reduce((n, c) => n + adjacent(c).filter(a => state.field.has(key(a.x, a.y))).length, 0), centroidContact = candidate.cells.reduce((n, c) => n + adjacent8(c).filter(a => seedSet.has(key(a.x, a.y))).length, 0), ringCoverage = candidate.cells.reduce((n, c) => n + (centroidRing.has(key(c.x, c.y)) ? 1 : 0), 0), openCentroid = [...centroidRing].filter(ringKey => !state.field.has(ringKey) && !candidate.cells.some(c => key(c.x, c.y) === ringKey)).length;
         nodes++;
-        const candidatePlacements = [...state.placements, candidate], candidateMetrics = fieldMetrics(candidatePlacements, centroidId, gpuFieldMetrics), candidateFamilyTarget = candidateMetrics.centroidSeed === 'none' || targetSeedCompatible(candidateMetrics.centroidSeed, targetSeed);
+        const candidatePlacements = [...state.placements, candidate], candidateMetrics = fieldMetrics(candidatePlacements, centroidId, gpuFieldMetrics, gpuState), candidateFamilyTarget = candidateMetrics.centroidSeed === 'none' || targetSeedCompatible(candidateMetrics.centroidSeed, targetSeed);
         if (targetFamily && !candidateFamilyTarget) return null;
         const targetProgress = targetFamily ? targetSeedProgress(candidateMetrics.centroidSeed, targetSeed) : 0, familyIsNew = !knownFamilies.has(candidateMetrics.centroidFamilyId), hint = searchHints && positionPreferences[piece.id] ? pieceDirections(candidatePlacements, piece.id, centroidId).includes(positionPreferences[piece.id]) : false, hintMatches = (state.hintMatches || 0) + (hint ? 1 : 0);
         const targetBonus = targetFamily ? -320 * targetProgress : 0;

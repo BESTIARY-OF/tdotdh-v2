@@ -50,3 +50,8 @@ coordinate sums, and edge/corner coast flags. The CPU uses those verified
 aggregates to finish floating-point quality terms and family naming. This keeps
 the GPU path broad without accepting adapter-dependent floating-point ordering;
 the receipt reports `GPU field aggregates` only after exact integer parity.
+
+Family derivation now consumes the labeled-state readback rather than rescanning
+all placed cells. Only the centroid boundary is inspected on the CPU to rebuild
+the existing contact signature and FNV family ID, so GPU-labeled state is the
+source of truth while the public family identifiers remain unchanged.
