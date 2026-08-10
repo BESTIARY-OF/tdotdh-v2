@@ -7,6 +7,7 @@ const BEAM_LIMIT = 72;
 const BRANCH_LIMIT = 30;
 
 import { createFrontierEvaluationCandidate } from '../../../packages/search-core/src/webgpu-frontier-evaluator.js';
+import { cpuScoreFrontierCandidate } from '../../../packages/search-core/src/webgpu-frontier-scorer.js';
 import { createFrontierMaskFromCells } from '../../../packages/search-core/src/webgpu-frontier-validator.js';
 import { createFrontierMetricsCandidate } from '../../../packages/search-core/src/webgpu-frontier-metrics.js';
 import { createFieldMetricsCandidate } from '../../../packages/search-core/src/webgpu-field-metrics.js';
@@ -725,6 +726,18 @@ async function rankFrontierOptions(entries, frontierRanker, onRank = () => {}) {
   return (await orderFrontierRows(entries, frontierRanker, onRank)).slice(0, BRANCH_LIMIT);
 }
 
+async function scoreFrontierCandidates(entries, frontierScorer, onScore = () => {}) {
+  if (!entries.length) return entries;
+  if (!frontierScorer?.score) { onScore({ status: 'fallback', backend: 'cpu-oracle', reason: 'frontier-scorer-unavailable', candidateCount: entries.length }); return entries; }
+  const result = await frontierScorer.score(entries.map(entry => entry.scoreInput));
+  if (result?.status === 'completed' && result.parity === 'verified' && Array.isArray(result.scores) && result.scores.length === entries.length) {
+    onScore({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, algorithm: result.algorithm, candidateCount: entries.length, batch: 'beam' });
+    return entries.map((entry, index) => ({ ...entry, score: result.scores[index] }));
+  }
+  onScore({ status: 'fallback', backend: 'cpu-oracle', parity: result?.parity, reason: result?.reason || 'frontier-scorer-unavailable', candidateCount: entries.length, batch: 'beam' });
+  return entries;
+}
+
 async function compactFrontierRows(entries, retain, frontierCompactor, onCompact = () => {}) {
   const cpu = () => entries.map((entry, index) => ({ entry, index })).sort((left, right) => left.entry.score - right.entry.score || left.index - right.index).slice(0, retain).map(row => row.entry);
   if (!frontierCompactor?.compact) { onCompact({ status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', candidateCount: entries.length, selectedCount: Math.min(entries.length, retain) }); return cpu(); }
@@ -844,6 +857,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const frontierNavigator = options.frontierNavigator;
   const frontierTopology = options.frontierTopology;
   const frontierRanker = options.frontierRanker;
+  const frontierScorer = options.frontierScorer;
   const frontierCompactor = options.frontierCompactor;
   const frontierDeduplicator = options.frontierDeduplicator;
   const frontierTopologyAvailabilityReceipt = frontierTopology?.availability ? await frontierTopology.availability() : null;
@@ -851,7 +865,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const frontierTargetGeneratorStatus = frontierTargetGenerator?.availability ? await frontierTargetGenerator.availability() : null;
   const frontierTargetPoolStatus = frontierTargetPool?.availability ? await frontierTargetPool.availability() : null;
   const frontierDeduplicatorStatus = frontierDeduplicator?.availability ? await frontierDeduplicator.availability() : null;
-  let prefilterReceipt = { status: 'cpu-oracle' }, frontierReceipt = { status: 'cpu-oracle' }, frontierGenerationReceipt = { status: 'cpu-oracle' }, frontierTargetGenerationReceipt = { status: 'cpu-oracle' }, frontierTargetPoolReceipt = { status: 'cpu-oracle' }, frontierMetricsReceipt = { status: 'cpu-oracle' }, fieldMetricsReceipt = { status: 'cpu-oracle' }, frontierStateReceipt = { status: 'cpu-oracle' }, frontierTopologyReceipt = { status: 'cpu-oracle' }, frontierRankerReceipt = { status: 'cpu-oracle' }, frontierCompactorReceipt = { status: 'cpu-oracle' }, frontierDedupReceipt = { status: 'cpu-oracle' };
+  let prefilterReceipt = { status: 'cpu-oracle' }, frontierReceipt = { status: 'cpu-oracle' }, frontierGenerationReceipt = { status: 'cpu-oracle' }, frontierTargetGenerationReceipt = { status: 'cpu-oracle' }, frontierTargetPoolReceipt = { status: 'cpu-oracle' }, frontierMetricsReceipt = { status: 'cpu-oracle' }, fieldMetricsReceipt = { status: 'cpu-oracle' }, frontierStateReceipt = { status: 'cpu-oracle' }, frontierTopologyReceipt = { status: 'cpu-oracle' }, frontierRankerReceipt = { status: 'cpu-oracle' }, frontierScoreReceipt = { status: 'cpu-oracle' }, frontierCompactorReceipt = { status: 'cpu-oracle' }, frontierDedupReceipt = { status: 'cpu-oracle' };
   if (frontierTargetGeneratorStatus?.status !== 'available' && frontierTargetGeneratorStatus) frontierTargetGenerationReceipt = { status: 'fallback', reason: frontierTargetGeneratorStatus.reason || 'frontier-target-generator-unavailable' };
   if (frontierTargetPoolStatus?.status !== 'available' && frontierTargetPoolStatus) frontierTargetPoolReceipt = { status: 'fallback', reason: frontierTargetPoolStatus.reason || 'frontier-target-pool-unavailable' };
   if (frontierDeduplicatorStatus?.status !== 'available' && frontierDeduplicatorStatus) frontierDedupReceipt = { status: 'fallback', reason: frontierDeduplicatorStatus.reason || 'frontier-deduplicator-unavailable' };
@@ -926,7 +940,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const seed = { placements: [seedPlacement], field: new Set(seedCells.map(c => key(c.x, c.y))), remaining: pieces.filter(p => p.id !== centroidId), bounds: fieldMetrics([seedPlacement], centroidId), hintMatches: 0 }, seedBranches = restored ? [] : searchStrategy === 'breadth' ? await lockedSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, centroidRing, positionLocks, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; }) : targetFamily ? await targetSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, targetSeed, positionLocks, random, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; }) : [];
   if (seedBranches.length) {
     const lockedResult = await searchLockedSeedBranches(pieces, seedBranches, knownFamilies, centroidId, targetNeighborCount, Boolean(targetFamily), knownSignatures, searchHints, positionPreferences, random, quality, candidatePrefilter, receipt => { prefilterReceipt = receipt; }, options.frontierValidator, frontierEvaluator, frontierGenerator, frontierGeneratorStatus, receipt => { frontierReceipt = receipt; }, receipt => { frontierGenerationReceipt = receipt; }, isCancelled, options.frontierMetrics, receipt => { frontierMetricsReceipt = receipt; }, options.frontierState, receipt => { frontierStateReceipt = receipt; }, frontierTopology, receipt => { frontierTopologyReceipt = receipt; }, fieldMetricsAdapter, frontierTargetPool, frontierTargetPoolStatus, receipt => { frontierTargetPoolReceipt = receipt; }, frontierNavigator, frontierCandidateRecords);
-    return { ...lockedResult, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierRanker: frontierRankerReceipt, frontierCompactor: frontierCompactorReceipt, frontierDedup: frontierDedupReceipt };
+    return { ...lockedResult, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierRanker: frontierRankerReceipt, frontierScore: frontierScoreReceipt, frontierCompactor: frontierCompactorReceipt, frontierDedup: frontierDedupReceipt };
   }
   const beam = restored?.beam || [seed];
   const restoredNodeOffset = restored?.nodeOffset || 0;
@@ -1021,10 +1035,12 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         const gpuGeometryScore = Number.isFinite(gpuGeometry?.[5]) ? gpuGeometry[5] / 1000 : null;
       const gpuEvaluatorScore = Number.isFinite(candidate.gpuScore) ? candidate.gpuScore / 1000000 : null;
       const gpuTopologyScore = Number.isFinite(gpuTopology?.perimeter) ? gpuTopology.perimeter / 1000 : null;
-      const geometryScore = gpuGeometryScore ?? gpuEvaluatorScore ?? gpuTopologyScore ?? (openCentroid * 40 + (nextBounds.maxX - nextBounds.minX + 1) * (nextBounds.maxY - nextBounds.minY + 1) - contact * 2.4 - centroidContact * 2 - ringCoverage * 8);
-        return { piece, candidate, gpuState, metrics: candidateMetrics, score: geometryScore + targetBonus + noveltyBonus + neighborTargetBonus + hintBonus + qualityPenalty + random() * 12, nextBounds, hintMatches };
+        const geometryScore = gpuGeometryScore ?? gpuEvaluatorScore ?? gpuTopologyScore ?? (openCentroid * 40 + (nextBounds.maxX - nextBounds.minX + 1) * (nextBounds.maxY - nextBounds.minY + 1) - contact * 2.4 - centroidContact * 2 - ringCoverage * 8);
+        const scoreInput = { geometryScore, targetProgress, targetActive: Boolean(targetFamily), novelty: Boolean(noveltyBonus), neighborCount: candidateMetrics.centroidNeighborCount, targetNeighborCount: targetNeighborCount == null ? 0 : targetNeighborCount, neighborActive: targetNeighborCount != null, hint, coastBias: Number(quality.coastBias) || 0, perimeter: candidateMetrics.perimeter, gravityBias: Number(quality.gravityBias) || 0, gravityTension: candidateMetrics.gravityTension, inletBias: Number(quality.inletBias) || 0, inletRisk: candidateMetrics.inletRisk, randomUnit: random(), flags: (targetFamily ? 1 : 0) | (noveltyBonus ? 2 : 0) | (targetNeighborCount != null ? 4 : 0) | (hint ? 8 : 0) };
+        return { piece, candidate, gpuState, metrics: candidateMetrics, score: cpuScoreFrontierCandidate(scoreInput), scoreInput, nextBounds, hintMatches };
       }).filter(Boolean);
-      const ranked = await rankFrontierOptions(rankedCandidates, frontierRanker, receipt => { frontierRankerReceipt = receipt; });
+      const scoredCandidates = await scoreFrontierCandidates(rankedCandidates, frontierScorer, receipt => { frontierScoreReceipt = receipt; });
+      const ranked = await rankFrontierOptions(scoredCandidates, frontierRanker, receipt => { frontierRankerReceipt = receipt; });
       const deduplicated = await deduplicateRankedOptions(ranked, state);
       for (const option of deduplicated) {
         const placements = [...state.placements, option.candidate], metrics = option.metrics, field = new Set(state.field); option.candidate.cells.forEach(c => field.add(key(c.x, c.y)));
@@ -1109,7 +1125,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       }
     }
     if (acceptedMetrics.area === pieceCount * AREA && acceptedMetrics.holes === 0 && !acceptedMetrics.centroidEdgeCoast && acceptedMetrics.connected && !knownSignatures.has(cpuSignature)) {
-      const result = { type: 'done', placements: state.placements, metrics: { width: metrics.width, height: metrics.height, area: metrics.area, holes: metrics.holes, centroidCoast: metrics.centroidCoast, centroidEdgeCoast: metrics.centroidEdgeCoast, centroidCornerCoast: metrics.centroidCornerCoast, enclosure: metrics.enclosure, centroidFamily: metrics.centroidFamily, centroidFamilyId: metrics.centroidFamilyId, centroidSeed: metrics.centroidSeed, centroidNeighborCount: metrics.centroidNeighborCount, perimeter: metrics.perimeter, density: metrics.density, centerOffset: metrics.centerOffset, centroidSquareOffset: metrics.centroidSquareOffset, centerSquareDistance: metrics.centerSquareDistance, radialVariance: metrics.radialVariance, gravityVariance: metrics.gravityVariance, gravityOffset: metrics.gravityOffset, gravityTension: metrics.gravityTension, inletCells: metrics.inletCells, inletEdges: metrics.inletEdges, inletRisk: metrics.inletRisk, peninsulaDepth: metrics.peninsulaDepth, nestedPeninsulaDepth: metrics.nestedPeninsulaDepth, terminalChains: metrics.terminalChains, score: metrics.score }, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierRanker: frontierRankerReceipt, frontierCompactor: frontierCompactorReceipt, frontierDedup: frontierDedupReceipt };
+      const result = { type: 'done', placements: state.placements, metrics: { width: metrics.width, height: metrics.height, area: metrics.area, holes: metrics.holes, centroidCoast: metrics.centroidCoast, centroidEdgeCoast: metrics.centroidEdgeCoast, centroidCornerCoast: metrics.centroidCornerCoast, enclosure: metrics.enclosure, centroidFamily: metrics.centroidFamily, centroidFamilyId: metrics.centroidFamilyId, centroidSeed: metrics.centroidSeed, centroidNeighborCount: metrics.centroidNeighborCount, perimeter: metrics.perimeter, density: metrics.density, centerOffset: metrics.centerOffset, centroidSquareOffset: metrics.centroidSquareOffset, centerSquareDistance: metrics.centerSquareDistance, radialVariance: metrics.radialVariance, gravityVariance: metrics.gravityVariance, gravityOffset: metrics.gravityOffset, gravityTension: metrics.gravityTension, inletCells: metrics.inletCells, inletEdges: metrics.inletEdges, inletRisk: metrics.inletRisk, peninsulaDepth: metrics.peninsulaDepth, nestedPeninsulaDepth: metrics.nestedPeninsulaDepth, terminalChains: metrics.terminalChains, score: metrics.score }, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierRanker: frontierRankerReceipt, frontierScore: frontierScoreReceipt, frontierCompactor: frontierCompactorReceipt, frontierDedup: frontierDedupReceipt };
       if (targetFamily && metrics.centroidFamilyId === targetFamily && !metrics.centroidCornerCoast && (targetNeighborCount == null || metrics.centroidNeighborCount === targetNeighborCount)) return result;
       if (!metrics.centroidCornerCoast) {
         if (!searchHints && targetNeighborCount == null) return result;
@@ -1122,7 +1138,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   }
   }
   const terminalCheckpoint = serializeCheckpoint(beam, Math.min(pieceCount - 1, lastDepth), restoredNodeOffset + nodes);
-  return bestHintResult || fallback || { type: 'done', placements: null, metrics: null, nodes, cursor: { depth: terminalCheckpoint.depth, nodeOffset: terminalCheckpoint.nodeOffset, rootChoice: Number(options.rootChoice || 0), checkpoint: terminalCheckpoint }, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierRanker: frontierRankerReceipt, frontierCompactor: frontierCompactorReceipt, frontierDedup: frontierDedupReceipt };
+  return bestHintResult || fallback || { type: 'done', placements: null, metrics: null, nodes, cursor: { depth: terminalCheckpoint.depth, nodeOffset: terminalCheckpoint.nodeOffset, rootChoice: Number(options.rootChoice || 0), checkpoint: terminalCheckpoint }, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierRanker: frontierRankerReceipt, frontierScore: frontierScoreReceipt, frontierCompactor: frontierCompactorReceipt, frontierDedup: frontierDedupReceipt };
 }
 
 export { search };

@@ -1031,6 +1031,7 @@ function launchSearchPass() {
       frontierState: result.frontierState,
       frontierTopology: result.frontierTopology,
       frontierRanker: result.frontierRanker,
+      frontierScore: result.frontierScore,
       frontierCompactor: result.frontierCompactor,
       frontierDedup: result.frontierDedup,
       navigation: result.navigation,
@@ -1056,9 +1057,10 @@ function launchSearchPass() {
     const stateLabel = result.frontierState?.finalCanonicalParity === 'verified' ? ' · GPU labeled state + canonical acceptance' : result.frontierState?.status === 'used' ? ` · ${result.frontierState.resident ? 'resident ' : result.frontierState.persistent ? 'persistent ' : ''}GPU state transition` : result.frontierState?.status === 'fallback' ? ' · CPU state transition' : '';
     const topologyLabel = result.frontierTopology?.status === 'used' ? ' · GPU topology occupancy' : result.frontierTopology?.status === 'fallback' ? ' · CPU topology fallback' : '';
     const rankerLabel = result.frontierRanker?.status === 'used' ? ' · GPU deterministic ranking' : result.frontierRanker?.status === 'fallback' ? ' · CPU ranking fallback' : '';
+    const scoreLabel = result.frontierScore?.status === 'used' ? ' · GPU candidate scoring' : result.frontierScore?.status === 'fallback' ? ' · CPU score fallback' : '';
     const compactorLabel = result.frontierCompactor?.status === 'used' ? ` · ${result.frontierCompactor.persistent ? 'persistent ' : ''}GPU ${result.frontierCompactor.batch === 'breadth-quota' ? 'family-quota' : 'beam'} compaction` : result.frontierCompactor?.status === 'fallback' ? ' · CPU beam compaction fallback' : '';
     const navigationLabel = result.navigation?.expansionOwnership === 'gpu-owned' ? ` · ${result.navigation.gpuExpansionBatches || result.navigation.batchCount || 0} GPU-owned expansion batches · CPU canonical replay verified` : result.navigation?.status === 'checkpointed' ? ` · ${result.navigation.batchCount || 0} navigation batches · coordinator checkpoint saved` : result.navigation?.canonicalReplay === 'verified' ? ` · ${result.navigation.batchCount || 0} navigation batches · CPU-oracle replay verified` : '';
-    const labels = `${prefilterLabel}${frontierLabel}${generationLabel}${metricsLabel}${fieldMetricsLabel}${stateLabel}${topologyLabel}${rankerLabel}${compactorLabel}${navigationLabel}`;
+    const labels = `${prefilterLabel}${frontierLabel}${generationLabel}${metricsLabel}${fieldMetricsLabel}${stateLabel}${topologyLabel}${rankerLabel}${scoreLabel}${compactorLabel}${navigationLabel}`;
     if (result.hasPlacement || (Array.isArray(result.placements) && result.placements.length)) { const added = addSnapshot(result.placements, result.nodes); document.querySelector('#searchStatus').textContent = added ? `Arrangement ${String(app.snapshots.length).padStart(2, '0')} captured · continuing search${labels}` : `Duplicate cover skipped · continuing search${labels}`; if (added) toast(`Arrangement ${String(app.snapshots.length).padStart(2, '0')} captured and ranked`); }
     else document.querySelector('#searchStatus').textContent = `Pass ${app.pass} complete · continuing search${labels}`;
     if (app.continuous) app.searchTimer = setTimeout(launchSearchPass, 80);

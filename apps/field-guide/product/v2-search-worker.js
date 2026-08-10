@@ -15,6 +15,7 @@ import { createWebGpuFrontierDeduplicator } from '../../../packages/search-core/
 import { createWebGpuFrontierNavigator } from '../../../packages/search-core/src/webgpu-frontier-navigator.js';
 import { createWebGpuResidentFrontierState } from '../../../packages/search-core/src/webgpu-resident-frontier-state.js';
 import { createWebGpuFrontierCandidateRecords } from '../../../packages/search-core/src/webgpu-frontier-candidate-records.js';
+import { createWebGpuFrontierScorer } from '../../../packages/search-core/src/webgpu-frontier-scorer.js';
 import { createWebGpuDeviceCache } from '../../../packages/search-core/src/webgpu-device-cache.js';
 import { createNavigationCoordinator } from '../../../packages/search-worker/src/navigation-coordinator.js';
 import { search } from './v2-legacy-search.js';
@@ -31,6 +32,7 @@ const fieldMetrics = createWebGpuFieldMetrics({ gpu: globalThis.navigator?.gpu, 
 const frontierState = createWebGpuLabeledFrontierState({ gpu: globalThis.navigator?.gpu, deviceCache });
 const residentFrontierState = createWebGpuResidentFrontierState({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierCandidateRecords = createWebGpuFrontierCandidateRecords({ gpu: globalThis.navigator?.gpu, deviceCache });
+const frontierScorer = createWebGpuFrontierScorer({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierTopology = createWebGpuFrontierTopology({ gpu: globalThis.navigator?.gpu });
 const frontierRanker = createWebGpuFrontierRanker({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierCompactor = createWebGpuPersistentFrontierCompactor({ gpu: globalThis.navigator?.gpu, deviceCache });
@@ -56,6 +58,7 @@ async function runProductSearch(request, context) {
     frontierTargetGenerator,
     frontierTargetPool,
     frontierCandidateRecords,
+    frontierScorer,
     frontierMetrics,
     fieldMetrics,
     frontierState,
@@ -91,7 +94,7 @@ self.onmessage = event => {
     return;
   }
   try {
-      void search(message?.pieces, message?.knownCentroidFamilies || [], { ...message, candidatePrefilter, frontierValidator, frontierEvaluator, frontierGenerator, frontierTargetGenerator, frontierTargetPool, frontierCandidateRecords, frontierMetrics, fieldMetrics, frontierState, frontierTopology, frontierRanker, frontierDeduplicator })
+      void search(message?.pieces, message?.knownCentroidFamilies || [], { ...message, candidatePrefilter, frontierValidator, frontierEvaluator, frontierGenerator, frontierTargetGenerator, frontierTargetPool, frontierCandidateRecords, frontierScorer, frontierMetrics, fieldMetrics, frontierState, frontierTopology, frontierRanker, frontierDeduplicator })
       .then(result => self.postMessage(result))
       .catch(error => self.postMessage({ type: 'done', placements: null, metrics: null, nodes: 0, error: error.message }));
   } catch (error) {
