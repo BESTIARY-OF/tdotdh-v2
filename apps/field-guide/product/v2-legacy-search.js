@@ -102,7 +102,7 @@ function candidateTranslations(piece, field, bounds) {
   return [...translations.values()];
 }
 
-async function generateFrontierTranslations(piece, state, bounds, frontierGenerator, onGeneration = () => {}, availabilityStatus = null) {
+async function generateFrontierTranslations(piece, state, bounds, frontierGenerator, onGeneration = () => {}, availabilityStatus = null, frontierCandidateRecords = null) {
   if (!frontierGenerator?.generate) return candidateTranslations(piece, state.field, bounds);
   if (availabilityStatus && availabilityStatus.status !== 'available') {
     const translations = candidateTranslations(piece, state.field, bounds);
@@ -114,12 +114,14 @@ async function generateFrontierTranslations(piece, state, bounds, frontierGenera
   onGeneration({ status: result?.parity === 'verified' ? 'used' : 'fallback', backend: result?.backend || 'cpu-oracle', parity: result?.parity, compaction: result?.compaction, candidateCount: result?.candidateCount || 0 });
   if (Array.isArray(result?.compactedOrigins)) return result.compactedOrigins.filter(origin => origin && Number.isSafeInteger(origin.x) && Number.isSafeInteger(origin.y)).map(origin => ({ id: piece.id, origin, cells: placedCells(piece, origin) }));
   if (!Array.isArray(result?.origins) || !Array.isArray(result?.validity)) return candidateTranslations(piece, state.field, bounds);
-  const translations = new Map();
+  const records = [];
   result.origins.forEach((origin, index) => {
     if (result.validity[index] !== 1 || !origin || !Number.isSafeInteger(origin.x) || !Number.isSafeInteger(origin.y)) return;
-    const cells = placedCells(piece, origin), originKey = `${origin.x},${origin.y}`;
-    if (!translations.has(originKey)) translations.set(originKey, { id: piece.id, origin, cells });
+    records.push({ pieceId: piece.id, targetOrdinal: 0, originX: origin.x, originY: origin.y, inputOrdinal: index });
   });
+  const compacted = frontierCandidateRecords?.compact ? await frontierCandidateRecords.compact(records) : { records };
+  const translations = new Map();
+  for (const record of compacted.records || []) { const origin = { x: record.originX, y: record.originY }, originKey = `${origin.x},${origin.y}`; if (!translations.has(originKey)) translations.set(originKey, { id: piece.id, origin, cells: placedCells(piece, origin) }); }
   return [...translations.values()];
 }
 async function generateFrontierTranslationsBatch(pieces, state, bounds, frontierGenerator, onGeneration = () => {}, availabilityStatus = null) {
@@ -154,7 +156,7 @@ async function generateFrontierTranslationsBatch(pieces, state, bounds, frontier
   }
   return new Map(pieces.map(piece => [piece.id, byId.get(piece.id) || []]));
 }
-async function generateFrontierTranslationsAcrossBeam(plans, frontierGenerator, onGeneration = () => {}, availabilityStatus = null) {
+async function generateFrontierTranslationsAcrossBeam(plans, frontierGenerator, onGeneration = () => {}, availabilityStatus = null, frontierCandidateRecords = null) {
   const generated = plans.map(() => new Map());
   if (!plans.length) return generated;
   if (availabilityStatus && availabilityStatus.status !== 'available') {
@@ -187,7 +189,7 @@ async function generateFrontierTranslationsAcrossBeam(plans, frontierGenerator, 
     } else chunks.push({ inputs: [...group.inputs], refs: [...group.refs], candidateCount: group.candidateCount });
   }
   const items = [];
-  let totalCandidateCount = 0, batches = 0, backend = 'compute-shader', parity = 'verified';
+  let totalCandidateCount = 0, batches = 0, backend = 'compute-shader', parity = 'verified', recordBackend = 'cpu-oracle', recordParity = 'oracle', recordInputCount = 0, recordOutputCount = 0;
   for (const chunk of chunks) {
     const result = await frontierGenerator.generateBatch(chunk.inputs);
     if (result?.backend) backend = result.backend;
@@ -200,19 +202,21 @@ async function generateFrontierTranslationsAcrossBeam(plans, frontierGenerator, 
     totalCandidateCount += Number(result?.candidateCount) || chunk.candidateCount; batches += 1;
   }
   for (const { item, ref } of items) {
-    const piece = ref.piece, translations = new Map();
+    const piece = ref.piece, translations = new Map(), records = [];
     (item.origins || []).forEach((origin, index) => {
       if (item.validity?.[index] !== 1 || !origin || !Number.isSafeInteger(origin.x) || !Number.isSafeInteger(origin.y)) return;
-      const cells = placedCells(piece, origin), originKey = `${origin.x},${origin.y}`;
-      if (!translations.has(originKey)) translations.set(originKey, { id: piece.id, origin, cells });
+      records.push({ pieceId: piece.id, targetOrdinal: 0, originX: origin.x, originY: origin.y, inputOrdinal: index });
     });
+    const compacted = frontierCandidateRecords?.compact ? await frontierCandidateRecords.compact(records) : { status: 'completed', backend: 'cpu-oracle', parity: 'oracle', inputCount: records.length, outputCount: records.length, records };
+    recordBackend = compacted.backend || recordBackend; recordParity = compacted.parity || recordParity; recordInputCount += Number(compacted.inputCount) || records.length; recordOutputCount += Number(compacted.outputCount) || compacted.records?.length || 0;
+    for (const record of compacted.records || []) { const origin = { x: record.originX, y: record.originY }, originKey = `${origin.x},${origin.y}`; if (!translations.has(originKey)) translations.set(originKey, { id: piece.id, origin, cells: placedCells(piece, origin) }); }
     generated[ref.planIndex].set(piece.id, [...translations.values()]);
   }
   const inputCount = planGroups.reduce((sum, group) => sum + group.inputs.length, 0);
-  onGeneration({ status: items.length === inputCount ? 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? parity : 'oracle', candidateCount: totalCandidateCount, batches, batch: 'beam' });
+  onGeneration({ status: items.length === inputCount ? 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? parity : 'oracle', candidateCount: totalCandidateCount, batches, batch: 'beam', candidateRecords: { backend: recordBackend, parity: recordParity, inputCount: recordInputCount, outputCount: recordOutputCount } });
   return generated;
 }
-async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTargetGenerator, positionLocks, seedOrigin, onGeneration = () => {}, availabilityStatus = null) {
+async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTargetGenerator, positionLocks, seedOrigin, onGeneration = () => {}, availabilityStatus = null, frontierCandidateRecords = null) {
   const generated = plans.map(() => new Map());
   if (!plans.length) return generated;
   if (!frontierTargetGenerator?.generateBatch) {
@@ -246,7 +250,7 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
     else chunks.push({ inputs: [...group.inputs], refs: [...group.refs], candidateCount: group.candidateCount });
   }
   const items = [];
-  let totalCandidateCount = 0, batches = 0, backend = 'compute-shader';
+  let totalCandidateCount = 0, batches = 0, backend = 'compute-shader', recordBackend = 'cpu-oracle', recordParity = 'oracle', recordInputCount = 0, recordOutputCount = 0;
   for (const chunk of chunks) {
     const result = await frontierTargetGenerator.generateBatch(chunk.inputs);
     if (result?.backend) backend = result.backend;
@@ -255,18 +259,25 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
     totalCandidateCount += Number(result?.candidateCount) || chunk.candidateCount; batches += 1;
   }
   for (const { item, ref } of items) {
-    const byTarget = generated[ref.planIndex] || new Map(), piece = ref.piece, pieceCount = Number(item.pieceCount) || applyLock(piece).length;
+    const byTarget = generated[ref.planIndex] || new Map(), piece = ref.piece, pieceCount = Number(item.pieceCount) || applyLock(piece).length, records = [];
     for (let index = 0; index < (item.origins || []).length; index++) {
       if (item.validity?.[index] !== 1) continue;
-      const target = ref.plan.targetPool[Math.floor(index / pieceCount)], origin = item.origins[index];
-      if (!target || !origin || !Number.isSafeInteger(origin.x) || !Number.isSafeInteger(origin.y)) continue;
+      const origin = item.origins[index];
+      if (!origin || !Number.isSafeInteger(origin.x) || !Number.isSafeInteger(origin.y)) continue;
+      records.push({ pieceId: piece.id, targetOrdinal: Math.floor(index / pieceCount), originX: origin.x, originY: origin.y, inputOrdinal: index });
+    }
+    const compacted = frontierCandidateRecords?.compact ? await frontierCandidateRecords.compact(records) : { status: 'completed', backend: 'cpu-oracle', parity: 'oracle', inputCount: records.length, outputCount: records.length, records };
+    recordBackend = compacted.backend || recordBackend; recordParity = compacted.parity || recordParity; recordInputCount += Number(compacted.inputCount) || records.length; recordOutputCount += Number(compacted.outputCount) || compacted.records?.length || 0;
+    for (const record of compacted.records || []) {
+      const target = ref.plan.targetPool[record.targetOrdinal];
+      if (!target) continue;
       const targetKey = key(target.x, target.y), entries = byTarget.get(targetKey) || [];
-      entries.push({ piece, candidate: { id: piece.id, origin, cells: placedCells(piece, origin) } }); byTarget.set(targetKey, entries);
+      entries.push({ piece, candidate: { id: piece.id, origin: { x: record.originX, y: record.originY }, cells: placedCells(piece, { x: record.originX, y: record.originY }) } }); byTarget.set(targetKey, entries);
     }
     generated[ref.planIndex] = byTarget;
   }
   const inputCount = planGroups.reduce((sum, group) => sum + group.inputs.length, 0);
-  onGeneration({ status: items.length === inputCount ? 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? 'verified' : 'oracle', candidateCount: totalCandidateCount, batches, batch: 'beam' });
+  onGeneration({ status: items.length === inputCount ? 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? 'verified' : 'oracle', candidateCount: totalCandidateCount, batches, batch: 'beam', candidateRecords: { backend: recordBackend, parity: recordParity, inputCount: recordInputCount, outputCount: recordOutputCount } });
   return generated;
 }
 async function generateFrontierTargetPoolsAcrossBeam(plans, frontierTargetPool, centroidId, onTargetPool = () => {}, availabilityStatus = null) {
@@ -739,7 +750,7 @@ async function evaluateFinalTopology(state, centroidId, frontierTopology, onTopo
   return null;
 }
 
-async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroidId, targetNeighborCount, allowKnownFamily = false, knownSignatures = new Set(), searchHints = false, positionPreferences = {}, random = Math.random, quality = {}, candidatePrefilter = null, onPrefilter = () => {}, frontierValidator = null, frontierEvaluator = null, frontierGenerator = null, frontierGeneratorStatus = null, onFrontier = () => {}, onGeneration = () => {}, isCancelled = () => {}, frontierMetrics = null, onMetrics = () => {}, frontierState = null, onState = () => {}, frontierTopology = null, onTopology = () => {}, fieldMetricsAdapter = null, frontierTargetPool = null, frontierTargetPoolStatus = null, onTargetPool = () => {}, frontierNavigator = null) {
+async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroidId, targetNeighborCount, allowKnownFamily = false, knownSignatures = new Set(), searchHints = false, positionPreferences = {}, random = Math.random, quality = {}, candidatePrefilter = null, onPrefilter = () => {}, frontierValidator = null, frontierEvaluator = null, frontierGenerator = null, frontierGeneratorStatus = null, onFrontier = () => {}, onGeneration = () => {}, isCancelled = () => {}, frontierMetrics = null, onMetrics = () => {}, frontierState = null, onState = () => {}, frontierTopology = null, onTopology = () => {}, fieldMetricsAdapter = null, frontierTargetPool = null, frontierTargetPoolStatus = null, onTargetPool = () => {}, frontierNavigator = null, frontierCandidateRecords = null) {
   const unknownBranches = (allowKnownFamily ? branches : branches.filter(branch => !knownFamilies.has(branch.centroidFamilyId))).sort(() => random() - .5);
   let nodes = 0;
   for (const branch of unknownBranches) {
@@ -775,7 +786,7 @@ async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroi
       const touchesGpuTargetPool = candidate => !targetKeys || candidate.cells.some(cell => targetKeys.has(key(cell.x, cell.y)));
       const choices = [];
       for (const piece of state.remaining) {
-        let options = (await generateFrontierTranslations(piece, state, state.bounds, frontierGenerator, onGeneration, frontierGeneratorStatus)).map(candidate => ({ piece, candidate }));
+        let options = (await generateFrontierTranslations(piece, state, state.bounds, frontierGenerator, onGeneration, frontierGeneratorStatus, frontierCandidateRecords)).map(candidate => ({ piece, candidate }));
         if (targetKeys) options = options.filter(entry => touchesGpuTargetPool(entry.candidate));
         options = await evaluateFieldAggregates(options, state, centroidId, fieldMetricsAdapter, onMetrics);
         options = options.map(({ candidate, gpuFieldMetrics }) => {
@@ -826,6 +837,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const frontierGenerator = options.frontierGenerator;
   const frontierTargetGenerator = options.frontierTargetGenerator;
   const frontierTargetPool = options.frontierTargetPool;
+  const frontierCandidateRecords = options.frontierCandidateRecords;
   const frontierMetrics = options.frontierMetrics;
   const fieldMetricsAdapter = options.fieldMetrics;
   const frontierState = options.frontierState;
@@ -913,7 +925,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const restored = restoreCheckpoint(options.resumeCheckpoint);
   const seed = { placements: [seedPlacement], field: new Set(seedCells.map(c => key(c.x, c.y))), remaining: pieces.filter(p => p.id !== centroidId), bounds: fieldMetrics([seedPlacement], centroidId), hintMatches: 0 }, seedBranches = restored ? [] : searchStrategy === 'breadth' ? await lockedSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, centroidRing, positionLocks, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; }) : targetFamily ? await targetSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, targetSeed, positionLocks, random, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; }) : [];
   if (seedBranches.length) {
-    const lockedResult = await searchLockedSeedBranches(pieces, seedBranches, knownFamilies, centroidId, targetNeighborCount, Boolean(targetFamily), knownSignatures, searchHints, positionPreferences, random, quality, candidatePrefilter, receipt => { prefilterReceipt = receipt; }, options.frontierValidator, frontierEvaluator, frontierGenerator, frontierGeneratorStatus, receipt => { frontierReceipt = receipt; }, receipt => { frontierGenerationReceipt = receipt; }, isCancelled, options.frontierMetrics, receipt => { frontierMetricsReceipt = receipt; }, options.frontierState, receipt => { frontierStateReceipt = receipt; }, frontierTopology, receipt => { frontierTopologyReceipt = receipt; }, fieldMetricsAdapter, frontierTargetPool, frontierTargetPoolStatus, receipt => { frontierTargetPoolReceipt = receipt; }, frontierNavigator);
+    const lockedResult = await searchLockedSeedBranches(pieces, seedBranches, knownFamilies, centroidId, targetNeighborCount, Boolean(targetFamily), knownSignatures, searchHints, positionPreferences, random, quality, candidatePrefilter, receipt => { prefilterReceipt = receipt; }, options.frontierValidator, frontierEvaluator, frontierGenerator, frontierGeneratorStatus, receipt => { frontierReceipt = receipt; }, receipt => { frontierGenerationReceipt = receipt; }, isCancelled, options.frontierMetrics, receipt => { frontierMetricsReceipt = receipt; }, options.frontierState, receipt => { frontierStateReceipt = receipt; }, frontierTopology, receipt => { frontierTopologyReceipt = receipt; }, fieldMetricsAdapter, frontierTargetPool, frontierTargetPoolStatus, receipt => { frontierTargetPoolReceipt = receipt; }, frontierNavigator, frontierCandidateRecords);
     return { ...lockedResult, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierRanker: frontierRankerReceipt, frontierCompactor: frontierCompactorReceipt, frontierDedup: frontierDedupReceipt };
   }
   const beam = restored?.beam || [seed];
@@ -949,11 +961,11 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     for (let index = beamPlans.length - 1; index >= 0; index--) if (!beamPlans[index].targetPool?.length) beamPlans.splice(index, 1);
     const useTargetGeneratedFrontier = frontierTargetGeneratorStatus?.status === 'available';
     const generatedByTargetBeam = useTargetGeneratedFrontier
-      ? await generateFrontierTargetTranslationsAcrossBeam(beamPlans, frontierTargetGenerator, positionLocks, seedOrigin, receipt => { frontierTargetGenerationReceipt = receipt; }, frontierTargetGeneratorStatus)
+      ? await generateFrontierTargetTranslationsAcrossBeam(beamPlans, frontierTargetGenerator, positionLocks, seedOrigin, receipt => { frontierTargetGenerationReceipt = receipt; }, frontierTargetGeneratorStatus, frontierCandidateRecords)
       : null;
     const useGeneratedFrontier = !useTargetGeneratedFrontier && frontierGeneratorStatus?.status === 'available';
     const generatedByBeam = useGeneratedFrontier
-      ? await generateFrontierTranslationsAcrossBeam(beamPlans, frontierGenerator, receipt => { frontierGenerationReceipt = receipt; }, frontierGeneratorStatus)
+      ? await generateFrontierTranslationsAcrossBeam(beamPlans, frontierGenerator, receipt => { frontierGenerationReceipt = receipt; }, frontierGeneratorStatus, frontierCandidateRecords)
       : null;
     if (!useGeneratedFrontier && frontierGenerator?.generate && frontierGenerationReceipt.status === 'cpu-oracle') frontierGenerationReceipt = { status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', candidateCount: 0 };
     if (navigationBatchReceipt) {

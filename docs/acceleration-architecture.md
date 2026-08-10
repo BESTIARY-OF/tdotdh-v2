@@ -126,6 +126,14 @@ The next active gate is broader GPU ownership of candidate generation,
 target-index joins, and score/metric reductions; those are still CPU-visible
 control decisions even though their parity-gated adapters exist.
 
+The first slice of that next gate is now wired through
+`webgpu-frontier-candidate-records.js`. Target-generated candidates are
+represented as bounded records (`pieceId`, `targetOrdinal`, origin, and stable
+input ordinal), compacted with a deterministic first-record CPU oracle, and
+admitted through a WebGPU duplicate-selection shader when available. The
+product only materializes placement cells after the compact record set is
+returned; unavailable adapters retain the exact CPU record result.
+
 The live 5174 runtime receipt for this seam is recorded in
 `docs/receipts/webgpu-deduplicator-runtime-2026-08-10.md`.
 

@@ -10,6 +10,8 @@
     "preview:v2": "node apps/field-guide/serve.mjs 5174",
     "check:labeled-frontier-state": "node --check packages/search-core/src/webgpu-labeled-frontier-state.js && node --check packages/search-core/test/webgpu-labeled-frontier-state.test.js",
     "check:resident-frontier-state": "node --check packages/search-core/src/webgpu-resident-frontier-state.js && node --check packages/search-core/test/webgpu-resident-frontier-state.test.js && node --check packages/search-core/src/webgpu-frontier-navigator.js && node --check packages/search-core/test/webgpu-frontier-navigator.test.js",
+    "test:candidate-records": "node packages/search-core/test/webgpu-frontier-candidate-records.test.js",
+    "check:candidate-records": "node --check packages/search-core/src/webgpu-frontier-candidate-records.js && node --check packages/search-core/test/webgpu-frontier-candidate-records.test.js",
     "check:frontier-topology": "node --check packages/search-core/src/webgpu-frontier-topology.js && node --check packages/search-core/test/webgpu-frontier-topology.test.js",
     "check:gpu-topology": "npm run check:labeled-frontier-state && npm run check:frontier-topology",
     "test:frontier-deduplicator": "node packages/search-core/test/webgpu-frontier-deduplicator.test.js",

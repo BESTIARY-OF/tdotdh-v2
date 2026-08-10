@@ -8,6 +8,7 @@ import { cpuGenerateFrontierTargetBatch } from '../../../packages/search-core/sr
 import { cpuGenerateFrontierTargetPoolBatch } from '../../../packages/search-core/src/webgpu-frontier-target-pool.js';
 import { cpuDeduplicateFrontierStates } from '../../../packages/search-core/src/webgpu-frontier-deduplicator.js';
 import { cpuCompactFrontierRows } from '../../../packages/search-core/src/webgpu-frontier-compactor.js';
+import { cpuCompactFrontierCandidateRecords } from '../../../packages/search-core/src/webgpu-frontier-candidate-records.js';
 
 globalThis.postMessage = () => {};
 
@@ -66,6 +67,10 @@ const frontierTargetPool = {
   availability: async () => ({ status: 'available', backend: 'webgpu' }),
   generateBatch: async inputs => ({ ...cpuGenerateFrontierTargetPoolBatch(inputs), status: 'completed', backend: 'test-frontier-target-pool', parity: 'verified' }),
 };
+let frontierCandidateRecordCalls = 0;
+const frontierCandidateRecords = {
+  compact: async records => { frontierCandidateRecordCalls += 1; return { ...cpuCompactFrontierCandidateRecords(records), status: 'completed', backend: 'test-frontier-candidate-records', parity: 'verified' }; },
+};
 const frontierTopology = {
   evaluate: async input => ({ ...cpuFrontierTopology(input), backend: 'test-frontier-topology', parity: 'verified' }),
 };
@@ -106,7 +111,7 @@ const residentNavigator = {
 };
 const singleResult = await search(pieces, [], { ...sharedOptions, frontierGenerator: singleFrontierGenerator });
 const result = await search(pieces, [], { ...sharedOptions, frontierGenerator });
-const targetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator });
+const targetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator, frontierCandidateRecords });
 const targetPoolResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator, frontierTargetPool });
 const depthResult = await search(pieces, [], { ...sharedOptions, searchStrategy: 'depth', frontierCompactor });
 const breadthResult = await search(pieces, [], { ...sharedOptions, searchStrategy: 'breadth', frontierCompactor });
@@ -160,6 +165,8 @@ assert.deepEqual(result.placements, singleResult.placements);
 assert.deepEqual(result.metrics, singleResult.metrics);
 assert.equal(targetResult.frontierTargetGeneration.status, 'used');
 assert.equal(targetResult.frontierTargetGeneration.backend, 'test-frontier-target-generator');
+assert.ok(frontierCandidateRecordCalls > 0);
+assert.equal(targetResult.frontierTargetGeneration.candidateRecords.backend, 'test-frontier-candidate-records');
 assert.deepEqual(targetResult.placements, result.placements);
 assert.deepEqual(targetResult.metrics, result.metrics);
 assert.equal(targetPoolResult.frontierTargetPool.status, 'used');
