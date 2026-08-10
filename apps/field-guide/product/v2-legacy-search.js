@@ -330,9 +330,11 @@ function centroidSeedInfoFromGpuState(placements, centroidId, gpuState) {
   return { family: ids.length ? ids.map(id => `#${String(id).padStart(2, '0')}`).join(' + ') : 'none', seed, id: seedFamilyId(seed), neighborCount: ids.length };
 }
 function sameGpuState(left, right) {
-  if (!left || !right || left.wordCount !== right.wordCount || left.pieceIds.length !== right.pieceIds.length || left.remainingMask.length !== right.remainingMask.length || left.nextLabels.length !== right.nextLabels.length) return false;
+  if (!left || !right || left.wordCount !== right.wordCount || left.pieceIds.length !== right.pieceIds.length || left.remainingMask.length !== right.remainingMask.length) return false;
   for (let index = 0; index < left.pieceIds.length; index++) if (left.pieceIds[index] !== right.pieceIds[index]) return false;
   for (let index = 0; index < left.remainingMask.length; index++) if (left.remainingMask[index] !== right.remainingMask[index]) return false;
+  if (left.canonicalSignature || right.canonicalSignature) return left.canonicalSignature === right.canonicalSignature;
+  if (!left.nextLabels || !right.nextLabels || left.nextLabels.length !== right.nextLabels.length) return false;
   for (let index = 0; index < left.nextLabels.length; index++) if (left.nextLabels[index] !== right.nextLabels[index]) return false;
   return true;
 }
@@ -565,10 +567,13 @@ async function evaluateFrontierState(entries, state, frontierState, onState = ()
       const labelsPerCandidate = result.pieceIds.length * wordCount;
       return entries.map((entry, index) => {
         const labelStart = index * labelsPerCandidate;
-        const nextLabels = result.nextLabels.slice(labelStart, labelStart + labelsPerCandidate);
         const canonicalLabels = result.canonicalLabels.slice(labelStart, labelStart + labelsPerCandidate);
         const remainingMask = Array.from(candidates[index].remainingMask);
-        return { ...entry, gpuState: { absoluteHash: result.absoluteHashes[index], canonicalHash: result.canonicalHashes[index], nextLabels, canonicalLabels, pieceIds: result.pieceIds, wordCount, remainingMask, residentStateIndex: result.residentStateIndices?.[index], residentEpoch: result.residentEpoch } };
+        const resident = result.resident === true || result.navigator?.status === 'resident';
+        const statePayload = { absoluteHash: result.absoluteHashes[index], canonicalHash: result.canonicalHashes[index], pieceIds: result.pieceIds, wordCount, remainingMask, residentStateIndex: result.residentStateIndices?.[index], residentEpoch: result.residentEpoch };
+        if (resident) { statePayload.parentLabelRef = { epoch: result.residentEpoch, index: result.residentStateIndices?.[index] }; statePayload.canonicalSignature = canonicalSignatureFromLabeledFrontierState({ pieceIds: result.pieceIds, canonicalLabels, wordCount }); }
+        else Object.assign(statePayload, { nextLabels: result.nextLabels.slice(labelStart, labelStart + labelsPerCandidate), canonicalLabels });
+        return { ...entry, gpuState: statePayload };
       });
     }
     onState({ status: 'fallback', reason: result?.reason || 'frontier-state-unavailable' });
@@ -591,7 +596,11 @@ async function evaluateFrontierStateAcrossBeam(jobs, frontierState, onState = ()
       const wordCount = Number(result.wordCount) || 0, labelsPerCandidate = result.pieceIds.length * wordCount;
       for (const [index, item] of pending.entries()) {
         const labelStart = index * labelsPerCandidate;
-        jobs[item.jobIndex].entries[item.entryIndex] = { ...item.entry, gpuState: { absoluteHash: result.absoluteHashes[index], canonicalHash: result.canonicalHashes[index], nextLabels: result.nextLabels.slice(labelStart, labelStart + labelsPerCandidate), canonicalLabels: result.canonicalLabels.slice(labelStart, labelStart + labelsPerCandidate), pieceIds: result.pieceIds, wordCount, remainingMask: Array.from(item.candidate.remainingMask), residentStateIndex: result.residentStateIndices?.[index], residentEpoch: result.residentEpoch } };
+        const canonicalLabels = result.canonicalLabels.slice(labelStart, labelStart + labelsPerCandidate), resident = result.resident === true || result.navigator?.status === 'resident';
+        const statePayload = { absoluteHash: result.absoluteHashes[index], canonicalHash: result.canonicalHashes[index], pieceIds: result.pieceIds, wordCount, remainingMask: Array.from(item.candidate.remainingMask), residentStateIndex: result.residentStateIndices?.[index], residentEpoch: result.residentEpoch };
+        if (resident) { statePayload.parentLabelRef = { epoch: result.residentEpoch, index: result.residentStateIndices?.[index] }; statePayload.canonicalSignature = canonicalSignatureFromLabeledFrontierState({ pieceIds: result.pieceIds, canonicalLabels, wordCount }); }
+        else Object.assign(statePayload, { nextLabels: result.nextLabels.slice(labelStart, labelStart + labelsPerCandidate), canonicalLabels });
+        jobs[item.jobIndex].entries[item.entryIndex] = { ...item.entry, gpuState: statePayload };
       }
       onState({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, persistent: result.persistent === true, resident: result.navigator?.status === 'resident', navigatorEpoch: result.navigator?.epoch, bufferCapacity: result.bufferCapacity, candidateCount: pending.length, batch: 'beam' });
       return jobs;
@@ -1066,7 +1075,13 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     const topologyMetrics = await evaluateFinalTopology(state, centroidId, frontierTopology, receipt => { frontierTopologyReceipt = receipt; });
     const acceptedMetrics = { ...metrics, ...(topologyMetrics || {}), connected: topologyMetrics?.connected ?? connected(state.field) };
     const cpuSignature = arrangementSignature(state.placements);
-    if (state.gpuState?.canonicalLabels) {
+    if (state.gpuState?.canonicalSignature) {
+      if (state.gpuState.canonicalSignature !== cpuSignature) {
+        frontierStateReceipt = { ...frontierStateReceipt, finalCanonicalParity: 'rejected', reason: 'canonical-signature-mismatch' };
+        continue;
+      }
+      frontierStateReceipt = { ...frontierStateReceipt, finalCanonicalParity: 'verified', canonicalSignature: state.gpuState.canonicalSignature };
+    } else if (state.gpuState?.canonicalLabels) {
       try {
         const gpuCanonicalSignature = canonicalSignatureFromLabeledFrontierState(state.gpuState);
         if (gpuCanonicalSignature !== cpuSignature) {

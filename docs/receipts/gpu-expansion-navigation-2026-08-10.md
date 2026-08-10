@@ -70,3 +70,4 @@ shader, nor does it claim a speedup until a real WebGPU run records adapter
 backend and wall-clock comparisons against the v1 CPU worker. The next seam is
 to replace CPU candidate-object materialization with a persistent GPU frontier
 buffer and bounded GPU compaction, while retaining exact CPU canonical replay.
+Resident beam states now carry only the opaque resident slot/epoch, hashes, remaining-mask, and a canonical replay signature. They do not retain per-state `nextLabels` or `canonicalLabels` arrays; those arrays remain only on the nonresident CPU-oracle fallback path. This removes the largest repeated JS-side label payload from the normal resident beam handoff while keeping canonical parity evidence explicit.
