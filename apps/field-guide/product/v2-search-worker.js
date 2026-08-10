@@ -40,15 +40,22 @@ const frontierRanker = createWebGpuFrontierRanker({ gpu: globalThis.navigator?.g
 const frontierCompactor = createWebGpuPersistentFrontierCompactor({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierDeduplicator = createWebGpuFrontierDeduplicator({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierNavigationScheduler = createWebGpuFrontierNavigationScheduler({ gpu: globalThis.navigator?.gpu, deviceCache });
+const gpuStageAdapters = Object.freeze({ prefilter: candidatePrefilter, frontier: frontierEvaluator, frontierGeneration: frontierGenerator, frontierTargetGeneration: frontierTargetGenerator, frontierTargetPool, frontierMetrics, fieldMetrics, frontierState, frontierTopology, frontierRanker, frontierCompactor, frontierDedup: frontierDeduplicator, frontierScore: frontierScorer, navigationPlan: frontierNavigationScheduler });
+let gpuStageAvailabilityPromise = null;
+async function getGpuStageAvailability() {
+  if (!gpuStageAvailabilityPromise) gpuStageAvailabilityPromise = Promise.all(Object.entries(gpuStageAdapters).map(async ([name, adapter]) => [name, adapter?.availability ? await adapter.availability() : { status: 'unavailable', reason: 'stage-does-not-expose-availability' }])).then(entries => Object.freeze(Object.fromEntries(entries)));
+  return gpuStageAvailabilityPromise;
+}
 async function runProductSearch(request, context) {
   const steering = request.steering || {};
   residentFrontierState.reset();
   const gpuExecution = await probeWebGpuExecutionCapabilities({ gpu: globalThis.navigator?.gpu, requiredLimits: { maxStorageBufferBindingSize: 33554432 }, deviceCache });
   const navigation = createNavigationCoordinator({ ticket: request.ticket, cursor: request.cursor });
   const frontierNavigator = createWebGpuFrontierNavigator({ stateAdapter: residentFrontierState, ticket: request.ticket, cursor: request.cursor, isCancelled: context.isCancelled });
+  const stageAvailability = await getGpuStageAvailability();
   const result = await search(request.pieces, steering.knownCentroidFamilies || [], {
     ...steering,
-    gpuExecution,
+    gpuExecution: { ...gpuExecution, stageAvailability },
     knownSignatures: request.knownSignatureHints,
     searchSalt: request.seed,
     rootChoice: request.ticket.rootChoice ?? request.cursor.rootChoice,
@@ -80,7 +87,7 @@ async function runProductSearch(request, context) {
   });
   return {
     ...result,
-    gpuExecution,
+    gpuExecution: { ...gpuExecution, stageAvailability },
     navigation: navigation.complete({ ...result, gpuExecution }),
     placements: Array.isArray(result?.placements) ? result.placements : [],
     hasPlacement: Array.isArray(result?.placements) && result.placements.length > 0,
