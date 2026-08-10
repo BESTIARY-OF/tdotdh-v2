@@ -3,6 +3,7 @@ import { search } from '../product/v2-legacy-search.js';
 import { cpuGenerateFrontierCandidates } from '../../../packages/search-core/src/webgpu-frontier-generator.js';
 import { cpuTransitionLabeledFrontierStates } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 import { cpuFrontierTopology } from '../../../packages/search-core/src/webgpu-frontier-topology.js';
+import { cpuEvaluateFieldMetrics } from '../../../packages/search-core/src/webgpu-field-metrics.js';
 
 globalThis.postMessage = () => {};
 
@@ -40,6 +41,9 @@ const frontierGenerator = {
 const frontierState = {
   transition: async candidates => ({ ...cpuTransitionLabeledFrontierStates(candidates), backend: 'test-frontier-state', parity: 'verified' }),
 };
+const fieldMetrics = {
+  evaluate: async candidates => ({ ...cpuEvaluateFieldMetrics(candidates), backend: 'test-field-metrics', parity: 'verified' }),
+};
 const frontierTopology = {
   evaluate: async input => ({ ...cpuFrontierTopology(input), backend: 'test-frontier-topology', parity: 'verified' }),
 };
@@ -51,6 +55,7 @@ const result = await search(pieces, [], {
   frontierGenerator,
   frontierState,
   frontierTopology,
+  fieldMetrics,
 });
 
 assert.equal(result.type, 'done');
@@ -64,4 +69,6 @@ assert.equal(result.frontierState.backend, 'test-frontier-state');
 assert.equal(result.frontierState.finalCanonicalParity, 'verified');
 assert.equal(result.frontierTopology.status, 'used');
 assert.equal(result.frontierTopology.backend, 'test-frontier-topology');
+assert.equal(result.fieldMetrics.status, 'used');
+assert.equal(result.fieldMetrics.backend, 'test-field-metrics');
 console.log('v2 product search receipt test passed');

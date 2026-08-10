@@ -42,3 +42,11 @@ ties are submitted to a bounded bitonic WebGPU workgroup (up to 128 rows), and
 the CPU ordering oracle rejects any divergent index order. The search receipt
 calls this `GPU deterministic ranking`; unavailable or oversized batches use the
 same CPU comparator without changing beam semantics.
+
+The next field-wide seam is now explicit as `webgpu-field-metrics.v0`. For every
+surviving branch it batches the occupied and centroid masks and computes the
+integer aggregates that dominate repeated field scans: area, perimeter, bounds,
+coordinate sums, and edge/corner coast flags. The CPU uses those verified
+aggregates to finish floating-point quality terms and family naming. This keeps
+the GPU path broad without accepting adapter-dependent floating-point ordering;
+the receipt reports `GPU field aggregates` only after exact integer parity.

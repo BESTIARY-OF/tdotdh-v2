@@ -1007,7 +1007,7 @@ function stopContinuousSearch(message = 'Auto-search paused') {
 function launchSearchPass() {
   if (!app.continuous) return;
   app.solving = true; const button = document.querySelector('#solveButton'); setSearchButton(); showSearchBoard(); document.querySelector('#searchStatus').textContent = `Growing candidates · pass ${app.pass + 1}`;
-  const worker = new Worker('/apps/field-guide/product/v2-search-worker.js?v=20260810-v2worker16', { type: 'module' }); app.searchWorker = worker; const startingNodes = app.totalNodes;
+  const worker = new Worker('/apps/field-guide/product/v2-search-worker.js?v=20260810-v2worker17', { type: 'module' }); app.searchWorker = worker; const startingNodes = app.totalNodes;
   const families = new Map();
   app.snapshots.forEach(snapshot => { const familyId = snapshotFamilyId(snapshot); if (!families.has(familyId)) families.set(familyId, []); families.get(familyId).push(snapshot); });
   const orderedFamilies = [...families.entries()].map(([family, snapshots]) => [family, orderedSnapshots(snapshots)]).filter(([, snapshots]) => snapshots.length).sort((a, b) => { const aMetric = familySortMetric(a[1]), bMetric = familySortMetric(b[1]); return aMetric.primary - bMetric.primary || aMetric.secondary - bMetric.secondary; });
@@ -1023,10 +1023,11 @@ function launchSearchPass() {
     const frontierLabel = result.frontier?.status === 'used' ? ' · GPU frontier validation' : result.frontier?.status === 'fallback' ? ' · CPU frontier validation' : '';
     const generationLabel = result.frontierGeneration?.batch === 'verified' ? ' · GPU batched frontier expansion' : result.frontierGeneration?.compaction === 'verified' ? ' · GPU frontier generation + compaction' : result.frontierGeneration?.status === 'used' ? ' · GPU frontier generation' : result.frontierGeneration?.status === 'fallback' ? ' · CPU frontier generation' : '';
     const metricsLabel = result.frontierMetrics?.status === 'used' ? ' · GPU frontier geometry' : result.frontierMetrics?.status === 'fallback' ? ' · CPU frontier geometry' : '';
+    const fieldMetricsLabel = result.fieldMetrics?.status === 'used' ? ' · GPU field aggregates' : result.fieldMetrics?.status === 'fallback' ? ' · CPU field aggregates' : '';
     const stateLabel = result.frontierState?.finalCanonicalParity === 'verified' ? ' · GPU labeled state + canonical acceptance' : result.frontierState?.status === 'used' ? ' · GPU state transition' : result.frontierState?.status === 'fallback' ? ' · CPU state transition' : '';
     const topologyLabel = result.frontierTopology?.status === 'used' ? ' · GPU topology occupancy' : result.frontierTopology?.status === 'fallback' ? ' · CPU topology fallback' : '';
     const rankerLabel = result.frontierRanker?.status === 'used' ? ' · GPU deterministic ranking' : result.frontierRanker?.status === 'fallback' ? ' · CPU ranking fallback' : '';
-    const labels = `${prefilterLabel}${frontierLabel}${generationLabel}${metricsLabel}${stateLabel}${topologyLabel}${rankerLabel}`;
+    const labels = `${prefilterLabel}${frontierLabel}${generationLabel}${metricsLabel}${fieldMetricsLabel}${stateLabel}${topologyLabel}${rankerLabel}`;
     if (result.hasPlacement || (Array.isArray(result.placements) && result.placements.length)) { const added = addSnapshot(result.placements, result.nodes); document.querySelector('#searchStatus').textContent = added ? `Arrangement ${String(app.snapshots.length).padStart(2, '0')} captured · continuing search${labels}` : `Duplicate cover skipped · continuing search${labels}`; if (added) toast(`Arrangement ${String(app.snapshots.length).padStart(2, '0')} captured and ranked`); }
     else document.querySelector('#searchStatus').textContent = `Pass ${app.pass} complete · continuing search${labels}`;
     if (app.continuous) app.searchTimer = setTimeout(launchSearchPass, 80);
