@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { search } from '../../../apps/field-guide/product/v2-legacy-search.js';
 import { cpuEvaluateFrontierMetrics } from '../../../packages/search-core/src/webgpu-frontier-metrics.js';
-import { cpuTransitionFrontierStates } from '../../../packages/search-core/src/webgpu-frontier-state.js';
+import { cpuTransitionLabeledFrontierStates } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 
 globalThis.postMessage = () => {};
 
@@ -45,7 +45,7 @@ function createBenchFrontierState() {
     transition: async candidates => {
       receipt.batches += 1;
       receipt.candidates += candidates.length;
-      const result = cpuTransitionFrontierStates(candidates);
+      const result = cpuTransitionLabeledFrontierStates(candidates);
       return { ...result, backend: 'benchmark', parity: 'verified' };
     },
   };
