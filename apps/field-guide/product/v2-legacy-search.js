@@ -245,8 +245,8 @@ async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroi
           const hint = searchHints && positionPreferences[piece.id] ? pieceDirections(placements, piece.id, centroidId).includes(positionPreferences[piece.id]) : false;
           return metrics.holes === 0 ? { candidate, metrics, hintMatches: (state.hintMatches || 0) + (hint ? 1 : 0) } : null;
         }).filter(Boolean);
-        if (typeof candidatePrefilter === 'function' && options.length) {
-          const result = await candidatePrefilter(options.map(option => [option.candidate]));
+        if (candidatePrefilter?.prefilter && options.length) {
+          const result = await candidatePrefilter.prefilter(options.map(option => [option.candidate]));
           if (result?.status === 'completed' && Array.isArray(result.validity) && result.validity.length === options.length) {
             onPrefilter({ status: 'used', backend: result.backend || 'compute-shader', candidateCount: options.length });
             options = options.filter((option, index) => result.validity[index] === 1);
@@ -276,11 +276,11 @@ async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroi
 
 async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const knownFamilies = new Set(knownCentroidFamilies);
-  const candidatePrefilter = options.candidatePrefilter?.prefilter;
+  const candidatePrefilter = options.candidatePrefilter;
   let prefilterReceipt = { status: 'cpu-oracle' };
   async function filterCandidates(entries) {
-    if (typeof candidatePrefilter !== 'function' || entries.length === 0) return entries;
-    const result = await candidatePrefilter(entries.map(entry => [entry.candidate]));
+    if (!candidatePrefilter?.prefilter || entries.length === 0) return entries;
+    const result = await candidatePrefilter.prefilter(entries.map(entry => [entry.candidate]));
     if (result?.status === 'completed' && Array.isArray(result.validity) && result.validity.length === entries.length) {
       prefilterReceipt = { status: 'used', backend: result.backend || 'compute-shader', candidateCount: entries.length };
       return entries.filter((entry, index) => result.validity[index] === 1);

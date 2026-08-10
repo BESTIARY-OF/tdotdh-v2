@@ -5,15 +5,19 @@ globalThis.postMessage = () => {};
 
 const cells = Array.from({ length: 9 }, (_, index) => ({ x: index % 3, y: Math.floor(index / 3) }));
 const pieces = [{ id: 3, cells }, { id: 1, cells }];
+const candidatePrefilter = {
+  backend: 'test-compute-shader',
+  prefilter: async function prefilter(candidates) {
+    return {
+      status: 'completed',
+      backend: this.backend,
+      validity: candidates.map(() => 1),
+    };
+  },
+};
 const result = await search(pieces, [], {
   searchStrategy: 'balanced',
-  candidatePrefilter: {
-    prefilter: async candidates => ({
-      status: 'completed',
-      backend: 'test-compute-shader',
-      validity: candidates.map(() => 1),
-    }),
-  },
+  candidatePrefilter,
 });
 
 assert.equal(result.type, 'done');
