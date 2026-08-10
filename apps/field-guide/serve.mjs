@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { createReadStream, existsSync } from 'node:fs';
+import { createReadStream, existsSync, statSync } from 'node:fs';
 import { extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -12,7 +12,7 @@ createServer((request, response) => {
   const requested = requestPath === '/' ? '/apps/field-guide/product/index.html' : requestPath;
   const file = normalize(join(root, requested.replace(/^[/\\]+/, '')));
   if (!file.startsWith(root + sep)) { response.writeHead(403); response.end('Forbidden'); return; }
-  if (!existsSync(file)) { response.writeHead(404); response.end('Not found'); return; }
+  if (!existsSync(file) || !statSync(file).isFile()) { response.writeHead(404); response.end('Not found'); return; }
   try {
     response.writeHead(200, { 'Content-Type': types[extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' });
     createReadStream(file).pipe(response);

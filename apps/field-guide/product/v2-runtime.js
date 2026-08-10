@@ -118,8 +118,8 @@ void gpuScorer.availability().then(async capability => {
     && dedupResult.parity === 'verified'
     && JSON.stringify(dedupResult.keep) === JSON.stringify(dedupCpu.keep);
   if (prefilterParity && targetPoolParity && dedupParity) {
-    status.textContent = 'V2 product · GPU navigation parity verified · CPU oracle fallback ready';
-    status.title = 'This page dispatched GPU scorer, occupancy-prefilter, target-navigation, and frontier-deduplication kernels and matched each result against the CPU oracle.';
+    status.textContent = 'V2 product · GPU smoke parity verified · real search receipt pending';
+    status.title = 'Startup smoke kernels for scoring, occupancy prefiltering, target navigation, and deduplication matched the CPU oracle. This is capability evidence, not a full-search performance claim.';
     status.dataset.backend = 'webgpu';
   } else if (prefilterParity && targetPoolParity) {
     status.textContent = `V2 product · GPU target navigation verified · dedup unavailable (${dedupResult.reason || 'parity failed'})`;
