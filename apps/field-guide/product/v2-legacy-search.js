@@ -214,7 +214,7 @@ async function generateFrontierTranslationsAcrossBeam(plans, frontierGenerator, 
     generated[ref.planIndex].set(piece.id, [...translations.values()]);
   }
   const inputCount = planGroups.reduce((sum, group) => sum + group.inputs.length, 0);
-  onGeneration({ status: items.length === inputCount ? 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? parity : 'oracle', candidateCount: totalCandidateCount, batches, batch: 'beam', candidateRecords: { backend: recordBackend, parity: recordParity, inputCount: recordInputCount, outputCount: recordOutputCount } });
+  onGeneration({ status: items.length === inputCount ? 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? parity : 'oracle', reason: items.length === inputCount ? undefined : 'frontier-generator-batch-fallback', candidateCount: totalCandidateCount, batches, batch: 'beam', candidateRecords: { backend: recordBackend, parity: recordParity, inputCount: recordInputCount, outputCount: recordOutputCount } });
   return generated;
 }
 async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTargetGenerator, positionLocks, seedOrigin, onGeneration = () => {}, availabilityStatus = null, frontierCandidateRecords = null) {
@@ -278,7 +278,7 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
     generated[ref.planIndex] = byTarget;
   }
   const inputCount = planGroups.reduce((sum, group) => sum + group.inputs.length, 0);
-  onGeneration({ status: items.length === inputCount ? 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? 'verified' : 'oracle', candidateCount: totalCandidateCount, batches, batch: 'beam', candidateRecords: { backend: recordBackend, parity: recordParity, inputCount: recordInputCount, outputCount: recordOutputCount } });
+  onGeneration({ status: items.length === inputCount ? 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? 'verified' : 'oracle', reason: items.length === inputCount ? undefined : 'frontier-generator-batch-fallback', candidateCount: totalCandidateCount, batches, batch: 'beam', candidateRecords: { backend: recordBackend, parity: recordParity, inputCount: recordInputCount, outputCount: recordOutputCount } });
   return generated;
 }
 async function generateFrontierTargetPoolsAcrossBeam(plans, frontierTargetPool, centroidId, onTargetPool = () => {}, availabilityStatus = null) {
@@ -501,13 +501,22 @@ async function evaluateFrontierGeometryAcrossBeam(jobs, centroidId, frontierMetr
       for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, entry, candidate: createFrontierMetricsCandidate({ parentCells, candidateCells: entry.candidate.cells, centroidCells, ringCells: [...centroidRing.values()], bounds: job.state.bounds }) });
     }
     if (!pending.length) return jobs;
-    const result = await frontierMetrics.evaluate(pending.map(item => item.candidate));
-    if (result?.status === 'completed' && result.parity === 'verified' && Array.isArray(result.metrics) && result.metrics.length === pending.length) {
-      for (const [index, item] of pending.entries()) jobs[item.jobIndex].entries[item.entryIndex] = { ...item.entry, gpuGeometry: result.metrics[index] };
-      onMetrics({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: pending.length, batch: 'beam' });
-      return jobs;
+    const groups = new Map();
+    for (const item of pending) {
+      const bounds = item.candidate.bounds;
+      const groupKey = `${bounds.minX},${bounds.maxX},${bounds.minY},${bounds.maxY}`;
+      const group = groups.get(groupKey) || { items: [] };
+      group.items.push(item); groups.set(groupKey, group);
     }
-    onMetrics({ status: 'fallback', reason: result?.reason || 'frontier-metrics-unavailable', candidateCount: pending.length, batch: 'beam' });
+    let used = true, reason = null;
+    for (const group of groups.values()) {
+      const result = await frontierMetrics.evaluate(group.items.map(item => item.candidate));
+      if (result?.status === 'completed' && result.parity === 'verified' && Array.isArray(result.metrics) && result.metrics.length === group.items.length) {
+        for (const [index, item] of group.items.entries()) jobs[item.jobIndex].entries[item.entryIndex] = { ...item.entry, gpuGeometry: result.metrics[index] };
+      } else { used = false; reason = result?.reason || 'frontier-metrics-unavailable'; }
+    }
+    onMetrics({ status: used ? 'used' : 'fallback', backend: used ? 'compute-shader' : 'cpu-oracle', parity: used ? 'verified' : 'oracle', reason, candidateCount: pending.length, batch: 'beam', boundsGroups: groups.size });
+    if (used) return jobs;
   } catch (error) { onMetrics({ status: 'fallback', reason: `frontier-metrics-failed:${error.message}`, batch: 'beam' }); }
   return jobs;
 }
