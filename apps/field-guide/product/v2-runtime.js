@@ -50,14 +50,14 @@ window.__TDOTDH_V2_RUNTIME__ = Object.freeze({
 
 const status = document.querySelector('#v2RuntimeStatus');
 if (status) {
-  status.textContent = 'V2 product · CPU oracle active · compute shader unavailable';
-  status.title = 'The product uses the real field-guide worker and data pack. GPU search remains gated on canonical parity.';
+  status.textContent = 'V2 product · CPU oracle active · probing WebGPU';
+  status.title = 'Chrome graphics acceleration is not sufficient evidence by itself; this label changes only after this page dispatches a WebGPU kernel and verifies CPU parity.';
   status.dataset.backend = 'cpu-oracle';
 }
 
 cpuWorker.addEventListener('message', event => {
   if (event.data?.type !== 'started') return;
-  if (status) status.textContent = 'V2 product · CPU oracle worker wired · compute shader unavailable';
+  if (status && status.dataset.backend !== 'webgpu') status.textContent = 'V2 product · CPU oracle worker wired · probing WebGPU';
 });
 
 cpuWorker.postMessage({
@@ -76,11 +76,17 @@ cpuWorker.postMessage({
 });
 
 void gpuScorer.availability().then(async capability => {
-  if (capability.status !== 'available') return;
+  if (capability.status !== 'available') {
+    if (status) { status.textContent = `V2 product · CPU oracle active · WebGPU unavailable (${capability.reason || 'adapter unavailable'})`; status.title = 'This page did not obtain a usable WebGPU adapter. Chrome hardware acceleration can still be enabled independently.'; }
+    return;
+  }
   const values = [0, 1, 17, 255];
   const gpuResult = await gpuScorer.score(values);
   const parity = gpuResult.status === 'completed' && JSON.stringify(gpuResult.scores) === JSON.stringify(cpuCandidateScores(values));
-  if (!parity || !status) return;
+  if (!parity || !status) {
+    if (status) { status.textContent = 'V2 product · CPU oracle active · WebGPU scorer parity failed'; status.title = 'A WebGPU dispatch completed but did not match the CPU oracle, so the product refused to use it.'; }
+    return;
+  }
   const candidates = [
     [{ pieceId: 1, cells: [{ x: 0, y: 0 }, { x: 1, y: 0 }] }],
     [{ pieceId: 2, cells: [{ x: 0, y: 0 }, { x: 0, y: 0 }] }],
@@ -89,6 +95,10 @@ void gpuScorer.availability().then(async capability => {
   const prefilterParity = prefilterResult.status === 'completed'
     && JSON.stringify(prefilterResult.validity) === JSON.stringify(cpuCandidatePrefilter(candidates).validity);
   status.textContent = prefilterParity
-    ? 'V2 product · GPU-capable search worker loaded · CPU oracle fallback ready'
-    : 'V2 product · WebGPU candidate parity failed · CPU oracle active';
+    ? 'V2 product · WebGPU dispatch + occupancy parity verified · CPU oracle fallback ready'
+    : 'V2 product · WebGPU occupancy parity failed · CPU oracle active';
+  status.title = prefilterParity
+    ? 'This page dispatched WebGPU scorer and occupancy-prefilter kernels and matched both results against the CPU oracle.'
+    : 'The occupancy-prefilter dispatch did not match the CPU oracle, so the product refused to use it.';
+  status.dataset.backend = prefilterParity ? 'webgpu' : 'cpu-oracle';
 }).catch(() => {});
