@@ -59,6 +59,63 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   nextLabels[id.x] = label;
 }`;
 
+const BATCH_REDUCTION_SHADER = `
+struct Params {
+  candidateCount: u32,
+  wordCount: u32,
+  reserved0: u32,
+  reserved1: u32,
+};
+@group(0) @binding(0) var<storage, read> parentMasks: array<u32>;
+@group(0) @binding(1) var<storage, read> candidateMasks: array<u32>;
+@group(0) @binding(2) var<storage, read_write> occupiedMasks: array<u32>;
+@group(0) @binding(3) var<storage, read_write> areas: array<atomic<u32>>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let totalWords = params.candidateCount * params.wordCount;
+  if (id.x >= totalWords) { return; }
+  let candidate = id.x / params.wordCount;
+  let word = id.x % params.wordCount;
+  let occupied = parentMasks[id.x] | candidateMasks[id.x];
+  occupiedMasks[id.x] = occupied;
+  atomicAdd(&areas[candidate], countOneBits(occupied));
+}`;
+
+const BATCH_LABEL_SHADER = `
+struct Params {
+  candidateCount: u32,
+  cellCount: u32,
+  width: u32,
+  height: u32,
+};
+@group(0) @binding(0) var<storage, read> currentLabels: array<u32>;
+@group(0) @binding(1) var<storage, read_write> nextLabels: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+fn labelAt(candidate: u32, x: i32, y: i32) -> u32 {
+  if (x < 0 || y < 0 || x >= i32(params.width) || y >= i32(params.height)) { return 0u; }
+  return currentLabels[candidate * params.cellCount + u32(y) * params.width + u32(x)];
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let totalCells = params.candidateCount * params.cellCount;
+  if (id.x >= totalCells) { return; }
+  let candidate = id.x / params.cellCount;
+  let cell = id.x % params.cellCount;
+  let x = i32(cell % params.width);
+  let y = i32(cell / params.width);
+  var label = currentLabels[id.x];
+  if (label == 0u) { nextLabels[id.x] = 0u; return; }
+  if (labelAt(candidate, x + 1, y) != 0u) { label = min(label, labelAt(candidate, x + 1, y)); }
+  if (labelAt(candidate, x - 1, y) != 0u) { label = min(label, labelAt(candidate, x - 1, y)); }
+  if (labelAt(candidate, x, y + 1) != 0u) { label = min(label, labelAt(candidate, x, y + 1)); }
+  if (labelAt(candidate, x, y - 1) != 0u) { label = min(label, labelAt(candidate, x, y - 1)); }
+  nextLabels[id.x] = label;
+}`;
+
 const DIRECTIONS = Object.freeze([
   Object.freeze({ x: 1, y: 0 }), Object.freeze({ x: -1, y: 0 }),
   Object.freeze({ x: 0, y: 1 }), Object.freeze({ x: 0, y: -1 }),
@@ -354,6 +411,118 @@ async function runWebGpuReduction(gpu, normalized, grid, shaderSource, requiredL
   }
 }
 
+async function runWebGpuBatchReduction(gpu, normalizedInputs, grid, requiredLimits) {
+  const adapter = await gpu.requestAdapter();
+  if (!adapter) throw new Error('webgpu-adapter-unavailable');
+  const device = await adapter.requestDevice({ requiredLimits });
+  const usage = gpuBufferUsage();
+  const mapMode = gpuMapMode();
+  const candidateCount = normalizedInputs.length;
+  const wordCount = grid.wordCount;
+  const cellCount = grid.width * grid.height;
+  const wordByteLength = candidateCount * wordCount * 4;
+  const cellByteLength = candidateCount * cellCount * 4;
+  const flattenMasks = property => {
+    const flat = new Uint32Array(candidateCount * wordCount);
+    normalizedInputs.forEach((input, index) => flat.set(input[property], index * wordCount));
+    return flat;
+  };
+  const parentMasks = flattenMasks('parentMask');
+  const candidateMasks = flattenMasks('candidateMask');
+  const parentBuffer = device.createBuffer({ size: wordByteLength, usage: usage.STORAGE | usage.COPY_DST });
+  const candidateBuffer = device.createBuffer({ size: wordByteLength, usage: usage.STORAGE | usage.COPY_DST });
+  const occupiedBuffer = device.createBuffer({ size: wordByteLength, usage: usage.STORAGE | usage.COPY_SRC });
+  const areasBuffer = device.createBuffer({ size: candidateCount * 4, usage: usage.STORAGE | usage.COPY_DST | usage.COPY_SRC });
+  const paramsBuffer = device.createBuffer({ size: 16, usage: usage.UNIFORM | usage.COPY_DST });
+  const occupiedReadback = device.createBuffer({ size: wordByteLength, usage: usage.MAP_READ | usage.COPY_DST });
+  const areasReadback = device.createBuffer({ size: candidateCount * 4, usage: usage.MAP_READ | usage.COPY_DST });
+  const labelResources = [];
+  try {
+    device.queue.writeBuffer(parentBuffer, 0, parentMasks);
+    device.queue.writeBuffer(candidateBuffer, 0, candidateMasks);
+    device.queue.writeBuffer(areasBuffer, 0, new Uint32Array(candidateCount));
+    device.queue.writeBuffer(paramsBuffer, 0, new Uint32Array([candidateCount, wordCount, 0, 0]));
+    const reductionModule = device.createShaderModule({ code: BATCH_REDUCTION_SHADER });
+    const reductionPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: reductionModule, entryPoint: 'main' } });
+    const reductionBindGroup = device.createBindGroup({ layout: reductionPipeline.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: { buffer: parentBuffer } }, { binding: 1, resource: { buffer: candidateBuffer } },
+      { binding: 2, resource: { buffer: occupiedBuffer } }, { binding: 3, resource: { buffer: areasBuffer } },
+      { binding: 4, resource: { buffer: paramsBuffer } },
+    ] });
+    const reductionEncoder = device.createCommandEncoder();
+    const reductionPass = reductionEncoder.beginComputePass();
+    reductionPass.setPipeline(reductionPipeline); reductionPass.setBindGroup(0, reductionBindGroup); reductionPass.dispatchWorkgroups(Math.ceil((candidateCount * wordCount) / 64)); reductionPass.end();
+    reductionEncoder.copyBufferToBuffer(occupiedBuffer, 0, occupiedReadback, 0, wordByteLength);
+    reductionEncoder.copyBufferToBuffer(areasBuffer, 0, areasReadback, 0, candidateCount * 4);
+    device.queue.submit([reductionEncoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    await occupiedReadback.mapAsync(mapMode.READ);
+    const occupiedFlat = Array.from(new Uint32Array(occupiedReadback.getMappedRange().slice(0)));
+    occupiedReadback.unmap();
+    await areasReadback.mapAsync(mapMode.READ);
+    const areas = Array.from(new Uint32Array(areasReadback.getMappedRange().slice(0)));
+    areasReadback.unmap();
+
+    const labelModule = device.createShaderModule({ code: BATCH_LABEL_SHADER });
+    const labelPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: labelModule, entryPoint: 'main' } });
+    const labelBuffers = [
+      device.createBuffer({ size: cellByteLength, usage: usage.STORAGE | usage.COPY_DST | usage.COPY_SRC }),
+      device.createBuffer({ size: cellByteLength, usage: usage.STORAGE | usage.COPY_DST | usage.COPY_SRC }),
+    ];
+    const labelReadback = device.createBuffer({ size: cellByteLength, usage: usage.MAP_READ | usage.COPY_DST });
+    const labelParams = device.createBuffer({ size: 16, usage: usage.UNIFORM | usage.COPY_DST });
+    labelResources.push(...labelBuffers, labelReadback, labelParams);
+    const initialLabels = active => Uint32Array.from({ length: candidateCount * cellCount }, (_, index) => {
+      const candidate = Math.floor(index / cellCount);
+      const cell = index % cellCount;
+      const occupied = (occupiedFlat[candidate * wordCount + Math.floor(cell / 32)] >>> (cell % 32)) & 1;
+      return Boolean(occupied) === active ? cell + 1 : 0;
+    });
+    const runBatchLabels = async initial => {
+      device.queue.writeBuffer(labelBuffers[0], 0, initial);
+      device.queue.writeBuffer(labelBuffers[1], 0, new Uint32Array(initial.length));
+      device.queue.writeBuffer(labelParams, 0, new Uint32Array([candidateCount, cellCount, grid.width, grid.height]));
+      let current = 0;
+      const encoder = device.createCommandEncoder();
+      const bindGroups = [
+        device.createBindGroup({ layout: labelPipeline.getBindGroupLayout(0), entries: [
+          { binding: 0, resource: { buffer: labelBuffers[0] } }, { binding: 1, resource: { buffer: labelBuffers[1] } }, { binding: 2, resource: { buffer: labelParams } },
+        ] }),
+        device.createBindGroup({ layout: labelPipeline.getBindGroupLayout(0), entries: [
+          { binding: 0, resource: { buffer: labelBuffers[1] } }, { binding: 1, resource: { buffer: labelBuffers[0] } }, { binding: 2, resource: { buffer: labelParams } },
+        ] }),
+      ];
+      for (let pass = 0; pass < grid.width + grid.height; pass += 1) {
+        const compute = encoder.beginComputePass();
+        compute.setPipeline(labelPipeline); compute.setBindGroup(0, bindGroups[current]); compute.dispatchWorkgroups(Math.ceil((candidateCount * cellCount) / 64)); compute.end();
+        current = 1 - current;
+      }
+      device.queue.submit([encoder.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      const copyEncoder = device.createCommandEncoder();
+      copyEncoder.copyBufferToBuffer(labelBuffers[current], 0, labelReadback, 0, cellByteLength);
+      device.queue.submit([copyEncoder.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      await labelReadback.mapAsync(mapMode.READ);
+      const labels = Array.from(new Uint32Array(labelReadback.getMappedRange().slice(0)));
+      labelReadback.unmap();
+      return labels;
+    };
+    const occupiedLabels = await runBatchLabels(initialLabels(true));
+    const emptyLabels = await runBatchLabels(initialLabels(false));
+    return normalizedInputs.map((input, index) => {
+      const wordStart = index * wordCount;
+      const cellStart = index * cellCount;
+      const occupiedMask = occupiedFlat.slice(wordStart, wordStart + wordCount);
+      const candidateOccupiedLabels = occupiedLabels.slice(cellStart, cellStart + cellCount);
+      const candidateEmptyLabels = emptyLabels.slice(cellStart, cellStart + cellCount);
+      return { occupiedMask, area: areas[index], occupiedLabels: candidateOccupiedLabels, emptyLabels: candidateEmptyLabels, ...summarizeLabels(candidateOccupiedLabels, candidateEmptyLabels, grid) };
+    });
+  } finally {
+    for (const buffer of [parentBuffer, candidateBuffer, occupiedBuffer, areasBuffer, paramsBuffer, occupiedReadback, areasReadback, ...labelResources]) buffer.destroy();
+  }
+}
+
 export function cpuFrontierTopology(input, grid = DEFAULT_FRONTIER_GRID) {
   const normalizedGrid = normalizeGrid(grid);
   const normalized = normalizeInput(input, normalizedGrid);
@@ -384,31 +553,44 @@ export function createWebGpuFrontierTopology({ gpu = globalThis.navigator?.gpu, 
         ? Object.freeze({ schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA, status: 'available', backend: 'webgpu' })
         : unavailable(probe.adapterAvailable ? 'webgpu-required-limits-unsatisfied' : 'webgpu-adapter-unavailable', null);
   };
+  const verifyAccelerated = (input, accelerated) => {
+    const cpu = cpuFrontierTopology(input, normalizedGrid);
+    const cpuReduction = cpuTopologyReduction(input, normalizedGrid);
+    if (!sameMask(accelerated?.occupiedMask, cpuReduction.occupiedMask) || accelerated?.area !== cpuReduction.area || !sameMask(accelerated?.occupiedLabels, cpuReduction.occupiedLabels) || !sameMask(accelerated?.emptyLabels, cpuReduction.emptyLabels) || accelerated?.occupiedComponentCount !== cpuReduction.occupiedComponentCount || accelerated?.holes !== cpuReduction.holes) {
+      return Object.freeze({ schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA, status: 'rejected', backend: 'cpu-oracle', reason: 'topology-parity-mismatch', metrics: cpu.metrics, accelerator: { backend: 'webgpu', status: 'rejected' } });
+    }
+    const metrics = Object.freeze({ ...cpu.metrics, holes: accelerated.holes, connected: accelerated.occupiedComponentCount === 1 });
+    return Object.freeze({ schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'labels-verified', metricsBackend: 'cpu-oracle-plus-gpu-labels', occupiedMask: cpu.occupiedMask, metrics, accelerator: { backend: 'webgpu', status: 'verified', area: accelerated.area, occupiedComponentCount: accelerated.occupiedComponentCount, holes: accelerated.holes } });
+  };
   const evaluate = async input => {
-      const cpu = cpuFrontierTopology(input, normalizedGrid);
-      const normalized = normalizeInput(input, normalizedGrid);
-      const availabilityReceipt = await availability();
-      if (availabilityReceipt.status !== 'available') return unavailable(availabilityReceipt.reason, cpu.metrics);
-      let accelerated;
-      try {
-        accelerated = typeof accelerator === 'function'
-          ? await accelerator(normalized, normalizedGrid)
-          : await runWebGpuReduction(gpu, normalized, normalizedGrid, shaderSource, requiredLimits);
-      } catch (error) {
-        return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, cpu.metrics);
-      }
-      const cpuReduction = cpuTopologyReduction(input, normalizedGrid);
-      if (!sameMask(accelerated?.occupiedMask, cpuReduction.occupiedMask) || accelerated?.area !== cpuReduction.area || !sameMask(accelerated?.occupiedLabels, cpuReduction.occupiedLabels) || !sameMask(accelerated?.emptyLabels, cpuReduction.emptyLabels) || accelerated?.occupiedComponentCount !== cpuReduction.occupiedComponentCount || accelerated?.holes !== cpuReduction.holes) {
-        return Object.freeze({ schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA, status: 'rejected', backend: 'cpu-oracle', reason: 'topology-parity-mismatch', metrics: cpu.metrics, accelerator: { backend: 'webgpu', status: 'rejected' } });
-      }
-      const metrics = Object.freeze({ ...cpu.metrics, holes: accelerated.holes, connected: accelerated.occupiedComponentCount === 1 });
-      return Object.freeze({ schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'labels-verified', metricsBackend: 'cpu-oracle-plus-gpu-labels', occupiedMask: cpu.occupiedMask, metrics, accelerator: { backend: 'webgpu', status: 'verified', area: accelerated.area, occupiedComponentCount: accelerated.occupiedComponentCount, holes: accelerated.holes } });
+    const cpu = cpuFrontierTopology(input, normalizedGrid);
+    const normalized = normalizeInput(input, normalizedGrid);
+    const availabilityReceipt = await availability();
+    if (availabilityReceipt.status !== 'available') return unavailable(availabilityReceipt.reason, cpu.metrics);
+    try {
+      const accelerated = typeof accelerator === 'function'
+        ? await accelerator(normalized, normalizedGrid)
+        : await runWebGpuReduction(gpu, normalized, normalizedGrid, shaderSource, requiredLimits);
+      return verifyAccelerated(input, accelerated);
+    } catch (error) {
+      return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, cpu.metrics);
+    }
   };
   const evaluateBatch = async inputs => {
     if (!Array.isArray(inputs) || !inputs.length) throw new TypeError('topology inputs must be a non-empty array');
     const availabilityReceipt = await availability();
     if (availabilityReceipt.status !== 'available') return Object.freeze({ schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA, status: 'fallback', backend: 'cpu-oracle', reason: availabilityReceipt.reason, candidateCount: inputs.length, results: [] });
-    const results = await Promise.all(inputs.map(input => evaluate(input)));
+    let results;
+    try {
+      if (typeof accelerator === 'function') {
+        results = await Promise.all(inputs.map(async input => verifyAccelerated(input, await accelerator(normalizeInput(input, normalizedGrid), normalizedGrid))));
+      } else {
+        const reductions = await runWebGpuBatchReduction(gpu, inputs.map(input => normalizeInput(input, normalizedGrid)), normalizedGrid, requiredLimits);
+        results = reductions.map((reduction, index) => verifyAccelerated(inputs[index], reduction));
+      }
+    } catch (error) {
+      return Object.freeze({ schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA, status: 'fallback', backend: 'cpu-oracle', reason: `webgpu-batch-failed:${error?.message || String(error)}`, candidateCount: inputs.length, results: [] });
+    }
     const verified = results.every(result => result?.status === 'completed' && ['verified', 'labels-verified'].includes(result.parity));
     return Object.freeze({
       schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA,
