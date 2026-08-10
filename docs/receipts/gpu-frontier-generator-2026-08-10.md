@@ -15,6 +15,10 @@ The product receipt exposes `frontierGeneration` separately from frontier
 validation and candidate scoring, so a human can distinguish GPU generation,
 GPU validation, and CPU fallback in the live search status.
 
+The generator also caches its device promise for the lifetime of the worker;
+frontier batches reuse the device instead of repeatedly requesting adapters and
+devices.
+
 ## Verification
 
 - `node --check packages/search-core/src/webgpu-frontier-generator.js`

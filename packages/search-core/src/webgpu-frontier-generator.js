@@ -149,7 +149,7 @@ async function runGpu(device, normalized, grid, shaderSource) {
 
 export function createWebGpuFrontierGenerator({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 65536 }, shaderSource = SHADER } = {}) {
   if (typeof shaderSource !== 'string' || !shaderSource.trim()) throw new TypeError('shaderSource must be a non-empty string');
-  const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits }; let availabilityPromise = null;
+  const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits }; let availabilityPromise = null, devicePromise = null;
   const availability = async () => {
     if (!availabilityPromise) availabilityPromise = probeWebGpuCapabilities({ gpu, requiredLimits: limits }).then(probe => probe.adapterAvailable && probe.requiredLimitsSatisfied ? Object.freeze({ schema: WEBGPU_FRONTIER_GENERATOR_SCHEMA, status: 'available', backend: 'webgpu', grid: normalizedGrid }) : unavailable(probe.adapterAvailable ? 'webgpu-required-limits-unsatisfied' : 'webgpu-adapter-unavailable', normalizedGrid));
     return availabilityPromise;
@@ -161,11 +161,12 @@ export function createWebGpuFrontierGenerator({ gpu = globalThis.navigator?.gpu,
       if (status.status !== 'available') return Object.freeze({ ...status, origins: cpu.origins, validity: cpu.validity, acceptedIndices: cpu.acceptedIndices, candidateCount: cpu.candidateCount });
       let device;
       try {
-        const adapter = await gpu.requestAdapter(); device = await adapter.requestDevice();
+        if (!devicePromise) devicePromise = gpu.requestAdapter().then(adapter => { if (!adapter) throw new Error('webgpu-adapter-unavailable'); return adapter.requestDevice(); }).catch(error => { devicePromise = null; throw error; });
+        device = await devicePromise;
         const result = await runGpu(device, normalized, normalizedGrid, shaderSource), parity = JSON.stringify(result.origins) === JSON.stringify(cpu.origins) && JSON.stringify(result.validity) === JSON.stringify(cpu.validity);
         if (!parity) return Object.freeze({ schema: WEBGPU_FRONTIER_GENERATOR_SCHEMA, status: 'rejected', backend: 'webgpu', reason: 'oracle-parity-mismatch', origins: cpu.origins, validity: cpu.validity, acceptedIndices: cpu.acceptedIndices, candidateCount: cpu.candidateCount });
         return Object.freeze({ schema: WEBGPU_FRONTIER_GENERATOR_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'verified', ...result, acceptedIndices: result.validity.flatMap((value, index) => value ? [index] : []), candidateCount: cpu.candidateCount });
-      } catch (error) { try { device?.destroy?.(); } catch {} return Object.freeze({ ...unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid), origins: cpu.origins, validity: cpu.validity, acceptedIndices: cpu.acceptedIndices, candidateCount: cpu.candidateCount }); }
+      } catch (error) { devicePromise = null; return Object.freeze({ ...unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid), origins: cpu.origins, validity: cpu.validity, acceptedIndices: cpu.acceptedIndices, candidateCount: cpu.candidateCount }); }
     },
   });
 }
