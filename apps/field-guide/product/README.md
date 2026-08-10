@@ -8,5 +8,7 @@ server exposes it at `/` on the preview port (5174 in development).
 The product currently uses the CPU worker as its correctness oracle. The v2 runtime
 bridge exposes versioned compute and renderer contracts, a real WebGPU candidate
 scoring dispatch, and a real WebGPU candidate occupancy prefilter. Both GPU slices
-are parity-gated and fall back explicitly; the full island search topology remains
-CPU-oracle controlled until canonical arrangement parity is demonstrated.
+are parity-gated and fall back explicitly. The product worker uses the occupancy
+prefilter on candidate batches when WebGPU is available, while branching and
+ranking remain CPU-controlled until canonical arrangement parity is demonstrated
+for the full island search topology.

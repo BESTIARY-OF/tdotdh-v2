@@ -37,6 +37,8 @@ assert.match(runtime, /async function runCandidateParity\(candidates\)/);
 assert.match(runtime, /status: parity \? 'parity-verified'/);
 const v2Worker = await readFile(resolve(productDirectory, "v2-search-worker.js"), "utf8");
 assert.match(v2Worker, /v2-legacy-search\.js/);
+assert.match(v2Worker, /candidatePrefilter/);
+assert.match(v2Worker, /\.then\(result => self\.postMessage\(result\)\)/);
 
 console.log(JSON.stringify({
   productFiles: productFiles.length,

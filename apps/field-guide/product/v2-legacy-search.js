@@ -265,8 +265,20 @@ function searchLockedSeedBranches(pieces, branches, knownFamilies, centroidId, t
   return { type: 'done', placements: null, metrics: null, nodes };
 }
 
-function search(pieces, knownCentroidFamilies = [], options = {}) {
+async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const knownFamilies = new Set(knownCentroidFamilies);
+  const candidatePrefilter = options.candidatePrefilter?.prefilter;
+  let prefilterReceipt = { status: 'cpu-oracle' };
+  async function filterCandidates(entries) {
+    if (typeof candidatePrefilter !== 'function' || entries.length === 0) return entries;
+    const result = await candidatePrefilter(entries.map(entry => [entry.candidate]));
+    if (result?.status === 'completed' && Array.isArray(result.validity) && result.validity.length === entries.length) {
+      prefilterReceipt = { status: 'used', backend: result.backend || 'compute-shader', candidateCount: entries.length };
+      return entries.filter((entry, index) => result.validity[index] === 1);
+    }
+    if (prefilterReceipt.status === 'cpu-oracle') prefilterReceipt = { status: 'fallback', reason: result?.reason || 'prefilter-unavailable' };
+    return entries;
+  }
   const searchHints = Boolean(options.searchHints);
   const searchStrategy = options.searchStrategy || 'balanced';
   const targetFamily = options.targetFamily || null;
@@ -303,6 +315,8 @@ function search(pieces, knownCentroidFamilies = [], options = {}) {
         if (options.length && (!selectedOptions || options.length < selectedOptions.length)) { selectedTarget = target; selectedOptions = options; }
       }
       if (!selectedTarget) continue;
+      selectedOptions = await filterCandidates(selectedOptions);
+      if (!selectedOptions.length) continue;
       const ranked = selectedOptions.map(({ piece, candidate }) => {
         const nextBounds = { minX: Math.min(state.bounds.minX, ...candidate.cells.map(c => c.x)), maxX: Math.max(state.bounds.maxX, ...candidate.cells.map(c => c.x)), minY: Math.min(state.bounds.minY, ...candidate.cells.map(c => c.y)), maxY: Math.max(state.bounds.maxY, ...candidate.cells.map(c => c.y)) };
         const contact = candidate.cells.reduce((n, c) => n + adjacent(c).filter(a => state.field.has(key(a.x, a.y))).length, 0), centroidContact = candidate.cells.reduce((n, c) => n + adjacent8(c).filter(a => seedSet.has(key(a.x, a.y))).length, 0), ringCoverage = candidate.cells.reduce((n, c) => n + (centroidRing.has(key(c.x, c.y)) ? 1 : 0), 0), openCentroid = [...centroidRing].filter(ringKey => !state.field.has(ringKey) && !candidate.cells.some(c => key(c.x, c.y) === ringKey)).length;
@@ -358,7 +372,7 @@ function search(pieces, knownCentroidFamilies = [], options = {}) {
   for (const state of beam) if (!state.remaining.length) {
     const metrics = fieldMetrics(state.placements, centroidId);
     if (metrics.area === pieceCount * AREA && metrics.holes === 0 && !metrics.centroidEdgeCoast && connected(state.field) && !knownSignatures.has(arrangementSignature(state.placements))) {
-      const result = { type: 'done', placements: state.placements, metrics: { width: metrics.width, height: metrics.height, area: metrics.area, holes: metrics.holes, centroidCoast: metrics.centroidCoast, centroidEdgeCoast: metrics.centroidEdgeCoast, centroidCornerCoast: metrics.centroidCornerCoast, enclosure: metrics.enclosure, centroidFamily: metrics.centroidFamily, centroidFamilyId: metrics.centroidFamilyId, centroidSeed: metrics.centroidSeed, centroidNeighborCount: metrics.centroidNeighborCount, perimeter: metrics.perimeter, density: metrics.density, centerOffset: metrics.centerOffset, centroidSquareOffset: metrics.centroidSquareOffset, centerSquareDistance: metrics.centerSquareDistance, radialVariance: metrics.radialVariance, gravityVariance: metrics.gravityVariance, gravityOffset: metrics.gravityOffset, gravityTension: metrics.gravityTension, inletCells: metrics.inletCells, inletEdges: metrics.inletEdges, inletRisk: metrics.inletRisk, peninsulaDepth: metrics.peninsulaDepth, nestedPeninsulaDepth: metrics.nestedPeninsulaDepth, terminalChains: metrics.terminalChains, score: metrics.score }, nodes };
+      const result = { type: 'done', placements: state.placements, metrics: { width: metrics.width, height: metrics.height, area: metrics.area, holes: metrics.holes, centroidCoast: metrics.centroidCoast, centroidEdgeCoast: metrics.centroidEdgeCoast, centroidCornerCoast: metrics.centroidCornerCoast, enclosure: metrics.enclosure, centroidFamily: metrics.centroidFamily, centroidFamilyId: metrics.centroidFamilyId, centroidSeed: metrics.centroidSeed, centroidNeighborCount: metrics.centroidNeighborCount, perimeter: metrics.perimeter, density: metrics.density, centerOffset: metrics.centerOffset, centroidSquareOffset: metrics.centroidSquareOffset, centerSquareDistance: metrics.centerSquareDistance, radialVariance: metrics.radialVariance, gravityVariance: metrics.gravityVariance, gravityOffset: metrics.gravityOffset, gravityTension: metrics.gravityTension, inletCells: metrics.inletCells, inletEdges: metrics.inletEdges, inletRisk: metrics.inletRisk, peninsulaDepth: metrics.peninsulaDepth, nestedPeninsulaDepth: metrics.nestedPeninsulaDepth, terminalChains: metrics.terminalChains, score: metrics.score }, nodes, prefilter: prefilterReceipt };
       if (targetFamily && metrics.centroidFamilyId === targetFamily && !metrics.centroidCornerCoast && (targetNeighborCount == null || metrics.centroidNeighborCount === targetNeighborCount)) return result;
       if (!metrics.centroidCornerCoast) {
         if (!searchHints && targetNeighborCount == null) return result;

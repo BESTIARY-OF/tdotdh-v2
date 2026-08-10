@@ -2,7 +2,8 @@ import { installCpuWorker } from '../../../packages/search-worker/src/cpu-worker
 import { createWebGpuCandidatePrefilter } from '../../../packages/search-core/src/webgpu-candidate-prefilter.js';
 import { search } from './v2-legacy-search.js';
 
-const protocolHandle = installCpuWorker(self, { candidatePrefilter: createWebGpuCandidatePrefilter({ gpu: globalThis.navigator?.gpu }) });
+const candidatePrefilter = createWebGpuCandidatePrefilter({ gpu: globalThis.navigator?.gpu });
+const protocolHandle = installCpuWorker(self, { candidatePrefilter });
 
 self.onmessage = event => {
   const message = event?.data;
@@ -11,7 +12,9 @@ self.onmessage = event => {
     return;
   }
   try {
-    self.postMessage(search(message?.pieces, message?.knownCentroidFamilies || [], message || {}));
+    void search(message?.pieces, message?.knownCentroidFamilies || [], { ...message, candidatePrefilter })
+      .then(result => self.postMessage(result))
+      .catch(error => self.postMessage({ type: 'done', placements: null, metrics: null, nodes: 0, error: error.message }));
   } catch (error) {
     self.postMessage({ type: 'done', placements: null, metrics: null, nodes: 0, error: error.message });
   }
