@@ -10,7 +10,9 @@ function flattenCells(items, property) {
   for (const item of items) {
     offsets.push(offset);
     for (const cell of item[property]) values.push(cell.x, cell.y);
-    offset += item[property].length;
+    // The shader indexes flattened coordinate pairs, so offsets are measured
+    // in i32 values rather than logical cells.
+    offset += item[property].length * 2;
   }
   return { offsets: Object.freeze(offsets), values: Int32Array.from(values) };
 }
@@ -60,6 +62,8 @@ export function createWebGpuFrontierBatchLayout(items, grid) {
       lock.x,
       lock.y,
       lock.enabled,
+      0,
+      0,
       0,
     );
   });

@@ -37,21 +37,27 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   var found = false;
   var minX: i32 = 0;
   var minY: i32 = 0;
-  for (var y: u32 = 0u; y < params.height; y++) for (var x: u32 = 0u; x < params.width; x++) {
-    let offset = y * params.width + x;
-    if (nextBit(base, offset) == 1u) {
-      if (!found) { minX = i32(x); minY = i32(y); found = true; }
-      else { minX = min(minX, i32(x)); minY = min(minY, i32(y)); }
+  for (var y: u32 = 0u; y < params.height; y++) {
+    for (var x: u32 = 0u; x < params.width; x++) {
+      let offset = y * params.width + x;
+      if (nextBit(base, offset) == 1u) {
+        if (!found) { minX = i32(x); minY = i32(y); found = true; }
+        else { minX = min(minX, i32(x)); minY = min(minY, i32(y)); }
+      }
     }
   }
-  if (found) for (var y: u32 = 0u; y < params.height; y++) for (var x: u32 = 0u; x < params.width; x++) {
-    let offset = y * params.width + x;
-    if (nextBit(base, offset) == 1u) {
-      let canonicalX = x - u32(minX);
-      let canonicalY = y - u32(minY);
-      if (canonicalX < params.width && canonicalY < params.height) {
-        let canonicalOffset = canonicalY * params.width + canonicalX;
-        canonicalMasks[base + canonicalOffset / 32u] = canonicalMasks[base + canonicalOffset / 32u] | (1u << (canonicalOffset % 32u));
+  if (found) {
+    for (var y: u32 = 0u; y < params.height; y++) {
+      for (var x: u32 = 0u; x < params.width; x++) {
+        let offset = y * params.width + x;
+        if (nextBit(base, offset) == 1u) {
+          let canonicalX = x - u32(minX);
+          let canonicalY = y - u32(minY);
+          if (canonicalX < params.width && canonicalY < params.height) {
+            let canonicalOffset = canonicalY * params.width + canonicalX;
+            canonicalMasks[base + canonicalOffset / 32u] = canonicalMasks[base + canonicalOffset / 32u] | (1u << (canonicalOffset % 32u));
+          }
+        }
       }
     }
   }

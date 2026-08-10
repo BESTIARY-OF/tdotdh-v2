@@ -1,7 +1,7 @@
 import { probeWebGpuCapabilities } from './webgpu-capability-probe.js';
 import { DEFAULT_FRONTIER_GRID } from './webgpu-frontier-validator.js';
 import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
-import { createWebGpuFrontierBatchLayout } from './webgpu-frontier-batch-layout.js';
+import { createWebGpuFrontierBatchLayout } from './webgpu-frontier-batch-layout.js?v=20260810-layout3';
 
 export const WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA = 'tdotdh.webgpu-frontier-target-generator.v0';
 export const MAX_FRONTIER_TARGET_GENERATION_CANDIDATES = 16384;
@@ -32,6 +32,8 @@ struct Meta {
   lockY: i32,
   lockEnabled: u32,
   reserved: u32,
+  reserved2: u32,
+  reserved3: u32,
 };
 @group(0) @binding(0) var<storage, read> targetCells: array<i32>;
 @group(0) @binding(1) var<storage, read> pieceCells: array<i32>;
@@ -59,24 +61,24 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   var lockY: i32 = 0;
   var lockEnabled: u32 = 0u;
   for (var batchIndex: u32 = 0u; batchIndex < params.batchCount; batchIndex++) {
-    let meta = metas[batchIndex];
-    if (!selected && id.x >= meta.candidateOffset && id.x < meta.candidateOffset + meta.targetCount * meta.pieceCount) {
+    let metadata = metas[batchIndex];
+    if (!selected && id.x >= metadata.candidateOffset && id.x < metadata.candidateOffset + metadata.targetCount * metadata.pieceCount) {
       selected = true;
-      targetOffset = meta.targetOffset;
-      pieceOffset = meta.pieceOffset;
-      fieldMaskOffset = meta.fieldMaskOffset;
-      targetCount = meta.targetCount;
-      pieceCount = meta.pieceCount;
-      candidateOffset = meta.candidateOffset;
-      minX = meta.minX; maxX = meta.maxX; minY = meta.minY; maxY = meta.maxY;
-      lockX = meta.lockX; lockY = meta.lockY; lockEnabled = meta.lockEnabled;
+      targetOffset = metadata.targetOffset;
+      pieceOffset = metadata.pieceOffset;
+      fieldMaskOffset = metadata.fieldMaskOffset;
+      targetCount = metadata.targetCount;
+      pieceCount = metadata.pieceCount;
+      candidateOffset = metadata.candidateOffset;
+      minX = metadata.minX; maxX = metadata.maxX; minY = metadata.minY; maxY = metadata.maxY;
+      lockX = metadata.lockX; lockY = metadata.lockY; lockEnabled = metadata.lockEnabled;
     }
   }
   if (!selected) { return; }
   let local = id.x - candidateOffset;
   let targetIndex = local / pieceCount;
   let sourceIndex = local % pieceCount;
-  let targetBase = (targetOffset + targetIndex) * 2u;
+  let targetBase = targetOffset + targetIndex * 2u;
   let sourceBase = pieceOffset + sourceIndex * 2u;
   let originX = targetCells[targetBase] - pieceCells[sourceBase];
   let originY = targetCells[targetBase + 1u] - pieceCells[sourceBase + 1u];
@@ -170,6 +172,21 @@ export function cpuGenerateFrontierTargetBatch(inputs, grid = DEFAULT_FRONTIER_G
   return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'cpu-oracle', parity: 'oracle', candidateCount: normalized.candidateCount, items: Object.freeze(normalized.items.map(item => Object.freeze({ pieceId: item.pieceId, targetCount: item.targetCells.length, pieceCount: item.pieceCells.length, ...cpuGenerateFrontierTargetCandidates(item, normalizedGrid) }))) });
 }
 
+function parityMismatchReason(actualItems, expectedItems) {
+  if (actualItems.length !== expectedItems.length) return `oracle-parity-mismatch:item-count:${actualItems.length}/${expectedItems.length}`;
+  for (let itemIndex = 0; itemIndex < expectedItems.length; itemIndex += 1) {
+    const actual = actualItems[itemIndex], expected = expectedItems[itemIndex];
+    if (actual.origins.length !== expected.origins.length) return `oracle-parity-mismatch:item-${itemIndex}:origin-count:${actual.origins.length}/${expected.origins.length}`;
+    if (actual.validity.length !== expected.validity.length) return `oracle-parity-mismatch:item-${itemIndex}:validity-count:${actual.validity.length}/${expected.validity.length}`;
+    for (let index = 0; index < expected.origins.length; index += 1) {
+      const actualOrigin = actual.origins[index], expectedOrigin = expected.origins[index];
+      if (actualOrigin.x !== expectedOrigin.x || actualOrigin.y !== expectedOrigin.y) return `oracle-parity-mismatch:item-${itemIndex}:origin-${index}:gpu-${actualOrigin.x},${actualOrigin.y}:cpu-${expectedOrigin.x},${expectedOrigin.y}`;
+      if (actual.validity[index] !== expected.validity[index]) return `oracle-parity-mismatch:item-${itemIndex}:validity-${index}:gpu-${actual.validity[index]}:cpu-${expected.validity[index]}`;
+    }
+  }
+  return 'oracle-parity-mismatch';
+}
+
 async function runGpuBatch(device, normalized, grid, shaderSource) {
   const layout = createWebGpuFrontierBatchLayout(normalized.items, grid);
   const originBytes = Math.max(4, normalized.candidateCount * 2 * 4), countBytes = Math.max(4, normalized.candidateCount * 4), targetBytes = Math.max(4, layout.targetValues.byteLength), pieceBytes = Math.max(4, layout.pieceValues.byteLength), maskBytes = Math.max(4, layout.fieldMasks.byteLength), metaBytes = Math.max(4, layout.metaValues.byteLength);
@@ -208,7 +225,7 @@ export function createWebGpuFrontierTargetGenerator({ gpu = globalThis.navigator
       if (status.status !== 'available') return Object.freeze({ ...status, targetCount: cpu.items[0].targetCount, pieceCount: cpu.items[0].pieceCount, origins: cpu.items[0].origins, validity: cpu.items[0].validity, acceptedIndices: cpu.items[0].acceptedIndices, candidateCount: cpu.candidateCount });
       try {
         const result = (await runGpuBatch(await deviceCache.getDevice(), normalized, normalizedGrid, shaderSource))[0], expected = cpu.items[0], parity = JSON.stringify(result.origins) === JSON.stringify(expected.origins) && JSON.stringify(result.validity) === JSON.stringify(expected.validity);
-        if (!parity) return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'rejected', backend: 'webgpu', reason: 'oracle-parity-mismatch', targetCount: expected.targetCount, pieceCount: expected.pieceCount, origins: expected.origins, validity: expected.validity, acceptedIndices: expected.acceptedIndices, candidateCount: expected.candidateCount });
+        if (!parity) return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'rejected', backend: 'webgpu', reason: parityMismatchReason([result], [expected]), targetCount: expected.targetCount, pieceCount: expected.pieceCount, origins: expected.origins, validity: expected.validity, acceptedIndices: expected.acceptedIndices, candidateCount: expected.candidateCount });
         return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'verified', targetCount: result.targetCount, pieceCount: result.pieceCount, origins: result.origins, validity: result.validity, acceptedIndices: result.validity.flatMap((value, index) => value ? [index] : []), candidateCount: result.candidateCount });
       } catch (error) { deviceCache.reset(); return Object.freeze({ ...status, status: 'unavailable', reason: `webgpu-execution-failed:${error?.message || String(error)}`, targetCount: cpu.items[0].targetCount, pieceCount: cpu.items[0].pieceCount, origins: cpu.items[0].origins, validity: cpu.items[0].validity, acceptedIndices: cpu.items[0].acceptedIndices, candidateCount: cpu.candidateCount }); }
     },
@@ -217,7 +234,7 @@ export function createWebGpuFrontierTargetGenerator({ gpu = globalThis.navigator
       if (status.status !== 'available') return Object.freeze({ ...status, candidateCount: normalized.candidateCount, items: cpu.items });
       try {
         const result = await runGpuBatch(await deviceCache.getDevice(), normalized, normalizedGrid, shaderSource), parity = result.length === cpu.items.length && result.every((item, index) => JSON.stringify(item.origins) === JSON.stringify(cpu.items[index].origins) && JSON.stringify(item.validity) === JSON.stringify(cpu.items[index].validity));
-        if (!parity) return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'rejected', backend: 'webgpu', reason: 'oracle-parity-mismatch', candidateCount: normalized.candidateCount, items: cpu.items });
+        if (!parity) return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'rejected', backend: 'webgpu', reason: parityMismatchReason(result, cpu.items), candidateCount: normalized.candidateCount, items: cpu.items });
         return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'verified', batch: 'verified', candidateCount: normalized.candidateCount, items: result });
       } catch (error) { deviceCache.reset(); return Object.freeze({ ...status, status: 'unavailable', reason: `webgpu-batch-execution-failed:${error?.message || String(error)}`, candidateCount: normalized.candidateCount, items: cpu.items }); }
     },

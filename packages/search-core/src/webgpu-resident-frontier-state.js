@@ -41,40 +41,54 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let residentOutputBase = outputIndex * labelsPerState;
   let pieceIndex = candidatePieceIndices[id.x];
   let candidateMaskBase = id.x * params.wordCount;
-  for (var piece: u32 = 0u; piece < params.pieceCount; piece++) for (var word: u32 = 0u; word < labelStride; word++) {
-    let localOffset = localBase + piece * labelStride + word;
-    var parentValue = 0u;
-    if (parentIndex == ${RESIDENT_PARENT_SENTINEL}u) { parentValue = seedParents[parentBase + piece * labelStride + word]; }
-    else { parentValue = residentParents[residentParentBase + piece * labelStride + word]; }
-    let candidateValue = select(0u, candidateMasks[candidateMaskBase + word], piece == pieceIndex);
-    nextLabels[localOffset] = parentValue | candidateValue;
-    canonicalLabels[localOffset] = 0u;
+  for (var piece: u32 = 0u; piece < params.pieceCount; piece++) {
+    for (var word: u32 = 0u; word < labelStride; word++) {
+      let localOffset = localBase + piece * labelStride + word;
+      var parentValue = 0u;
+      if (parentIndex == ${RESIDENT_PARENT_SENTINEL}u) { parentValue = seedParents[parentBase + piece * labelStride + word]; }
+      else { parentValue = residentParents[residentParentBase + piece * labelStride + word]; }
+      let candidateValue = select(0u, candidateMasks[candidateMaskBase + word], piece == pieceIndex);
+      nextLabels[localOffset] = parentValue | candidateValue;
+      canonicalLabels[localOffset] = 0u;
+    }
   }
   var found = false;
   var minX: i32 = 0;
   var minY: i32 = 0;
-  for (var y: u32 = 0u; y < params.height; y++) for (var x: u32 = 0u; x < params.width; x++) {
-    let offset = y * params.width + x;
-    var occupied = false;
-    for (var piece: u32 = 0u; piece < params.pieceCount; piece++) if (labelBit(localBase + piece * labelStride, offset) == 1u) { occupied = true; }
-    if (occupied) { if (!found) { minX = i32(x); minY = i32(y); found = true; } else { minX = min(minX, i32(x)); minY = min(minY, i32(y)); } }
+  for (var y: u32 = 0u; y < params.height; y++) {
+    for (var x: u32 = 0u; x < params.width; x++) {
+      let offset = y * params.width + x;
+      var occupied = false;
+      for (var piece: u32 = 0u; piece < params.pieceCount; piece++) {
+        if (labelBit(localBase + piece * labelStride, offset) == 1u) { occupied = true; }
+      }
+      if (occupied) { if (!found) { minX = i32(x); minY = i32(y); found = true; } else { minX = min(minX, i32(x)); minY = min(minY, i32(y)); } }
+    }
   }
-  if (found) for (var piece: u32 = 0u; piece < params.pieceCount; piece++) for (var y: u32 = 0u; y < params.height; y++) for (var x: u32 = 0u; x < params.width; x++) {
-    let offset = y * params.width + x;
-    if (labelBit(localBase + piece * labelStride, offset) == 1u) {
-      let canonicalX = i32(x) - minX; let canonicalY = i32(y) - minY;
-      let canonicalOffset = u32(canonicalY * i32(params.width) + canonicalX);
-      let destination = localBase + piece * labelStride + canonicalOffset / 32u;
-      canonicalLabels[destination] = canonicalLabels[destination] | (1u << (canonicalOffset % 32u));
+  if (found) {
+    for (var piece: u32 = 0u; piece < params.pieceCount; piece++) {
+      for (var y: u32 = 0u; y < params.height; y++) {
+        for (var x: u32 = 0u; x < params.width; x++) {
+          let offset = y * params.width + x;
+          if (labelBit(localBase + piece * labelStride, offset) == 1u) {
+            let canonicalX = i32(x) - minX; let canonicalY = i32(y) - minY;
+            let canonicalOffset = u32(canonicalY * i32(params.width) + canonicalX);
+            let destination = localBase + piece * labelStride + canonicalOffset / 32u;
+            canonicalLabels[destination] = canonicalLabels[destination] | (1u << (canonicalOffset % 32u));
+          }
+        }
+      }
     }
   }
   var absoluteHash: u32 = 2166136261u; var canonicalHash: u32 = 2166136261u;
-  for (var piece: u32 = 0u; piece < params.pieceCount; piece++) for (var word: u32 = 0u; word < labelStride; word++) {
-    let offset = localBase + piece * labelStride + word;
-    absoluteHash = (absoluteHash ^ nextLabels[offset]) * 16777619u;
-    canonicalHash = (canonicalHash ^ canonicalLabels[offset]) * 16777619u;
-    residentNext[residentOutputBase + piece * labelStride + word] = nextLabels[offset];
-    residentCanonical[residentOutputBase + piece * labelStride + word] = canonicalLabels[offset];
+  for (var piece: u32 = 0u; piece < params.pieceCount; piece++) {
+    for (var word: u32 = 0u; word < labelStride; word++) {
+      let offset = localBase + piece * labelStride + word;
+      absoluteHash = (absoluteHash ^ nextLabels[offset]) * 16777619u;
+      canonicalHash = (canonicalHash ^ canonicalLabels[offset]) * 16777619u;
+      residentNext[residentOutputBase + piece * labelStride + word] = nextLabels[offset];
+      residentCanonical[residentOutputBase + piece * labelStride + word] = canonicalLabels[offset];
+    }
   }
   let remainingBase = id.x * ${REMAINING_MASK_WORD_COUNT}u;
   for (var word: u32 = 0u; word < ${REMAINING_MASK_WORD_COUNT}u; word++) { absoluteHash = (absoluteHash ^ remainingMasks[remainingBase + word]) * 16777619u; canonicalHash = (canonicalHash ^ remainingMasks[remainingBase + word]) * 16777619u; }

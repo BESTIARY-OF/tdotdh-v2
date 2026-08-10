@@ -146,15 +146,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   var minY: i32 = 0;
   var maxY: i32 = 0;
   for (var batchIndex: u32 = 0u; batchIndex < params.batchCount; batchIndex++) {
-    let meta = metas[batchIndex];
-    let itemCount = meta.fieldCount * 4u * meta.pieceCount;
-    if (!selected && id.x >= meta.candidateOffset && id.x < meta.candidateOffset + itemCount) {
+    let metadata = metas[batchIndex];
+    let itemCount = metadata.fieldCount * 4u * metadata.pieceCount;
+    if (!selected && id.x >= metadata.candidateOffset && id.x < metadata.candidateOffset + itemCount) {
       selected = true;
-      selectedFieldCount = meta.fieldCount;
-      selectedPieceOffset = meta.pieceOffset;
-      selectedPieceCount = meta.pieceCount;
-      selectedCandidateOffset = meta.candidateOffset;
-      minX = meta.minX; maxX = meta.maxX; minY = meta.minY; maxY = meta.maxY;
+      selectedFieldCount = metadata.fieldCount;
+      selectedPieceOffset = metadata.pieceOffset;
+      selectedPieceCount = metadata.pieceCount;
+      selectedCandidateOffset = metadata.candidateOffset;
+      minX = metadata.minX; maxX = metadata.maxX; minY = metadata.minY; maxY = metadata.maxY;
     }
   }
   if (!selected) { return; }

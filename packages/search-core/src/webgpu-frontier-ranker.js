@@ -24,7 +24,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let left = inputRows[index];
   let right = inputRows[partner];
   let ascending = (index & params.k) == 0u;
-  let takeRight = (ascending && isAfter(left, right)) || (!ascending && isAfter(right, left));
+  let lower = (index & params.j) == 0u;
+  let takeRight = ((ascending == lower) && isAfter(left, right)) || ((ascending != lower) && isAfter(right, left));
   if (takeRight) { outputRows[index] = right; }
   else { outputRows[index] = left; }
 }`;

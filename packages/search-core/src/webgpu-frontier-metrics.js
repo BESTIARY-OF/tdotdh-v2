@@ -76,8 +76,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         if (parentBit(base, x - 1, y) == 1u) { contact += 1; }
         if (parentBit(base, x, y + 1) == 1u) { contact += 1; }
         if (parentBit(base, x, y - 1) == 1u) { contact += 1; }
-        for (var dx: i32 = -1; dx <= 1; dx++) for (var dy: i32 = -1; dy <= 1; dy++) {
-          if ((dx != 0 || dy != 0) && centroidBit(base, x + dx, y + dy) == 1u) { centroidContact += 1; }
+        for (var dx: i32 = -1; dx <= 1; dx++) {
+          for (var dy: i32 = -1; dy <= 1; dy++) {
+            if ((dx != 0 || dy != 0) && centroidBit(base, x + dx, y + dy) == 1u) { centroidContact += 1; }
+          }
         }
         if (ring == 1u) { ringCoverage += 1; }
       } else if (ring == 1u && parent == 0u) {

@@ -9,7 +9,7 @@ const BRANCH_LIMIT = 30;
 import { createFrontierEvaluationCandidate } from '../../../packages/search-core/src/webgpu-frontier-evaluator.js';
 import { cpuScoreFrontierCandidate } from '../../../packages/search-core/src/webgpu-frontier-scorer.js';
 import { createFrontierMaskFromCells } from '../../../packages/search-core/src/webgpu-frontier-validator.js';
-import { createFrontierMetricsCandidate } from '../../../packages/search-core/src/webgpu-frontier-metrics.js';
+import { createFrontierMetricsCandidate } from '../../../packages/search-core/src/webgpu-frontier-metrics.js?v=20260810-gpu26';
 import { createFieldMetricsCandidate } from '../../../packages/search-core/src/webgpu-field-metrics.js';
 import { createLabeledFrontierStateCandidate } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 import { canonicalSignatureFromLabeledFrontierState } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
@@ -113,7 +113,7 @@ async function generateFrontierTranslations(piece, state, bounds, frontierGenera
   }
   const fieldCells = [...state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
   const result = await frontierGenerator.generate({ fieldCells, pieceCells: applyLock(piece), bounds });
-  onGeneration({ status: result?.parity === 'verified' ? 'used' : 'fallback', backend: result?.backend || 'cpu-oracle', parity: result?.parity, compaction: result?.compaction, candidateCount: result?.candidateCount || 0 });
+  onGeneration({ status: result?.parity === 'verified' ? 'used' : 'fallback', backend: result?.backend || 'cpu-oracle', parity: result?.parity, compaction: result?.compaction, candidateCount: result?.candidateCount || 0, ...(result?.reason ? { reason: result.reason } : {}) });
   if (Array.isArray(result?.compactedOrigins)) return result.compactedOrigins.filter(origin => origin && Number.isSafeInteger(origin.x) && Number.isSafeInteger(origin.y)).map(origin => ({ id: piece.id, origin, cells: placedCells(piece, origin) }));
   if (!Array.isArray(result?.origins) || !Array.isArray(result?.validity)) return candidateTranslations(piece, state.field, bounds);
   const records = [];
@@ -142,7 +142,7 @@ async function generateFrontierTranslationsBatch(pieces, state, bounds, frontier
   }
   const fieldCells = [...state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
   const result = await frontierGenerator.generateBatch(pieces.map(piece => ({ pieceId: piece.id, fieldCells, pieceCells: applyLock(piece), bounds })));
-  onGeneration({ status: result?.parity === 'verified' ? 'used' : 'fallback', backend: result?.backend || 'cpu-oracle', parity: result?.parity, candidateCount: result?.candidateCount || 0, batch: result?.batch || 'fallback' });
+  onGeneration({ status: result?.parity === 'verified' ? 'used' : 'fallback', backend: result?.backend || 'cpu-oracle', parity: result?.parity, candidateCount: result?.candidateCount || 0, batch: result?.batch || 'fallback', ...(result?.reason ? { reason: result.reason } : {}) });
   if (!Array.isArray(result?.items)) return fallback();
   const byId = new Map();
   for (const item of result.items) {
@@ -191,7 +191,7 @@ async function generateFrontierTranslationsAcrossBeam(plans, frontierGenerator, 
     } else chunks.push({ planIndex: group.planIndex, inputs: [...group.inputs], refs: [...group.refs], candidateCount: group.candidateCount });
   }
   const items = [];
-  let totalCandidateCount = 0, batches = 0, backend = 'compute-shader', parity = 'verified', recordBackend = 'cpu-oracle', recordParity = 'oracle', recordInputCount = 0, recordOutputCount = 0;
+  let totalCandidateCount = 0, batches = 0, backend = 'compute-shader', parity = 'verified', fallbackReason = null, recordBackend = 'cpu-oracle', recordParity = 'oracle', recordInputCount = 0, recordOutputCount = 0;
   for (const chunk of chunks) {
     const result = await frontierGenerator.generateBatch(chunk.inputs);
     if (result?.backend) backend = result.backend;
@@ -199,6 +199,7 @@ async function generateFrontierTranslationsAcrossBeam(plans, frontierGenerator, 
       result.items.forEach((item, offset) => items.push({ item, ref: chunk.refs[offset] }));
     } else {
       parity = 'oracle';
+      fallbackReason = result?.reason || fallbackReason;
       for (const ref of chunk.refs) generated[ref.planIndex].set(ref.piece.id, candidateTranslations(ref.piece, plans[ref.planIndex].state.field, plans[ref.planIndex].state.bounds));
     }
     totalCandidateCount += Number(result?.candidateCount) || chunk.candidateCount; batches += 1;
@@ -215,7 +216,7 @@ async function generateFrontierTranslationsAcrossBeam(plans, frontierGenerator, 
     generated[ref.planIndex].set(piece.id, [...translations.values()]);
   }
   const inputCount = planGroups.reduce((sum, group) => sum + group.inputs.length, 0);
-  onGeneration({ status: items.length === inputCount ? 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? parity : 'oracle', reason: items.length === inputCount ? undefined : 'frontier-generator-batch-fallback', candidateCount: totalCandidateCount, batches, batch: 'beam', candidateRecords: { backend: recordBackend, parity: recordParity, inputCount: recordInputCount, outputCount: recordOutputCount } });
+  onGeneration({ status: items.length === inputCount ? 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? parity : 'oracle', reason: items.length === inputCount ? undefined : (fallbackReason || 'frontier-generator-batch-fallback'), candidateCount: totalCandidateCount, batches, batch: 'beam', candidateRecords: { backend: recordBackend, parity: recordParity, inputCount: recordInputCount, outputCount: recordOutputCount } });
   return generated;
 }
 async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTargetGenerator, positionLocks, seedOrigin, onGeneration = () => {}, availabilityStatus = null, frontierCandidateRecords = null, materializeCandidates = true) {
@@ -253,10 +254,11 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
     else chunks.push({ inputs: [...group.inputs], refs: [...group.refs], candidateCount: group.candidateCount });
   }
   const items = [];
-  let totalCandidateCount = 0, batches = 0, backend = 'compute-shader', recordBackend = 'cpu-oracle', recordParity = 'oracle', recordInputCount = 0, recordOutputCount = 0;
+  let totalCandidateCount = 0, batches = 0, backend = 'compute-shader', fallbackReason = null, recordBackend = 'cpu-oracle', recordParity = 'oracle', recordInputCount = 0, recordOutputCount = 0;
   for (const chunk of chunks) {
     const result = await frontierTargetGenerator.generateBatch(chunk.inputs);
     if (result?.backend) backend = result.backend;
+    if (result?.reason) fallbackReason = result.reason;
     if (result?.status === 'completed' && Array.isArray(result.items) && result.items.length === chunk.inputs.length) result.items.forEach((item, offset) => items.push({ item, ref: chunk.refs[offset] }));
     else for (const ref of chunk.refs) for (const target of ref.plan.targetPool) for (const candidate of candidateTranslationsForTarget(ref.piece, ref.plan.state.field, ref.plan.state.bounds, target, positionLocks, seedOrigin)) { const targetKey = key(target.x, target.y), entries = generated[ref.planIndex].get(targetKey) || []; entries.push({ piece: ref.piece, candidate }); generated[ref.planIndex].set(targetKey, entries); }
     totalCandidateCount += Number(result?.candidateCount) || chunk.candidateCount; batches += 1;
@@ -284,7 +286,7 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
     generated[ref.planIndex] = byTarget;
   }
   const inputCount = planGroups.reduce((sum, group) => sum + group.inputs.length, 0);
-  onGeneration({ status: items.length === inputCount ? 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? 'verified' : 'oracle', reason: items.length === inputCount ? undefined : 'frontier-generator-batch-fallback', candidateCount: totalCandidateCount, batches, batch: 'beam', candidateRecords: { backend: recordBackend, parity: recordParity, inputCount: recordInputCount, outputCount: recordOutputCount } });
+  onGeneration({ status: items.length === inputCount ? 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? 'verified' : 'oracle', reason: items.length === inputCount ? undefined : (fallbackReason || 'frontier-generator-batch-fallback'), candidateCount: totalCandidateCount, batches, batch: 'beam', candidateRecords: { backend: recordBackend, parity: recordParity, inputCount: recordInputCount, outputCount: recordOutputCount } });
   return generated;
 }
 async function generateFrontierTargetPoolsAcrossBeam(plans, frontierTargetPool, centroidId, onTargetPool = () => {}, availabilityStatus = null) {
@@ -755,6 +757,7 @@ async function scoreFrontierCandidates(entries, frontierScorer, onScore = () => 
 
 async function compactFrontierRows(entries, retain, frontierCompactor, onCompact = () => {}) {
   const cpu = () => entries.map((entry, index) => ({ entry, index })).sort((left, right) => left.entry.score - right.entry.score || left.index - right.index).slice(0, retain).map(row => row.entry);
+  if (!entries.length) { onCompact({ status: 'not-used', backend: 'cpu-oracle', parity: 'oracle', candidateCount: 0, selectedCount: 0 }); return entries; }
   if (!frontierCompactor?.compact) { onCompact({ status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', candidateCount: entries.length, selectedCount: Math.min(entries.length, retain) }); return cpu(); }
   const result = await frontierCompactor.compact(entries.map((entry, index) => ({ score: entry.score, tie: entry.tie ?? index })), retain);
   onCompact({ status: result?.parity === 'verified' ? 'used' : 'fallback', backend: result?.backend || 'cpu-oracle', parity: result?.parity, algorithm: result?.algorithm, persistent: result?.persistent === true, bufferCapacity: result?.bufferCapacity, candidateCount: entries.length, selectedCount: result?.selectedCount || 0, reason: result?.reason });
