@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createWebGpuFrontierNavigationPlan, createWebGpuFrontierNavigationScheduler, cpuSelectFrontierNavigationRows, decodeWebGpuFrontierNavigationRow, WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA } from '../src/webgpu-frontier-navigation-plan.js';
+import { createWebGpuFrontierNavigationPlan, createWebGpuFrontierNavigationScheduler, cpuSelectFrontierNavigationRows, decodeWebGpuFrontierNavigationRow, FRONTIER_NAVIGATION_GROUP_STRIDE, FRONTIER_NAVIGATION_PLAN_SHADER, WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA } from '../src/webgpu-frontier-navigation-plan.js';
 
 const rows = [
   { planIndex: 0, targetOrdinal: 1, pieceId: 4, candidateIndex: 0, originX: 2, originY: 3, targetX: 2, targetY: 4 },
@@ -11,6 +11,12 @@ const plan = createWebGpuFrontierNavigationPlan(rows);
 assert.equal(plan.schema, WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA);
 assert.equal(plan.rowCount, 4);
 assert.equal(plan.stride, 8);
+assert.equal(plan.groupStride, FRONTIER_NAVIGATION_GROUP_STRIDE);
+assert.equal(plan.groupCount, 3);
+assert.ok(plan.groupIndices instanceof Uint32Array);
+assert.ok(plan.groupValues instanceof Uint32Array);
+assert.match(FRONTIER_NAVIGATION_PLAN_SHADER, /fn choose/);
+assert.match(FRONTIER_NAVIGATION_PLAN_SHADER, /fn select/);
 assert.ok(plan.values instanceof Int32Array);
 assert.deepEqual(decodeWebGpuFrontierNavigationRow(plan, 2), rows[2]);
 const oracle = cpuSelectFrontierNavigationRows(plan, { planCount: 2 });

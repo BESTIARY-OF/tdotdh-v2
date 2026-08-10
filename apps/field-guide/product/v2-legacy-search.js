@@ -967,6 +967,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     : progress => postMessage({ type: 'progress', ...progress });
   const random = seededRandom(options.searchSalt || `${targetFamily || 'open'}:${options.rootChoice || 0}`);
   const navigationScheduler = options.navigationScheduler || createWebGpuFrontierNavigationScheduler();
+  const navigationAvailability = await navigationScheduler?.availability?.();
   const preferNewFamily = searchStrategy === 'breadth' && !targetFamily;
   const centroidId = Number(options.centroidId || 3), centroidPiece = pieces.find(p => p.id === centroidId), centerShape = applyLock(centroidPiece), centerSize = shapeSize(centerShape), seedOrigin = { x: -Math.floor(centerSize.width / 2), y: -Math.floor(centerSize.height / 2) }, seedCells = placedCells(centroidPiece, seedOrigin), seedPlacement = { id: centroidId, origin: seedOrigin, cells: seedCells };
   const seedSet = new Set(seedCells.map(c => key(c.x, c.y))), centroidRing = new Set(); seedCells.forEach(cell => adjacent(cell).forEach(next => { if (!seedSet.has(key(next.x, next.y))) centroidRing.add(key(next.x, next.y)); }));
@@ -1042,38 +1043,62 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       frontierTargetGenerationReceipt = annotate(frontierTargetGenerationReceipt);
       frontierGenerationReceipt = annotate(frontierGenerationReceipt);
     }
-    const navigationRows = [], navigationRefs = [];
-    for (const [planIndex, plan] of beamPlans.entries()) {
-      const state = plan.state, generatedByPiece = generatedByBeam?.[planIndex] || null, generatedByTarget = generatedByTargetBeam?.[planIndex] || null;
-      for (const [targetOrdinal, target] of plan.targetPool.entries()) {
-        for (const piece of state.remaining) {
-          let candidates = [];
-          if (useTargetGeneratedFrontier) candidates = (generatedByTarget.get(key(target.x, target.y)) || []).filter(entry => entry.piece.id === piece.id).map(entry => entry.candidate);
-          else {
-            const generated = useGeneratedFrontier ? (generatedByPiece.get(piece.id) || []) : candidateTranslationsForTarget(piece, state.field, state.bounds, target, positionLocks, seedOrigin);
-            candidates = useGeneratedFrontier ? generated.filter(candidate => candidate.cells?.some(cell => key(cell.x, cell.y) === key(target.x, target.y))) : generated;
+    if (navigationAvailability && navigationAvailability.status !== 'available') {
+      navigationPlanReceipt = { status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', rowCount: 0, selectedCount: 0, planCount: beamPlans.length, reason: navigationAvailability.reason || 'webgpu-navigation-unavailable' };
+      for (const [planIndex, plan] of beamPlans.entries()) {
+        const state = plan.state, generatedByPiece = generatedByBeam?.[planIndex] || null, generatedByTarget = generatedByTargetBeam?.[planIndex] || null;
+        let selectedOptions = null;
+        for (const target of plan.targetPool) {
+          const optionsForTarget = [];
+          for (const piece of state.remaining) {
+            if (useTargetGeneratedFrontier) optionsForTarget.push(...(generatedByTarget.get(key(target.x, target.y)) || []).filter(entry => entry.piece.id === piece.id));
+            else {
+              const generated = useGeneratedFrontier ? (generatedByPiece.get(piece.id) || []) : candidateTranslationsForTarget(piece, state.field, state.bounds, target, positionLocks, seedOrigin);
+              if (!useGeneratedFrontier) optionsForTarget.push(...generated.map(candidate => ({ piece, candidate })));
+              else for (const candidate of generated) if (candidate.cells?.some(cell => key(cell.x, cell.y) === key(target.x, target.y))) optionsForTarget.push({ piece, candidate });
+            }
           }
-          for (const [candidateIndex, candidate] of candidates.entries()) {
-            if (!candidate?.origin || !Number.isSafeInteger(candidate.origin.x) || !Number.isSafeInteger(candidate.origin.y)) continue;
-            navigationRows.push({ planIndex, targetOrdinal, pieceId: piece.id, candidateIndex, originX: candidate.origin.x, originY: candidate.origin.y, targetX: target.x, targetY: target.y });
-            navigationRefs.push({ planIndex, piece, candidate });
+          if (optionsForTarget.length && (!selectedOptions || optionsForTarget.length < selectedOptions.length)) selectedOptions = optionsForTarget;
+        }
+        if (selectedOptions) {
+          selectedOptions = await filterCandidates(selectedOptions);
+          if (selectedOptions.length) beamJobs.push({ state, entries: selectedOptions });
+        }
+      }
+    } else {
+      const navigationRows = [], navigationRefs = [];
+      for (const [planIndex, plan] of beamPlans.entries()) {
+        const state = plan.state, generatedByPiece = generatedByBeam?.[planIndex] || null, generatedByTarget = generatedByTargetBeam?.[planIndex] || null;
+        for (const [targetOrdinal, target] of plan.targetPool.entries()) {
+          for (const piece of state.remaining) {
+            let candidates = [];
+            if (useTargetGeneratedFrontier) candidates = (generatedByTarget.get(key(target.x, target.y)) || []).filter(entry => entry.piece.id === piece.id).map(entry => entry.candidate);
+            else {
+              const generated = useGeneratedFrontier ? (generatedByPiece.get(piece.id) || []) : candidateTranslationsForTarget(piece, state.field, state.bounds, target, positionLocks, seedOrigin);
+              candidates = useGeneratedFrontier ? generated.filter(candidate => candidate.cells?.some(cell => key(cell.x, cell.y) === key(target.x, target.y))) : generated;
+            }
+            for (const [candidateIndex, candidate] of candidates.entries()) {
+              if (!candidate?.origin || !Number.isSafeInteger(candidate.origin.x) || !Number.isSafeInteger(candidate.origin.y)) continue;
+              navigationRows.push({ planIndex, targetOrdinal, pieceId: piece.id, candidateIndex, originX: candidate.origin.x, originY: candidate.origin.y, targetX: target.x, targetY: target.y });
+              navigationRefs.push({ planIndex, piece, candidate });
+            }
           }
         }
       }
-    }
-    const navigationPlan = await navigationScheduler.select(navigationRows, { planCount: beamPlans.length });
-    navigationPlanReceipt = { status: navigationPlan.status === 'completed' && navigationPlan.backend === 'webgpu' && navigationPlan.parity === 'verified' ? 'used' : navigationPlan.status, backend: navigationPlan.backend, parity: navigationPlan.parity, rowCount: navigationPlan.rowCount, selectedCount: navigationPlan.selectedCount, planCount: navigationPlan.planCount, inputDigest: navigationPlan.inputDigest, ...(navigationPlan.reason ? { reason: navigationPlan.reason } : {}), ...(navigationPlan.dispatch ? { dispatch: navigationPlan.dispatch } : {}) };
-    const selectedByPlan = new Map();
-    for (const rowIndex of navigationPlan.selectedRows || []) {
-      const ref = navigationRefs[rowIndex];
-      if (!ref) continue;
-      const entries = selectedByPlan.get(ref.planIndex) || [];
-      entries.push({ piece: ref.piece, candidate: ref.candidate });
-      selectedByPlan.set(ref.planIndex, entries);
-    }
-    for (const [planIndex, plan] of beamPlans.entries()) {
-      const selectedOptions = await filterCandidates(selectedByPlan.get(planIndex) || []);
-      if (selectedOptions.length) beamJobs.push({ state: plan.state, entries: selectedOptions });
+      const navigationPlan = await navigationScheduler.select(navigationRows, { planCount: beamPlans.length });
+      navigationPlanReceipt = { status: navigationPlan.status === 'completed' && navigationPlan.backend === 'webgpu' && navigationPlan.parity === 'verified' ? 'used' : navigationPlan.status, backend: navigationPlan.backend, parity: navigationPlan.parity, rowCount: navigationPlan.rowCount, selectedCount: navigationPlan.selectedCount, planCount: navigationPlan.planCount, inputDigest: navigationPlan.inputDigest, ...(navigationPlan.reason ? { reason: navigationPlan.reason } : {}), ...(navigationPlan.dispatch ? { dispatch: navigationPlan.dispatch } : {}) };
+      const selectedByPlan = new Map();
+      for (const rowIndex of navigationPlan.selectedRows || []) {
+        const ref = navigationRefs[rowIndex];
+        if (!ref) continue;
+        const entries = selectedByPlan.get(ref.planIndex) || [];
+        entries.push({ piece: ref.piece, candidate: ref.candidate });
+        selectedByPlan.set(ref.planIndex, entries);
+      }
+      for (const [planIndex, plan] of beamPlans.entries()) {
+        const selectedOptions = await filterCandidates(selectedByPlan.get(planIndex) || []);
+        if (selectedOptions.length) beamJobs.push({ state: plan.state, entries: selectedOptions });
+      }
     }
     await evaluateFrontierGeometryAcrossBeam(beamJobs, centroidId, frontierMetrics, receipt => { frontierMetricsReceipt = receipt; });
     await evaluateFieldAggregatesAcrossBeam(beamJobs, centroidId, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; });
