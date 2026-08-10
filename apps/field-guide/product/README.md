@@ -36,3 +36,9 @@ origins and validity masks, and the CPU oracle compares every item before the
 candidates re-enter target selection. This removes the prior one-piece-at-a-time
 dispatch pattern from the GPU path while preserving CPU fallback and cursor
 semantics.
+
+The branch-ranking boundary is also parity-gated. Candidate scores and stable
+ties are submitted to a bounded bitonic WebGPU workgroup (up to 128 rows), and
+the CPU ordering oracle rejects any divergent index order. The search receipt
+calls this `GPU deterministic ranking`; unavailable or oversized batches use the
+same CPU comparator without changing beam semantics.
