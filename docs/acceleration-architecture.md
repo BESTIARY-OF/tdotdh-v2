@@ -88,6 +88,10 @@ parity in the field-metrics shader.
   removes a duplicate CPU candidate-generation pass after GPU frontier origins
   have been returned; the remaining CPU work is an explicit target-index join,
   not a second search of the candidate space.
+- `6094ddf` adds a bounded persistent-frontier payload with digest-bound cursor
+  resume, stable CPU compaction oracle, and an explicit GPU compaction handoff.
+  It is a contract and persistence seam only; it does not claim that a GPU
+  buffer executor exists yet.
 
 The live 5174 runtime receipt for this seam is recorded in
 `docs/receipts/webgpu-deduplicator-runtime-2026-08-10.md`.
