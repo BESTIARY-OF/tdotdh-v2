@@ -46,8 +46,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     canonicalLabels[localOffset] = 0u;
   }
   let pieceIndex = candidatePieceIndices[id.x];
-  let candidateMaskBase = id.x * labelStride;
-  for (var word: u32 = 0u; word < labelStride; word++) {
+  let candidateMaskBase = id.x * params.wordCount;
+  for (var word: u32 = 0u; word < params.wordCount; word++) {
     let nextOffset = localBase + pieceIndex * labelStride + word;
     nextLabels[nextOffset] = nextLabels[nextOffset] | candidateMasks[candidateMaskBase + word];
   }
