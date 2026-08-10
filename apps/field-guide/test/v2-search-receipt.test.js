@@ -21,13 +21,20 @@ const frontierValidator = {
     return { status: 'completed', backend: this.backend, validity: candidates.map(() => 1) };
   },
 };
+const frontierEvaluator = {
+  backend: 'test-frontier-evaluator',
+  evaluate: async function evaluate(candidates) {
+    return { status: 'completed', backend: this.backend, parity: 'verified', validity: candidates.map(() => 1), scores: candidates.map(() => 0) };
+  },
+};
 const result = await search(pieces, [], {
   searchStrategy: 'balanced',
   candidatePrefilter,
   frontierValidator,
+  frontierEvaluator,
 });
 
 assert.equal(result.type, 'done');
 assert.deepEqual(result.prefilter, { status: 'used', backend: 'test-compute-shader', candidateCount: 3 });
-assert.deepEqual(result.frontier, { status: 'used', backend: 'test-frontier-validator', candidateCount: 3 });
+assert.deepEqual(result.frontier, { status: 'used', backend: 'test-frontier-evaluator', parity: 'verified', candidateCount: 3 });
 console.log('v2 product search receipt test passed');

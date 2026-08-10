@@ -1,10 +1,12 @@
 import { installCpuWorker } from '../../../packages/search-worker/src/cpu-worker-entry.js';
 import { createWebGpuCandidatePrefilter } from '../../../packages/search-core/src/webgpu-candidate-prefilter.js';
 import { createWebGpuFrontierValidator } from '../../../packages/search-core/src/webgpu-frontier-validator.js';
+import { createWebGpuFrontierEvaluator } from '../../../packages/search-core/src/webgpu-frontier-evaluator.js';
 import { search } from './v2-legacy-search.js';
 
 const candidatePrefilter = createWebGpuCandidatePrefilter({ gpu: globalThis.navigator?.gpu });
 const frontierValidator = createWebGpuFrontierValidator({ gpu: globalThis.navigator?.gpu });
+const frontierEvaluator = createWebGpuFrontierEvaluator({ gpu: globalThis.navigator?.gpu });
 async function runProductSearch(request, context) {
   const steering = request.steering || {};
   const result = await search(request.pieces, steering.knownCentroidFamilies || [], {
@@ -14,6 +16,7 @@ async function runProductSearch(request, context) {
     rootChoice: request.ticket.rootChoice ?? request.cursor.rootChoice,
     candidatePrefilter,
     frontierValidator,
+    frontierEvaluator,
     isCancelled: context.isCancelled,
     reportProgress: progress => context.reportProgress(progress),
   });
