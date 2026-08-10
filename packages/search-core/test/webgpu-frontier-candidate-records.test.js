@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
-import { createWebGpuFrontierCandidateRecords, cpuCompactFrontierCandidateRecords } from '../src/webgpu-frontier-candidate-records.js';
+import { createWebGpuFrontierCandidateRecords, cpuCompactFrontierCandidateRecords, FRONTIER_CANDIDATE_RECORD_SCAN_SHADER, FRONTIER_CANDIDATE_RECORD_COMPACT_SHADER } from '../src/webgpu-frontier-candidate-records.js';
+
+assert.match(FRONTIER_CANDIDATE_RECORD_SCAN_SHADER, /groupTotals/);
+assert.match(FRONTIER_CANDIDATE_RECORD_COMPACT_SHADER, /outputRecords/);
 
 const records = [
   { pieceId: 4, targetOrdinal: 2, originX: -3, originY: 7, inputOrdinal: 0 },
@@ -19,4 +22,3 @@ assert.equal(receipt.status, 'unavailable');
 assert.equal(receipt.backend, 'webgpu');
 assert.deepEqual(receipt.records, oracle.records);
 console.log('WebGPU frontier candidate-record tests passed');
-
