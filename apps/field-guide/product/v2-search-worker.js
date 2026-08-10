@@ -5,7 +5,31 @@ import { search } from './v2-legacy-search.js';
 
 const candidatePrefilter = createWebGpuCandidatePrefilter({ gpu: globalThis.navigator?.gpu });
 const frontierValidator = createWebGpuFrontierValidator({ gpu: globalThis.navigator?.gpu });
-const protocolHandle = installCpuWorker(self, { candidatePrefilter, frontierValidator });
+async function runProductSearch(request, context) {
+  const steering = request.steering || {};
+  const result = await search(request.pieces, steering.knownCentroidFamilies || [], {
+    ...steering,
+    knownSignatures: request.knownSignatureHints,
+    searchSalt: request.seed,
+    rootChoice: request.ticket.rootChoice ?? request.cursor.rootChoice,
+    candidatePrefilter,
+    frontierValidator,
+    isCancelled: context.isCancelled,
+    reportProgress: progress => context.reportProgress(progress),
+  });
+  return {
+    ...result,
+    placements: Array.isArray(result?.placements) ? result.placements : [],
+    hasPlacement: Array.isArray(result?.placements) && result.placements.length > 0,
+    protocolOperation: 'product-search',
+  };
+}
+
+const protocolHandle = installCpuWorker(self, {
+  candidatePrefilter,
+  frontierValidator,
+  operations: { 'product-search': runProductSearch },
+});
 
 self.onmessage = event => {
   const message = event?.data;

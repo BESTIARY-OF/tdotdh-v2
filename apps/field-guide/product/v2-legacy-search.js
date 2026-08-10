@@ -244,12 +244,13 @@ async function validateFrontierOptions(entries, state, frontierValidator, onFron
   return entries;
 }
 
-async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroidId, targetNeighborCount, allowKnownFamily = false, knownSignatures = new Set(), searchHints = false, positionPreferences = {}, random = Math.random, quality = {}, candidatePrefilter = null, onPrefilter = () => {}, frontierValidator = null, onFrontier = () => {}) {
+async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroidId, targetNeighborCount, allowKnownFamily = false, knownSignatures = new Set(), searchHints = false, positionPreferences = {}, random = Math.random, quality = {}, candidatePrefilter = null, onPrefilter = () => {}, frontierValidator = null, onFrontier = () => {}, isCancelled = () => {}) {
   const unknownBranches = (allowKnownFamily ? branches : branches.filter(branch => !knownFamilies.has(branch.centroidFamilyId))).sort(() => random() - .5);
   let nodes = 0;
   for (const branch of unknownBranches) {
     const branchBudget = Math.max(1, Math.floor(NODE_LIMIT / Math.max(1, unknownBranches.length))), branchStart = nodes;
     async function complete(state) {
+      if (isCancelled()) return null;
       if (nodes - branchStart >= branchBudget) return null;
       nodes++;
       if (!state.remaining.length) {
@@ -281,6 +282,7 @@ async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroi
       const choice = choices[0];
       choice.options.sort((a, b) => b.hintMatches - a.hintMatches || b.metrics.density - a.metrics.density || searchQualityScore(a.metrics, quality) - searchQualityScore(b.metrics, quality) || random() - .5);
       for (const option of choice.options) {
+        if (isCancelled()) return null;
         const placements = [...state.placements, option.candidate], field = new Set(state.field); option.candidate.cells.forEach(cell => field.add(key(cell.x, cell.y)));
         const result = await complete({ placements, field, remaining: state.remaining.filter(piece => piece.id !== choice.piece.id), bounds: option.metrics, hintMatches: option.hintMatches });
         if (result) return result;
@@ -317,21 +319,27 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const positionPreferences = options.positionPreferences || {};
   const positionLocks = options.positionLocks || {};
   const knownSignatures = new Set(options.knownSignatures || []);
+  const isCancelled = typeof options.isCancelled === 'function' ? options.isCancelled : () => false;
+  const reportProgress = typeof options.reportProgress === 'function'
+    ? options.reportProgress
+    : progress => postMessage({ type: 'progress', ...progress });
   const random = seededRandom(options.searchSalt || `${targetFamily || 'open'}:${options.rootChoice || 0}`);
   const preferNewFamily = searchStrategy === 'breadth' && !targetFamily;
   const centroidId = Number(options.centroidId || 3), centroidPiece = pieces.find(p => p.id === centroidId), centerShape = applyLock(centroidPiece), centerSize = shapeSize(centerShape), seedOrigin = { x: -Math.floor(centerSize.width / 2), y: -Math.floor(centerSize.height / 2) }, seedCells = placedCells(centroidPiece, seedOrigin), seedPlacement = { id: centroidId, origin: seedOrigin, cells: seedCells };
   const seedSet = new Set(seedCells.map(c => key(c.x, c.y))), centroidRing = new Set(); seedCells.forEach(cell => adjacent(cell).forEach(next => { if (!seedSet.has(key(next.x, next.y))) centroidRing.add(key(next.x, next.y)); }));
   const seed = { placements: [seedPlacement], field: new Set(seedCells.map(c => key(c.x, c.y))), remaining: pieces.filter(p => p.id !== centroidId), bounds: fieldMetrics([seedPlacement], centroidId), hintMatches: 0 }, seedBranches = searchStrategy === 'breadth' ? lockedSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, centroidRing, positionLocks) : targetFamily ? targetSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, targetSeed, positionLocks, random) : [];
   if (seedBranches.length) {
-    const lockedResult = await searchLockedSeedBranches(pieces, seedBranches, knownFamilies, centroidId, targetNeighborCount, Boolean(targetFamily), knownSignatures, searchHints, positionPreferences, random, quality, candidatePrefilter, receipt => { prefilterReceipt = receipt; }, options.frontierValidator, receipt => { frontierReceipt = receipt; });
+    const lockedResult = await searchLockedSeedBranches(pieces, seedBranches, knownFamilies, centroidId, targetNeighborCount, Boolean(targetFamily), knownSignatures, searchHints, positionPreferences, random, quality, candidatePrefilter, receipt => { prefilterReceipt = receipt; }, options.frontierValidator, receipt => { frontierReceipt = receipt; }, isCancelled);
     return { ...lockedResult, prefilter: prefilterReceipt, frontier: frontierReceipt };
   }
   const beam = [seed];
   let nodes = 0, fallback = null, bestHintResult = null;
   const pieceCount = pieces.length;
   for (let depth = 0; depth < pieceCount - 1 && beam.length && nodes < NODE_LIMIT; depth++) {
+    if (isCancelled()) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt };
     const nextBeam = [];
     for (const state of beam) {
+      if (isCancelled()) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt };
       if (nodes >= NODE_LIMIT) break;
       let selectedTarget = null, selectedOptions = null;
       const openCentroid = [...centroidRing].filter(ringKey => !state.field.has(ringKey));
@@ -401,7 +409,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       if (searchStrategy !== 'breadth' && retained.length < BEAM_LIMIT) for (const state of nextBeam) { if (retainedSet.has(state)) continue; retained.push(state); if (retained.length >= BEAM_LIMIT) break; }
     }
     beam.splice(0, beam.length, ...retained);
-    postMessage({ type: 'progress', depth: depth + 1, nodes, beam: beam.length, families: seedCounts.size });
+    reportProgress({ depth: depth + 1, nodes, beam: beam.length, families: seedCounts.size, frontier: nextBeam.length, cursor: { depth: depth + 1, nodeOffset: nodes, rootChoice: Number(options.rootChoice || 0) } });
   for (const state of beam) if (!state.remaining.length) {
     const metrics = fieldMetrics(state.placements, centroidId);
     if (metrics.area === pieceCount * AREA && metrics.holes === 0 && !metrics.centroidEdgeCoast && connected(state.field) && !knownSignatures.has(arrangementSignature(state.placements))) {
