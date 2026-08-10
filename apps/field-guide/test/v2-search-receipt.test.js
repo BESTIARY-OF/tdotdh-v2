@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { search } from '../product/v2-legacy-search.js';
+import { cpuGenerateFrontierCandidates } from '../../../packages/search-core/src/webgpu-frontier-generator.js';
 
 globalThis.postMessage = () => {};
 
@@ -27,14 +28,25 @@ const frontierEvaluator = {
     return { status: 'completed', backend: this.backend, parity: 'verified', validity: candidates.map(() => 1), scores: candidates.map(() => 0) };
   },
 };
+const frontierGenerator = {
+  availability: async () => ({ status: 'available', backend: 'webgpu' }),
+  generate: async input => {
+    const result = cpuGenerateFrontierCandidates(input);
+    return { ...result, status: 'completed', backend: 'test-frontier-generator', parity: 'verified' };
+  },
+};
 const result = await search(pieces, [], {
   searchStrategy: 'balanced',
   candidatePrefilter,
   frontierValidator,
   frontierEvaluator,
+  frontierGenerator,
 });
 
 assert.equal(result.type, 'done');
 assert.deepEqual(result.prefilter, { status: 'used', backend: 'test-compute-shader', candidateCount: 3 });
 assert.deepEqual(result.frontier, { status: 'used', backend: 'test-frontier-evaluator', parity: 'verified', candidateCount: 3 });
+assert.equal(result.frontierGeneration.status, 'used');
+assert.equal(result.frontierGeneration.backend, 'test-frontier-generator');
+assert.equal(result.frontierGeneration.parity, 'verified');
 console.log('v2 product search receipt test passed');
