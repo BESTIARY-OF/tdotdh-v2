@@ -1008,7 +1008,7 @@ function stopContinuousSearch(message = 'Auto-search paused') {
 function launchSearchPass() {
   if (!app.continuous) return;
   app.solving = true; const button = document.querySelector('#solveButton'); setSearchButton(); showSearchBoard(); document.querySelector('#searchStatus').textContent = `Growing candidates · pass ${app.pass + 1}`;
-  const worker = new Worker('/apps/field-guide/product/v2-search-worker.js?v=20260810-v2worker21', { type: 'module' }); app.searchWorker = worker; const startingNodes = app.totalNodes, startedAt = performance.now();
+  const worker = new Worker('/apps/field-guide/product/v2-search-worker.js?v=20260810-v2worker22', { type: 'module' }); app.searchWorker = worker; const startingNodes = app.totalNodes, startedAt = performance.now();
   const families = new Map();
   app.snapshots.forEach(snapshot => { const familyId = snapshotFamilyId(snapshot); if (!families.has(familyId)) families.set(familyId, []); families.get(familyId).push(snapshot); });
   const orderedFamilies = [...families.entries()].map(([family, snapshots]) => [family, orderedSnapshots(snapshots)]).filter(([, snapshots]) => snapshots.length).sort((a, b) => { const aMetric = familySortMetric(a[1]), bMetric = familySortMetric(b[1]); return aMetric.primary - bMetric.primary || aMetric.secondary - bMetric.secondary; });
@@ -1038,12 +1038,14 @@ function launchSearchPass() {
     };
     const gpuStages = Object.entries(stageReceipts).filter(([, receipt]) => receipt?.status === 'used' || receipt?.status === 'completed' && receipt?.backend === 'webgpu').map(([name]) => name);
     const cpuFallbackStages = Object.entries(stageReceipts).filter(([, receipt]) => receipt?.status === 'fallback' || receipt?.status === 'cpu-oracle' || receipt?.status === 'not-used').map(([name]) => name);
+    const cpuFallbackReasons = Object.fromEntries(Object.entries(stageReceipts).filter(([, receipt]) => receipt?.status === 'fallback' || receipt?.status === 'cpu-oracle' || receipt?.status === 'not-used').map(([name, receipt]) => [name, receipt?.reason || receipt?.status || 'unknown']));
     const elapsedMs = Math.max(0, performance.now() - startedAt);
-    globalThis.__TDOTDH_V2_LAST_SEARCH_RECEIPT__ = Object.freeze({ schema: 'tdotdh.v2.search-receipt.v1', elapsedMs, gpuStages: Object.freeze(gpuStages), cpuFallbackStages: Object.freeze(cpuFallbackStages), ...stageReceipts, placements: Array.isArray(result.placements) ? result.placements.length : 0, nodes: Number(result.nodes) || 0 });
+    globalThis.__TDOTDH_V2_LAST_SEARCH_RECEIPT__ = Object.freeze({ schema: 'tdotdh.v2.search-receipt.v1', elapsedMs, gpuStages: Object.freeze(gpuStages), cpuFallbackStages: Object.freeze(cpuFallbackStages), cpuFallbackReasons: Object.freeze(cpuFallbackReasons), ...stageReceipts, placements: Array.isArray(result.placements) ? result.placements.length : 0, nodes: Number(result.nodes) || 0 });
     const runtimeStatus = document.querySelector('#v2RuntimeStatus');
     if (runtimeStatus) {
       runtimeStatus.textContent = `V2 product · real search receipt · ${gpuStages.length} GPU stages · ${cpuFallbackStages.length} CPU fallbacks · ${Math.round(elapsedMs).toLocaleString()} ms`;
-      runtimeStatus.title = `This completed search pass ran ${gpuStages.length} accelerated stage${gpuStages.length === 1 ? '' : 's'} and retained ${cpuFallbackStages.length} CPU/oracle stage${cpuFallbackStages.length === 1 ? '' : 's'}. GPU stages: ${gpuStages.join(', ') || 'none'}. CPU fallbacks: ${cpuFallbackStages.join(', ') || 'none'}.`;
+      const fallbackText = Object.entries(cpuFallbackReasons).map(([name, reason]) => `${name}=${reason}`).join(', ');
+      runtimeStatus.title = `This completed search pass ran ${gpuStages.length} accelerated stage${gpuStages.length === 1 ? '' : 's'} and retained ${cpuFallbackStages.length} CPU/oracle stage${cpuFallbackStages.length === 1 ? '' : 's'}. GPU stages: ${gpuStages.join(', ') || 'none'}. CPU fallbacks: ${cpuFallbackStages.join(', ') || 'none'}. Reasons: ${fallbackText || 'none'}.`;
       runtimeStatus.dataset.backend = gpuStages.length ? 'webgpu-search' : 'cpu-oracle-search';
     }
     if (result.hasPlacement || (Array.isArray(result.placements) && result.placements.length)) app.searchCheckpoint = null;
