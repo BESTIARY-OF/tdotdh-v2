@@ -32,3 +32,22 @@ back into v2 solver semantics.
 3. Adapter contract and unavailable fallback.
 4. CPU/GPU parity fixture.
 5. Only then: WebGPU throughput benchmark and windowed renderer benchmark.
+
+## Current receipt
+
+The v2 workline has completed gates 1–3 and has working parity-gated slices for
+gate 4:
+
+- 560c1ff executes a real WebGPU candidate-scoring dispatch with a CPU hash
+  reference.
+- ef04cdc adds the WebGPU occupancy prefilter and wires its CPU parity check
+  into the runtime.
+- d25a961 connects the prefilter to the resumable CPU worker, preserving
+  ticket, cursor, cancellation, and canonical-signature ownership.
+- 4ec5083 adds the coordinate-preserving renderer capability boundary.
+- e4dcba4 adds an end-to-end worker receipt test proving the adapter hook is
+  consulted.
+
+The browser must still demonstrate the GPU validity mask matching the CPU
+oracle on a real field-guide candidate batch before the UI may claim accelerated
+search. Until then the product remains correctly labeled CPU-oracle-first.
