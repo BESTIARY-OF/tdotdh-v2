@@ -1,4 +1,5 @@
 import { probeWebGpuCapabilities } from './webgpu-capability-probe.js';
+import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
 
 export const WEBGPU_CANDIDATE_SCORER_SCHEMA = 'tdotdh.webgpu-candidate-scorer.v0';
 export const DEFAULT_REQUIRED_LIMITS = Object.freeze({ maxStorageBufferBindingSize: 65536 });
@@ -38,7 +39,7 @@ function unavailable(reason, requiredLimits) {
   });
 }
 
-export function createWebGpuCandidateScorer({ gpu = globalThis.navigator?.gpu, requiredLimits = DEFAULT_REQUIRED_LIMITS, shaderSource = SHADER } = {}) {
+export function createWebGpuCandidateScorer({ gpu = globalThis.navigator?.gpu, requiredLimits = DEFAULT_REQUIRED_LIMITS, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
   if (typeof shaderSource !== 'string' || !shaderSource.trim()) throw new TypeError('shaderSource must be a non-empty string');
   const limits = { ...requiredLimits };
 
@@ -57,8 +58,7 @@ export function createWebGpuCandidateScorer({ gpu = globalThis.navigator?.gpu, r
 
       let device;
       try {
-        const adapter = await gpu.requestAdapter();
-        device = await adapter.requestDevice();
+        device = await deviceCache.getDevice();
         const byteLength = normalized.byteLength;
         const input = device.createBuffer({ size: byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
         const output = device.createBuffer({ size: byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
@@ -88,7 +88,7 @@ export function createWebGpuCandidateScorer({ gpu = globalThis.navigator?.gpu, r
         for (const buffer of [input, output, params, readback]) buffer.destroy();
         return Object.freeze({ schema: WEBGPU_CANDIDATE_SCORER_SCHEMA, status: 'completed', backend: 'webgpu', scores, inputCount: normalized.length });
       } catch (error) {
-        try { device?.destroy?.(); } catch {}
+        deviceCache.reset();
         return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, limits);
       }
     },

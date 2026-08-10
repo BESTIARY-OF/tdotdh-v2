@@ -1,5 +1,6 @@
 import { probeWebGpuCapabilities } from './webgpu-capability-probe.js';
 import { DEFAULT_FRONTIER_GRID } from './webgpu-frontier-validator.js';
+import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
 
 export const WEBGPU_FRONTIER_GENERATOR_SCHEMA = 'tdotdh.webgpu-frontier-generator.v0';
 export const MAX_FRONTIER_GENERATION_CANDIDATES = 16384;
@@ -181,9 +182,9 @@ async function runGpu(device, normalized, grid, shaderSource) {
   } finally { for (const buffer of [fieldBuffer, pieceBuffer, maskBuffer, originsBuffer, validityBuffer, compactedOriginsBuffer, compactedCountBuffer, paramsBuffer, originsReadback, validityReadback, compactedOriginsReadback, compactedCountReadback]) buffer.destroy(); }
 }
 
-export function createWebGpuFrontierGenerator({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 65536 }, shaderSource = SHADER } = {}) {
+export function createWebGpuFrontierGenerator({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 65536 }, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
   if (typeof shaderSource !== 'string' || !shaderSource.trim()) throw new TypeError('shaderSource must be a non-empty string');
-  const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits }; let availabilityPromise = null, devicePromise = null;
+  const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits }; let availabilityPromise = null;
   const availability = async () => {
     if (!availabilityPromise) availabilityPromise = probeWebGpuCapabilities({ gpu, requiredLimits: limits }).then(probe => probe.adapterAvailable && probe.requiredLimitsSatisfied ? Object.freeze({ schema: WEBGPU_FRONTIER_GENERATOR_SCHEMA, status: 'available', backend: 'webgpu', grid: normalizedGrid }) : unavailable(probe.adapterAvailable ? 'webgpu-required-limits-unsatisfied' : 'webgpu-adapter-unavailable', normalizedGrid));
     return availabilityPromise;
@@ -195,12 +196,11 @@ export function createWebGpuFrontierGenerator({ gpu = globalThis.navigator?.gpu,
       if (status.status !== 'available') return Object.freeze({ ...status, origins: cpu.origins, validity: cpu.validity, acceptedIndices: cpu.acceptedIndices, compactedOrigins: cpu.compactedOrigins, compactedCount: cpu.compactedCount, candidateCount: cpu.candidateCount });
       let device;
       try {
-        if (!devicePromise) devicePromise = gpu.requestAdapter().then(adapter => { if (!adapter) throw new Error('webgpu-adapter-unavailable'); return adapter.requestDevice(); }).catch(error => { devicePromise = null; throw error; });
-        device = await devicePromise;
+        device = await deviceCache.getDevice();
         const result = await runGpu(device, normalized, normalizedGrid, shaderSource), parity = JSON.stringify(result.origins) === JSON.stringify(cpu.origins) && JSON.stringify(result.validity) === JSON.stringify(cpu.validity) && JSON.stringify(result.compactedOrigins) === JSON.stringify(cpu.compactedOrigins);
         if (!parity) return Object.freeze({ schema: WEBGPU_FRONTIER_GENERATOR_SCHEMA, status: 'rejected', backend: 'webgpu', reason: 'oracle-parity-mismatch', origins: cpu.origins, validity: cpu.validity, acceptedIndices: cpu.acceptedIndices, compactedOrigins: cpu.compactedOrigins, compactedCount: cpu.compactedCount, candidateCount: cpu.candidateCount });
         return Object.freeze({ schema: WEBGPU_FRONTIER_GENERATOR_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'verified', compaction: 'verified', ...result, acceptedIndices: result.validity.flatMap((value, index) => value ? [index] : []), candidateCount: cpu.candidateCount });
-      } catch (error) { devicePromise = null; return Object.freeze({ ...unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid), origins: cpu.origins, validity: cpu.validity, acceptedIndices: cpu.acceptedIndices, compactedOrigins: cpu.compactedOrigins, compactedCount: cpu.compactedCount, candidateCount: cpu.candidateCount }); }
+      } catch (error) { deviceCache.reset(); return Object.freeze({ ...unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid), origins: cpu.origins, validity: cpu.validity, acceptedIndices: cpu.acceptedIndices, compactedOrigins: cpu.compactedOrigins, compactedCount: cpu.compactedCount, candidateCount: cpu.candidateCount }); }
     },
   });
 }

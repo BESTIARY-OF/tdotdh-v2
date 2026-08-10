@@ -3,12 +3,14 @@ import { createWebGpuCandidatePrefilter } from '../../../packages/search-core/sr
 import { createWebGpuFrontierValidator } from '../../../packages/search-core/src/webgpu-frontier-validator.js';
 import { createWebGpuFrontierEvaluator } from '../../../packages/search-core/src/webgpu-frontier-evaluator.js';
 import { createWebGpuFrontierGenerator } from '../../../packages/search-core/src/webgpu-frontier-generator.js';
+import { createWebGpuDeviceCache } from '../../../packages/search-core/src/webgpu-device-cache.js';
 import { search } from './v2-legacy-search.js';
 
-const candidatePrefilter = createWebGpuCandidatePrefilter({ gpu: globalThis.navigator?.gpu });
-const frontierValidator = createWebGpuFrontierValidator({ gpu: globalThis.navigator?.gpu });
-const frontierEvaluator = createWebGpuFrontierEvaluator({ gpu: globalThis.navigator?.gpu });
-const frontierGenerator = createWebGpuFrontierGenerator({ gpu: globalThis.navigator?.gpu });
+const deviceCache = createWebGpuDeviceCache({ gpu: globalThis.navigator?.gpu });
+const candidatePrefilter = createWebGpuCandidatePrefilter({ gpu: globalThis.navigator?.gpu, deviceCache });
+const frontierValidator = createWebGpuFrontierValidator({ gpu: globalThis.navigator?.gpu, deviceCache });
+const frontierEvaluator = createWebGpuFrontierEvaluator({ gpu: globalThis.navigator?.gpu, deviceCache });
+const frontierGenerator = createWebGpuFrontierGenerator({ gpu: globalThis.navigator?.gpu, deviceCache });
 async function runProductSearch(request, context) {
   const steering = request.steering || {};
   const result = await search(request.pieces, steering.knownCentroidFamilies || [], {

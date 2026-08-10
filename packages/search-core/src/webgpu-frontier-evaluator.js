@@ -1,5 +1,6 @@
 import { probeWebGpuCapabilities } from './webgpu-capability-probe.js';
 import { DEFAULT_FRONTIER_GRID, createFrontierMaskFromCells } from './webgpu-frontier-validator.js';
+import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
 
 export const WEBGPU_FRONTIER_EVALUATOR_SCHEMA = 'tdotdh.webgpu-frontier-evaluator.v0';
 export const FRONTIER_SCORE_TERM_COUNT = 8;
@@ -136,7 +137,7 @@ async function evaluateGpuBatch(device, normalized, grid, shaderSource) {
   }
 }
 
-export function createWebGpuFrontierEvaluator({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 65536 }, shaderSource = SHADER } = {}) {
+export function createWebGpuFrontierEvaluator({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 65536 }, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
   if (typeof shaderSource !== 'string' || !shaderSource.trim()) throw new TypeError('shaderSource must be a non-empty string');
   const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits };
   return Object.freeze({
@@ -153,7 +154,7 @@ export function createWebGpuFrontierEvaluator({ gpu = globalThis.navigator?.gpu,
       if (status.status !== 'available') return Object.freeze({ ...status, validity: cpu.validity, scores: cpu.scores, acceptedIndices: cpu.acceptedIndices });
       let device;
       try {
-        const adapter = await gpu.requestAdapter(); device = await adapter.requestDevice();
+        device = await deviceCache.getDevice();
         const maxBinding = Number(device.limits?.maxStorageBufferBindingSize) || 65536;
         const bytesPerMaskCandidate = normalizedGrid.wordCount * 4;
         const maxBatch = Math.max(1, Math.floor(maxBinding / Math.max(bytesPerMaskCandidate, 4)));
@@ -166,7 +167,7 @@ export function createWebGpuFrontierEvaluator({ gpu = globalThis.navigator?.gpu,
         if (!parity) return Object.freeze({ schema: WEBGPU_FRONTIER_EVALUATOR_SCHEMA, status: 'rejected', backend: 'webgpu', reason: 'oracle-parity-mismatch', validity: cpu.validity, scores: cpu.scores, acceptedIndices: cpu.acceptedIndices, candidateCount: normalized.length, wordCount: normalizedGrid.wordCount });
         return Object.freeze({ schema: WEBGPU_FRONTIER_EVALUATOR_SCHEMA, status: 'completed', backend: 'webgpu', validity, scores, acceptedIndices: validity.flatMap((value, index) => value ? [index] : []), candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, parity: 'verified' });
       } catch (error) {
-        try { device?.destroy?.(); } catch {}
+        deviceCache.reset();
         return Object.freeze({ ...unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid), validity: cpu.validity, scores: cpu.scores, acceptedIndices: cpu.acceptedIndices });
       }
     },

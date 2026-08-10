@@ -1,4 +1,5 @@
 import { probeWebGpuCapabilities } from './webgpu-capability-probe.js';
+import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
 
 export const WEBGPU_FRONTIER_VALIDATOR_SCHEMA = 'tdotdh.webgpu-frontier-validator.v0';
 export const DEFAULT_FRONTIER_GRID = Object.freeze({ width: 64, height: 64, originX: -32, originY: -32 });
@@ -116,7 +117,7 @@ function unavailable(reason, grid) {
   });
 }
 
-export function createWebGpuFrontierValidator({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 65536 }, shaderSource = SHADER } = {}) {
+export function createWebGpuFrontierValidator({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 65536 }, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
   if (typeof shaderSource !== 'string' || !shaderSource.trim()) throw new TypeError('shaderSource must be a non-empty string');
   const normalizedGrid = normalizeGrid(grid);
   const limits = { ...requiredLimits };
@@ -136,7 +137,7 @@ export function createWebGpuFrontierValidator({ gpu = globalThis.navigator?.gpu,
         const parent = flattenMasks(normalized, 'parentMask', normalizedGrid.wordCount);
         const candidate = flattenMasks(normalized, 'candidateMask', normalizedGrid.wordCount);
         const byteLength = Math.max(4, normalized.length * normalizedGrid.wordCount * 4);
-        device = await gpu.requestAdapter().then(adapter => adapter.requestDevice());
+        device = await deviceCache.getDevice();
         const parentBuffer = device.createBuffer({ size: byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
         const candidateBuffer = device.createBuffer({ size: byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
         const outputBuffer = device.createBuffer({ size: Math.max(4, normalized.length * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
@@ -165,7 +166,7 @@ export function createWebGpuFrontierValidator({ gpu = globalThis.navigator?.gpu,
         for (const buffer of [parentBuffer, candidateBuffer, outputBuffer, paramsBuffer, readback]) buffer.destroy();
         return Object.freeze({ schema: WEBGPU_FRONTIER_VALIDATOR_SCHEMA, status: 'completed', backend: 'webgpu', validity, acceptedIndices: validity.flatMap((value, index) => value ? [index] : []), candidateCount: normalized.length, wordCount: normalizedGrid.wordCount });
       } catch (error) {
-        try { device?.destroy?.(); } catch {}
+        deviceCache.reset();
         return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid);
       }
     },

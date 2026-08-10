@@ -1,4 +1,5 @@
 import { probeWebGpuCapabilities } from './webgpu-capability-probe.js';
+import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
 
 export const WEBGPU_CANDIDATE_PREFILTER_SCHEMA = 'tdotdh.webgpu-candidate-prefilter.v0';
 export const DEFAULT_PREFILTER_BOUNDS = Object.freeze({ minX: -32, maxX: 32, minY: -32, maxY: 32 });
@@ -101,7 +102,7 @@ function unavailable(reason, bounds) {
   return Object.freeze({ schema: WEBGPU_CANDIDATE_PREFILTER_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: String(reason), bounds: Object.freeze({ ...bounds }) });
 }
 
-export function createWebGpuCandidatePrefilter({ gpu = globalThis.navigator?.gpu, requiredLimits = { maxStorageBufferBindingSize: 65536 }, bounds = DEFAULT_PREFILTER_BOUNDS, shaderSource = SHADER } = {}) {
+export function createWebGpuCandidatePrefilter({ gpu = globalThis.navigator?.gpu, requiredLimits = { maxStorageBufferBindingSize: 65536 }, bounds = DEFAULT_PREFILTER_BOUNDS, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
   if (typeof shaderSource !== 'string' || !shaderSource.trim()) throw new TypeError('shaderSource must be a non-empty string');
   const normalizedBounds = requireBounds(bounds);
   const limits = { ...requiredLimits };
@@ -118,8 +119,7 @@ export function createWebGpuCandidatePrefilter({ gpu = globalThis.navigator?.gpu
       if (status.status !== 'available') return status;
       let device;
       try {
-        const adapter = await gpu.requestAdapter();
-        device = await adapter.requestDevice();
+        device = await deviceCache.getDevice();
         const input = device.createBuffer({ size: normalized.input.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
         const output = device.createBuffer({ size: Math.max(4, candidates.length * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
         const params = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -141,7 +141,7 @@ export function createWebGpuCandidatePrefilter({ gpu = globalThis.navigator?.gpu
         for (const buffer of [input, output, params, readback]) buffer.destroy();
         return Object.freeze({ schema: WEBGPU_CANDIDATE_PREFILTER_SCHEMA, status: 'completed', backend: 'webgpu', validity, acceptedIndices: validity.flatMap((value, index) => value ? [index] : []), candidateCount: candidates.length });
       } catch (error) {
-        try { device?.destroy?.(); } catch {}
+        deviceCache.reset();
         return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedBounds);
       }
     },

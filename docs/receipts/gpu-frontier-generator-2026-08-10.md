@@ -18,7 +18,8 @@ GPU compaction, GPU validation, and CPU fallback in the live search status.
 
 The generator also caches its device promise for the lifetime of the worker;
 frontier batches reuse the device instead of repeatedly requesting adapters and
-devices.
+devices. The worker now shares that cache across generation, validation,
+evaluation, and occupancy-prefilter adapters.
 
 ## Verification
 
