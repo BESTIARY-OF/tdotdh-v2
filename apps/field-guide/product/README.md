@@ -5,15 +5,14 @@ It carries the complete SEDLEC-00Q opinionated set, its recovered arrangement ba
 family records, steering state, and the real variable-field search worker. The v2
 server exposes it at `/` on the preview port (5174 in development).
 
-The product currently uses the CPU worker as its correctness oracle. The v2 runtime
-bridge exposes versioned compute and renderer contracts, a real WebGPU candidate
-scoring dispatch, and a real WebGPU candidate occupancy prefilter. Both GPU slices
-are parity-gated and fall back explicitly. The product worker uses the occupancy
-prefilter on candidate batches when WebGPU is available, while branching and
-ranking remain CPU-controlled until canonical arrangement parity is demonstrated
-for the full island search topology. The worker now also exposes a protocol-native
-`frontier-batch` operation: cursor-selected partial-field candidates are packed as
-frontier masks, validated by the CPU oracle and optionally WebGPU, and returned with
-canonical signatures plus the resumable cursor. This is the first GPU-frontier
-vertical slice; it does not yet move full candidate generation or topology ranking
-onto the GPU.
+The product keeps the CPU worker as the correctness oracle while moving the hot
+frontier path behind parity-gated WebGPU adapters. Candidate occupancy, frontier
+generation and deterministic compaction, frontier validity/scoring, and frontier
+geometry reduction (contact, centroid contact, ring coverage, open-ring count,
+combined bounds area, and beam geometry score) now have explicit GPU contracts.
+When WebGPU is available and exact parity holds, the product uses those GPU results
+to rank the next beam; otherwise each slice reports an explicit CPU fallback. Full
+topology acceptance, ordered deduplication, cancellation/control flow, and the
+canonical oracle remain CPU-owned until the next GPU-resident state-transition
+slice. The worker also exposes a protocol-native `frontier-batch` operation with
+cursor-selected candidates, canonical signatures, and resumable receipts.
