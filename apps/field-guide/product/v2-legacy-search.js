@@ -840,7 +840,7 @@ async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroi
       for (const option of choice.options) {
         if (isCancelled()) return null;
         const placements = [...state.placements, option.candidate], field = new Set(state.field); option.candidate.cells.forEach(cell => field.add(key(cell.x, cell.y)));
-        const result = await complete({ placements, field, remaining: state.remaining.filter(piece => piece.id !== choice.piece.id), bounds: option.metrics, hintMatches: option.hintMatches });
+        const result = await complete({ placements, field, remaining: state.remaining.filter(piece => piece.id !== choice.piece.id), bounds: option.metrics, hintMatches: option.hintMatches, gpuState: option.gpuState });
         if (result) return result;
         if (nodes - branchStart >= branchBudget) return null;
       }
