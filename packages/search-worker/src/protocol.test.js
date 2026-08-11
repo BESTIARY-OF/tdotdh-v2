@@ -78,7 +78,7 @@ const returnedCursorRuntime = createWorkerRuntime({
   postMessage: event => returnedCursorEvents.push(event),
   execute: async () => {
     await returnedCursorGate;
-    return { placements: [], cursor: { depth: 4, nodeOffset: 99, rootChoice: 2, checkpoint: { schema: 'test.checkpoint.v1', depth: 4, beam: [] } } };
+    return { placements: [], nodes: 17, cursor: { depth: 4, nodeOffset: 99, rootChoice: 2, checkpoint: { schema: 'test.checkpoint.v1', depth: 4, beam: [] } }, gpuExecution: { deviceAvailable: true }, frontierTargetGeneration: { status: 'completed', backend: 'resident-webgpu', parity: 'verified', candidateCount: 12 } };
   },
 });
 const returnedCursorRun = returnedCursorRuntime.handleMessage({ ...baseCommand, requestId: 'search-returned-cursor' });
@@ -87,6 +87,8 @@ await returnedCursorRuntime.handleMessage({ type: 'cancel', requestId: 'search-r
 releaseReturnedCursor();
 await returnedCursorRun;
 assert.deepEqual(returnedCursorEvents.at(-1).cursor, { depth: 4, nodeOffset: 99, rootChoice: 2, checkpoint: { schema: 'test.checkpoint.v1', depth: 4, beam: [] } });
+assert.equal(returnedCursorEvents.at(-1).searchReceipt.nodes, 17);
+assert.deepEqual(returnedCursorEvents.at(-1).searchReceipt.stages.frontierTargetGeneration, { status: 'completed', backend: 'resident-webgpu', parity: 'verified', candidateCount: 12 });
 
 const failed = [];
 const idleRuntime = createWorkerRuntime({ postMessage: (event) => failed.push(event), execute: async () => null });

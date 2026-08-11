@@ -23,6 +23,7 @@ const MAX_BUDGET_NODES = 10_000_000;
 const MAX_BUDGET_MILLISECONDS = 15 * 60 * 1000;
 const MAX_CHECKPOINT_BYTES = 768 * 1024;
 const FRONTIER_BATCH_OPERATION = 'frontier-batch';
+const RECEIPT_STAGE_NAMES = Object.freeze(['prefilter', 'frontier', 'frontierGeneration', 'frontierTargetGeneration', 'frontierTargetPool', 'frontierMetrics', 'fieldMetrics', 'frontierState', 'frontierTopology', 'frontierRanker', 'frontierScore', 'frontierCompactor', 'frontierDedup', 'navigationPlan']);
 
 import { normalizeFrontierBatch } from './frontier-batch-contract.js';
 
@@ -234,6 +235,21 @@ function protocolError(error, fallbackCode = "WORKER_EXECUTION_FAILED") {
   return new WorkerProtocolError(fallbackCode, error?.message || String(error), { cause: error?.stack });
 }
 
+function compactReceipt(value) {
+  if (!value || typeof value !== 'object') return null;
+  const keys = ['status', 'backend', 'parity', 'batch', 'persistent', 'resident', 'candidateCount', 'rowCount', 'selectedCount', 'finalCanonicalParity', 'canonicalSignature'];
+  return Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]]));
+}
+
+function compactCancellationReceipt(result) {
+  if (!result || typeof result !== 'object') return null;
+  const stages = Object.fromEntries(RECEIPT_STAGE_NAMES.filter(name => result[name]).map(name => [name, compactReceipt(result[name])]));
+  const gpuExecution = result.gpuExecution && typeof result.gpuExecution === 'object'
+    ? { deviceAvailable: Boolean(result.gpuExecution.deviceAvailable), ...(result.gpuExecution.reason ? { reason: result.gpuExecution.reason } : {}), ...(result.gpuExecution.stageAvailability ? { stageAvailability: result.gpuExecution.stageAvailability } : {}) }
+    : null;
+  return { schema: 'tdotdh.v2.cancelled-search-receipt.v1', nodes: finiteInteger(result.nodes ?? 0, 'result.nodes'), gpuExecution, stages };
+}
+
 /**
  * Create the message runtime used by a Worker entrypoint.
  *
@@ -340,7 +356,7 @@ export function createWorkerRuntime({ postMessage, execute }) {
         if (result?.cursor && typeof result.cursor === "object") {
           try { run.cursor = normalizeCursor(result.cursor); } catch { /* retain the last validated progress cursor */ }
         }
-        emit(run, "cancelled", { reason: run.cancelReason || "requested" });
+        emit(run, "cancelled", { reason: run.cancelReason || "requested", searchReceipt: compactCancellationReceipt(result) });
       } else {
         const normalized = normalizeResult(result);
         if (normalized) emit(run, "result", normalized);

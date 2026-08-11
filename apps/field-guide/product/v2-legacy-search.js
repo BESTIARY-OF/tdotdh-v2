@@ -4,6 +4,7 @@ const AREA = 9;
 const PIECE_COUNT = 15;
 const NODE_LIMIT = 40000;
 const BEAM_LIMIT = 72;
+const yieldToEventLoop = () => new Promise(resolve => setTimeout(resolve, 0));
 const BRANCH_LIMIT = 30;
 
 import { createFrontierEvaluationCandidate } from '../../../packages/search-core/src/webgpu-frontier-evaluator.js';
@@ -859,6 +860,7 @@ async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroi
   for (const branch of unknownBranches) {
     const branchBudget = Math.max(1, Math.floor(NODE_LIMIT / Math.max(1, unknownBranches.length))), branchStart = nodes;
     async function complete(state) {
+      await yieldToEventLoop();
       if (isCancelled()) return null;
       if (nodes - branchStart >= branchBudget) return null;
       nodes++;
@@ -1100,6 +1102,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     const beamJobs = [];
     const beamPlans = [];
     for (const state of beam) {
+      await yieldToEventLoop();
       if (isCancelled()) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierDedup: frontierDedupReceipt };
       if (nodes - mainNodeStart >= NODE_LIMIT) break;
       beamPlans.push({ state });
