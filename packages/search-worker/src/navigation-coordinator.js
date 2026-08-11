@@ -57,7 +57,8 @@ function summarizeStages(result) {
   const gpuStages = [], cpuFallbackStages = [];
   for (const stage of NAVIGATION_STAGE_KEYS) {
     const receipt = result?.[stage];
-    if (!receipt || receipt.status === 'cpu-oracle') continue;
+    if (!receipt || receipt.status === 'cpu-oracle' || receipt.status === 'not-used') continue;
+    if (isIntentionalControlPlaneReceipt(stage, receipt)) continue;
     if (['completed', 'used', 'resident'].includes(receipt.status) && ['verified', 'labels-verified', 'deferred'].includes(receipt.parity) && ['webgpu', 'compute-shader', 'resident-webgpu'].includes(receipt.backend)) gpuStages.push(stage);
     else cpuFallbackStages.push(stage);
   }
@@ -66,6 +67,14 @@ function summarizeStages(result) {
 
 function isGpuExpansionReceipt(receipt) {
   return receipt && ['completed', 'used', 'resident'].includes(receipt.status) && ['verified', 'labels-verified', 'deferred'].includes(receipt.parity) && ['webgpu', 'compute-shader', 'resident-webgpu'].includes(receipt.backend);
+}
+
+function isIntentionalControlPlaneReceipt(stage, receipt) {
+  return stage === 'frontierTargetPool'
+    && receipt?.status === 'skipped'
+    && receipt?.backend === 'cpu-control'
+    && receipt?.parity === 'structural'
+    && receipt?.reason === 'redundant-with-gpu-target-generation-input';
 }
 
 /** Owns the product-search lifecycle receipt without owning search topology. */
