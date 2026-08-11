@@ -77,6 +77,7 @@ export function createNavigationCoordinator({ ticket, cursor = {} } = {}) {
   let progressCount = 0;
   let batchCount = 0;
   let cancellationChecks = 0;
+  const batchStages = Object.create(null);
 
   const observeProgress = nextCursor => {
     const normalized = normalizeCursor(nextCursor);
@@ -89,6 +90,7 @@ export function createNavigationCoordinator({ ticket, cursor = {} } = {}) {
   const beginBatch = ({ stage, backend = 'webgpu', ownership = 'gpu-first', depth = latestCursor.depth, nodeOffset = latestCursor.nodeOffset, candidateCount = 0 } = {}) => {
     const nextCursor = normalizeCursor({ ...latestCursor, depth: Math.max(latestCursor.depth, integer(depth, 'batch.depth')), nodeOffset: Math.max(latestCursor.nodeOffset, integer(nodeOffset, 'batch.nodeOffset')) });
     const normalizedStage = requireStage(stage), normalizedBackend = requireLabel(backend, 'navigation batch backend'), normalizedOwnership = requireLabel(ownership, 'navigation batch ownership');
+    batchStages[normalizedStage] = (batchStages[normalizedStage] || 0) + 1;
     const receipt = Object.freeze({ schema: NAVIGATION_COORDINATOR_SCHEMA, ordinal: batchCount, stage: normalizedStage, backend: normalizedBackend, ownership: normalizedOwnership, ticket: Object.freeze({ ...stableTicket, batchOrdinal: batchCount, stage: normalizedStage, backend: normalizedBackend }), cursor: nextCursor, candidateCount: integer(candidateCount, 'batch.candidateCount') });
     batchCount += 1;
     return receipt;
@@ -120,6 +122,7 @@ export function createNavigationCoordinator({ ticket, cursor = {} } = {}) {
       progressCount,
       batchCount,
       cancellationChecks,
+      batchStages: Object.freeze({ ...batchStages }),
       expansionBackend,
       expansionParity,
       expansionOwnership: gpuExpansionComplete ? 'gpu-owned' : 'cpu-oracle-fallback',
