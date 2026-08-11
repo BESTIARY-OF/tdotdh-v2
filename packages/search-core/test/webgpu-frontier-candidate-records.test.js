@@ -21,4 +21,39 @@ const receipt = await adapter.compact(records);
 assert.equal(receipt.status, 'unavailable');
 assert.equal(receipt.backend, 'webgpu');
 assert.deepEqual(receipt.records, oracle.records);
+
+{
+  const previousBufferUsage = globalThis.GPUBufferUsage, previousMapMode = globalThis.GPUMapMode;
+  globalThis.GPUBufferUsage = { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, MAP_READ: 16 };
+  globalThis.GPUMapMode = { READ: 1 };
+  let createdBuffers = 0;
+  const fakeDevice = {
+    queue: { writeBuffer() {}, submit() {}, async onSubmittedWorkDone() {} },
+    createBuffer() {
+      const index = ++createdBuffers;
+      return { destroy() {}, async mapAsync() {}, getMappedRange() {
+        if (index === 10) return Uint32Array.from([3]).buffer;
+        if (index === 11) return Int32Array.from([4, 2, -3, 7, 0, 9, 2, 0, 0, 2, 4, 2, 8, 7, 3]).buffer;
+        return new ArrayBuffer(64);
+      }, unmap() {} };
+    },
+    createShaderModule() { return {}; },
+    createComputePipeline() { return { getBindGroupLayout() { return {}; } }; },
+    createBindGroup() { return {}; },
+    createCommandEncoder() { return { beginComputePass() { return { setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() {}, end() {} }; }, copyBufferToBuffer() {}, finish() { return {}; } }; },
+  };
+  const fakeAdapter = { limits: { maxComputeWorkgroupSizeX: 64 }, async requestDevice() { return fakeDevice; } };
+  const persistentGenerator = createWebGpuFrontierCandidateRecords({ gpu: { async requestAdapter() { return fakeAdapter; } } });
+  const firstPersistent = await persistentGenerator.compact(records);
+  const secondPersistent = await persistentGenerator.compact(records);
+  assert.equal(firstPersistent.backend, 'webgpu');
+  assert.equal(firstPersistent.parity, 'verified');
+  assert.equal(firstPersistent.persistent, true);
+  assert.equal(firstPersistent.dispatch, 'webgpu-frontier-record-compaction-resident');
+  assert.equal(firstPersistent.dispatchCount, 1);
+  assert.equal(secondPersistent.dispatchCount, 2);
+  assert.equal(createdBuffers, 11, 'persistent candidate compaction reuses its eleven GPU buffers');
+  if (previousBufferUsage === undefined) delete globalThis.GPUBufferUsage; else globalThis.GPUBufferUsage = previousBufferUsage;
+  if (previousMapMode === undefined) delete globalThis.GPUMapMode; else globalThis.GPUMapMode = previousMapMode;
+}
 console.log('WebGPU frontier candidate-record tests passed');
