@@ -233,15 +233,21 @@ export function createWebGpuFrontierMetrics({ gpu = globalThis.navigator?.gpu, g
       return Object.freeze({ schema: WEBGPU_FRONTIER_METRICS_SCHEMA, status: 'available', backend: 'webgpu', grid: normalizedGrid });
     },
     async evaluate(candidates) {
-      const normalized = normalizeCandidates(candidates, normalizedGrid), cpu = cpuEvaluateFrontierMetrics(normalized, normalizedGrid), status = await this.availability();
-      if (status.status !== 'available') return unavailable(status.reason, normalizedGrid, cpu);
+      const normalized = normalizeCandidates(candidates, normalizedGrid), status = await this.availability();
+      if (status.status !== 'available') return unavailable(status.reason, normalizedGrid, cpuEvaluateFrontierMetrics(normalized, normalizedGrid));
+      let cpu = null;
       try {
-        const device = await deviceCache.getDevice(), maxBinding = Number(device.limits?.maxStorageBufferBindingSize) || limits.maxStorageBufferBindingSize, maxBatch = Math.max(1, Math.floor(maxBinding / Math.max(normalizedGrid.wordCount * 4, 4))), metrics = [];
-        for (let offset = 0; offset < normalized.length; offset += maxBatch) metrics.push(...await runGpuBatch(device, normalized.slice(offset, offset + maxBatch), normalizedGrid, shaderSource, pipelineCache));
+        const device = await deviceCache.getDevice(), maxBinding = Number(device.limits?.maxStorageBufferBindingSize) || limits.maxStorageBufferBindingSize, maxBatch = Math.max(1, Math.floor(maxBinding / Math.max(normalizedGrid.wordCount * 4, 4))), metrics = [], gpuJobs = [];
+        // Submit all eligible batches before computing the CPU oracle. The
+        // oracle remains the exact parity gate, but its synchronous work can
+        // overlap the device queue's submitted metric dispatches.
+        for (let offset = 0; offset < normalized.length; offset += maxBatch) gpuJobs.push(runGpuBatch(device, normalized.slice(offset, offset + maxBatch), normalizedGrid, shaderSource, pipelineCache));
+        cpu = cpuEvaluateFrontierMetrics(normalized, normalizedGrid);
+        for (const job of gpuJobs) metrics.push(...await job);
         const parity = JSON.stringify(metrics) === JSON.stringify(cpu.metrics);
         if (!parity) return unavailable('oracle-parity-mismatch', normalizedGrid, cpu);
         return Object.freeze({ schema: WEBGPU_FRONTIER_METRICS_SCHEMA, status: 'completed', backend: 'webgpu', metrics, candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, parity: 'verified' });
-      } catch (error) { deviceCache.reset(); return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid, cpu); }
+      } catch (error) { deviceCache.reset(); return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid, cpu || cpuEvaluateFrontierMetrics(normalized, normalizedGrid)); }
     },
   });
 }
