@@ -24,7 +24,7 @@ async function loadFixture() {
   return ids.map(id => ({ id, cells: shapes[id].map(([x, y]) => ({ x, y })), orientation: locks[id] || 'fixed' }));
 }
 
-function runWorker(pieces, backend) {
+function runWorker(pieces, backend, onProgress = () => {}) {
   return new Promise((resolve, reject) => {
     const worker = new Worker(workerUrl, { type: 'module' });
     const started = performance.now();
@@ -38,6 +38,7 @@ function runWorker(pieces, backend) {
       const message = event.data || {};
       if (message.type === 'progress') {
         progress = { nodes: message.nodes, depth: message.depth, frontier: message.frontier };
+        onProgress(progress);
         return;
       }
       if (message.type === 'result') {
@@ -107,9 +108,13 @@ runButton.addEventListener('click', async () => {
   try {
     const pieces = await loadFixture();
     output.textContent = 'Running GPU worker, then forced CPU oracle…';
-    const gpu = await runWorker(pieces, 'gpu');
+    const gpu = await runWorker(pieces, 'gpu', progress => {
+      output.textContent = `GPU worker · depth ${progress.depth} · ${progress.nodes.toLocaleString()} nodes · frontier ${progress.frontier.toLocaleString()}`;
+    });
     output.textContent = `GPU pass complete (${gpu.elapsedMs} ms). Running forced CPU oracle…`;
-    const cpu = await runWorker(pieces, 'cpu');
+    const cpu = await runWorker(pieces, 'cpu', progress => {
+      output.textContent = `CPU oracle · depth ${progress.depth} · ${progress.nodes.toLocaleString()} nodes · frontier ${progress.frontier.toLocaleString()}`;
+    });
     output.textContent = JSON.stringify({
       fixture: 'SEDLEC-00Q_ISLAND-001',
       gpu: summarize(gpu),
