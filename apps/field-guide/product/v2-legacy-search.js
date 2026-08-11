@@ -1231,6 +1231,14 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   let nodes = mainNodeStart, fallback = null, bestHintResult = null, lastDepth = restored?.depth || 0;
   const pieceCount = pieces.length;
   for (let depth = restored?.depth || 0; depth < pieceCount - 1 && beam.length && nodes - mainNodeStart < NODE_LIMIT; depth++) {
+    const depthTimingStarted = performance.now();
+    let depthTimingBoundary = depthTimingStarted;
+    const depthTimings = {};
+    const markDepthTiming = name => {
+      const now = performance.now();
+      depthTimings[name] = Number((now - depthTimingBoundary).toFixed(2));
+      depthTimingBoundary = now;
+    };
     const cancelled = isCancelled();
     if (navigationCancellation) navigationCancellation(cancelled);
     if (cancelled) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierDedup: frontierDedupReceipt };
@@ -1411,6 +1419,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         if (selectedOptions.length) beamJobs.push({ state: plan.state, entries: selectedOptions });
       }
     }
+    markDepthTiming('candidatePreparationMs');
     await evaluateFrontierGeometryAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateGeometry ? null : frontierMetrics, receipt => { frontierMetricsReceipt = receipt; stageHistory.frontierMetrics.push({ depth, ...receipt }); });
     await evaluateFieldAggregatesAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateFieldMetrics ? null : fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; stageHistory.fieldMetrics.push({ depth, ...receipt }); });
     await evaluateFrontierOptionsAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateValidity ? null : frontierEvaluator, options.disableGpuCandidateValidity ? null : options.frontierValidator, receipt => { frontierReceipt = { ...receipt, ...(navigationTicket ? { ticket: navigationTicket } : {}), ...(navigationCursor ? { cursor: { ...navigationCursor, depth, nodeOffset: navigationCursor.nodeOffset + nodes } } : {}) }; stageHistory.frontier.push({ depth, ...frontierReceipt }); });
@@ -1421,6 +1430,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     if (navigationCancellation) navigationCancellation(cancelledAfterGpu);
     if (cancelledAfterGpu) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierDedup: frontierDedupReceipt };
     await evaluateFrontierTopologyAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateTopology ? null : frontierTopology, receipt => { frontierTopologyReceipt = receipt; stageHistory.frontierTopology.push({ depth, ...receipt }); }, frontierTopologyAvailabilityReceipt);
+    markDepthTiming('gpuEvaluationMs');
     const rankedJobs = [];
     for (const job of beamJobs) {
       const state = job.state;
@@ -1448,6 +1458,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       }).filter(Boolean);
       rankedJobs.push({ state, entries: rankedCandidates });
     }
+    markDepthTiming('candidateMaterializationMs');
     await scoreFrontierCandidatesAcrossBeam(rankedJobs, frontierScorer, receipt => { frontierScoreReceipt = receipt; stageHistory.frontierScore.push({ depth, ...receipt }); });
     if (isCancelled()) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierDedup: frontierDedupReceipt, frontierScore: frontierScoreReceipt };
     const rankedBuckets = await orderFrontierRowsMany(rankedJobs.map(job => job.entries), frontierRanker, receipt => { frontierRankerReceipt = receipt; stageHistory.frontierRanker.push({ depth, ...receipt }); });
@@ -1474,7 +1485,8 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     const familyBuckets = new Map();
     navigationPlanReceipt = { ...navigationPlanReceipt, expansion: { ...(navigationPlanReceipt.expansion || {}), beamJobCount: beamJobs.length, nextBeamCount: nextBeam.length } };
     const historyEntry = navigationPlanHistory[navigationPlanHistory.length - 1];
-    if (historyEntry) Object.assign(historyEntry, { beamJobCount: beamJobs.length, nextBeamCount: nextBeam.length, nextBeamSample: nextBeam.slice(0, 8).map(state => ({ placements: state.placements.map(placement => placement.id), family: state.centroidFamilyId, score: state.score })) });
+    markDepthTiming('rankingRetentionMs');
+    if (historyEntry) Object.assign(historyEntry, { beamJobCount: beamJobs.length, nextBeamCount: nextBeam.length, nextBeamSample: nextBeam.slice(0, 8).map(state => ({ placements: state.placements.map(placement => placement.id), family: state.centroidFamilyId, score: state.score })), controlPlaneMs: Number((performance.now() - depthTimingStarted).toFixed(2)), ...depthTimings });
     navigationPlanReceipt = { ...navigationPlanReceipt, history: navigationPlanHistory.slice(-64), stageHistory };
     for (const state of nextBeam) { if (!familyBuckets.has(state.centroidFamilyId)) familyBuckets.set(state.centroidFamilyId, []); familyBuckets.get(state.centroidFamilyId).push(state); }
     if (searchStrategy === 'breadth') {
