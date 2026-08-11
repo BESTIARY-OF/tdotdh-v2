@@ -69,6 +69,7 @@ fn handleFor(recordIndex: u32) -> u32 {
 fn planFor(handle: u32, recordIndex: u32) -> u32 {
   let meta = handle * ${FRONTIER_NAVIGATION_RESIDENT_META_STRIDE}u;
   let pieceId = u32(records[recordIndex * 5u]);
+  if (pieceId >= handleMeta[meta + 3u]) { return 0xffffffffu; }
   return piecePlans[handleMeta[meta + 2u] + pieceId];
 }
 
@@ -78,14 +79,17 @@ fn selectResident(@builtin(global_invocation_id) id: vec3<u32>) {
   let currentHandle = handleFor(id.x);
   if (currentHandle == 0xffffffffu) { selected[id.x] = 0u; return; }
   let currentPlan = planFor(currentHandle, id.x);
+  if (currentPlan == 0xffffffffu) { selected[id.x] = 0u; return; }
   var bestTarget = 0xffffffffu;
   var bestCount = 0xffffffffu;
   for (var candidate: u32 = 0u; candidate < params.recordCount; candidate = candidate + 1u) {
-    if (handleFor(candidate) != currentHandle || planFor(currentHandle, candidate) != currentPlan) { continue; }
+    let candidateHandle = handleFor(candidate);
+    if (candidateHandle == 0xffffffffu || planFor(candidateHandle, candidate) != currentPlan) { continue; }
     let candidateTarget = u32(records[candidate * 5u + 1u]);
     var count = 0u;
     for (var other: u32 = 0u; other < params.recordCount; other = other + 1u) {
-      if (handleFor(other) == currentHandle && planFor(currentHandle, other) == currentPlan && u32(records[other * 5u + 1u]) == candidateTarget) { count = count + 1u; }
+      let otherHandle = handleFor(other);
+      if (otherHandle != 0xffffffffu && planFor(otherHandle, other) == currentPlan && u32(records[other * 5u + 1u]) == candidateTarget) { count = count + 1u; }
     }
     if (count < bestCount || (count == bestCount && candidateTarget < bestTarget)) { bestCount = count; bestTarget = candidateTarget; }
   }
@@ -322,6 +326,9 @@ function normalizeResidentEntries(entries) {
     const handle = entry?.residentHandle || entry;
     if (!handle || handle.schema !== 'tdotdh.webgpu-frontier-candidate-records-resident.v0') throw new TypeError(`resident navigation entry ${index} has an invalid candidate-record handle`);
     if (!Number.isSafeInteger(handle.recordCount) || handle.recordCount < 0) throw new RangeError(`resident navigation entry ${index} has an invalid recordCount`);
+    if (!handle.recordsBuffer || typeof handle.recordsBuffer !== 'object') throw new TypeError(`resident navigation entry ${index} has no recordsBuffer`);
+    if (handle.recordsOffsetBytes !== undefined && (!Number.isSafeInteger(handle.recordsOffsetBytes) || handle.recordsOffsetBytes < 0 || handle.recordsOffsetBytes % 4)) throw new RangeError(`resident navigation entry ${index} has an invalid recordsOffsetBytes`);
+    if (handle.recordStrideBytes !== undefined && handle.recordStrideBytes !== 5 * 4) throw new RangeError(`resident navigation entry ${index} has an incompatible recordStrideBytes`);
     const piecePlans = Array.from(entry?.piecePlans || handle.piecePlans || []);
     if (!piecePlans.length && handle.recordCount) throw new TypeError(`resident navigation entry ${index} must provide piecePlans`);
     for (const [planIndex, value] of piecePlans.entries()) uint(value, 'piecePlans', planIndex);
@@ -345,6 +352,8 @@ function createPersistentGpuResidentNavigationRunner(device, shaderSource) {
     const recordCapacity = nextCapacity(Math.max(1, recordCount)), handleCapacity = nextCapacity(Math.max(1, handleCount)), piecePlanCapacity = nextCapacity(Math.max(1, piecePlanCount));
     if (resources && resources.recordCapacity >= recordCapacity && resources.handleCapacity >= handleCapacity && resources.piecePlanCapacity >= piecePlanCapacity) return resources;
     const recordsBytes = recordCapacity * 5 * 4, metaBytes = handleCapacity * FRONTIER_NAVIGATION_RESIDENT_META_STRIDE * 4, piecePlanBytes = piecePlanCapacity * 4, recordCountBytes = recordCapacity * 4;
+    const maxStorageBufferBindingSize = device.limits?.maxStorageBufferBindingSize;
+    if (Number.isFinite(maxStorageBufferBindingSize) && recordsBytes > maxStorageBufferBindingSize) throw new RangeError(`resident navigation requires ${recordsBytes} bytes but device allows ${maxStorageBufferBindingSize}`);
     let buffers = null;
     try {
       buffers = {
@@ -365,6 +374,10 @@ function createPersistentGpuResidentNavigationRunner(device, shaderSource) {
   async function runExclusive(entries, signal) {
     assertNotAborted(signal);
     if (lost) throw new Error('webgpu-device-lost');
+    for (const [index, entry] of entries.entries()) {
+      if (entry.handle.device && entry.handle.device !== device) throw new TypeError(`resident navigation entry ${index} belongs to another WebGPU device`);
+      if (entry.handle.recordsBuffer.size !== undefined && (entry.handle.recordsOffsetBytes || 0) + entry.handle.recordCount * 5 * 4 > entry.handle.recordsBuffer.size) throw new RangeError(`resident navigation entry ${index} records exceed source buffer size`);
+    }
     const recordCount = entries.reduce((sum, entry) => sum + entry.handle.recordCount, 0), piecePlanCount = entries.reduce((sum, entry) => sum + entry.piecePlans.length, 0), current = ensure(recordCount, entries.length, piecePlanCount), { buffers } = current;
     const handleMeta = new Uint32Array(entries.length * FRONTIER_NAVIGATION_RESIDENT_META_STRIDE), piecePlans = new Uint32Array(piecePlanCount); let recordOffset = 0, piecePlanOffset = 0;
     for (const [index, entry] of entries.entries()) {
