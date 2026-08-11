@@ -1,6 +1,6 @@
 import { probeWebGpuCapabilities } from './webgpu-capability-probe.js';
 import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
-import { cpuSelectFrontierRecords } from './webgpu-frontier-record-navigation.js';
+import { cpuSelectFrontierRecordIndices } from './webgpu-frontier-record-navigation.js';
 
 export const WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA = 'tdotdh.webgpu-frontier-navigation-plan.v0';
 export const FRONTIER_NAVIGATION_PLAN_STRIDE = 8;
@@ -228,10 +228,10 @@ export function cpuSelectFrontierNavigationRows(plan, { planCount = null } = {})
     if (row.planIndex >= count) throw new RangeError(`navigation row ${index} exceeds planCount`);
     records.push({ planIndex: row.planIndex, targetOrdinal: row.targetOrdinal, pieceId: row.pieceId, originX: row.originX, originY: row.originY, inputOrdinal: index });
   }
-  const recordOracle = cpuSelectFrontierRecords(records);
-  const selectedRows = recordOracle.selectedInputIndices;
+  const recordOracle = cpuSelectFrontierRecordIndices(records, { planCount: count });
+  const selectedRows = recordOracle.selectedRecordIndices;
   const groupCount = new Set(records.map(record => `${record.planIndex}:${record.targetOrdinal}`)).size;
-  return Object.freeze({ schema: WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA, status: 'completed', backend: 'cpu-oracle', parity: 'oracle', rowCount: plan.rowCount, selectedCount: selectedRows.length, selectedRows: Uint32Array.from(selectedRows), planCount: count, groupCount, inputDigest: plan.inputDigest, recordInputDigest: recordOracle.inputDigest, recordProtocol: recordOracle.protocol });
+  return Object.freeze({ schema: WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA, status: 'completed', backend: 'cpu-oracle', parity: 'oracle', rowCount: plan.rowCount, selectedCount: selectedRows.length, selectedRows: Uint32Array.from(selectedRows), planCount: count, groupCount, inputDigest: plan.inputDigest, recordInputDigest: recordOracle.inputDigest, recordProtocol: recordOracle.schema });
 }
 
 async function runGpu(device, plan, planCount, shaderSource) {

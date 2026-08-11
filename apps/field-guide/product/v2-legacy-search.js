@@ -806,9 +806,18 @@ async function scoreFrontierCandidates(entries, frontierScorer, onScore = () => 
   return entries;
 }
 
-async function compactFrontierRows(entries, retain, frontierCompactor, onCompact = () => {}) {
+async function compactFrontierRows(entries, retain, frontierCompactor, onCompact = () => {}, residentBeamSelector = null, isCancelled = () => false) {
   const cpu = () => entries.map((entry, index) => ({ entry, index })).sort((left, right) => left.entry.score - right.entry.score || left.index - right.index).slice(0, retain).map(row => row.entry);
   if (!entries.length) { onCompact({ status: 'not-used', backend: 'cpu-oracle', parity: 'oracle', candidateCount: 0, selectedCount: 0 }); return entries; }
+  if (residentBeamSelector?.select) {
+    const result = await residentBeamSelector.select(entries.map((entry, index) => ({ score: entry.score, tie: entry.tie ?? index })), retain, { isCancelled });
+    if (result?.status === 'completed' && result.backend === 'webgpu' && result.parity === 'verified' && Array.isArray(result.indices) && result.indices.length <= retain) {
+      onCompact({ status: 'used', backend: result.backend, parity: result.parity, algorithm: result.algorithm, resident: true, readback: result.readback, candidateCount: entries.length, selectedCount: result.selectedCount });
+      return result.indices.map(index => entries[index]).filter(Boolean);
+    }
+    onCompact({ status: result?.status === 'cancelled' ? 'cancelled' : 'fallback', backend: result?.backend || 'cpu-oracle', parity: result?.parity, algorithm: result?.algorithm, resident: true, readback: result?.readback, candidateCount: entries.length, selectedCount: result?.selectedCount || 0, reason: result?.reason || 'resident-beam-selector-unavailable' });
+    if (result?.status === 'cancelled') return [];
+  }
   if (!frontierCompactor?.compact) { onCompact({ status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', candidateCount: entries.length, selectedCount: Math.min(entries.length, retain) }); return cpu(); }
   const result = await frontierCompactor.compact(entries.map((entry, index) => ({ score: entry.score, tie: entry.tie ?? index })), retain);
   onCompact({ status: result?.parity === 'verified' ? 'used' : 'fallback', backend: result?.backend || 'cpu-oracle', parity: result?.parity, algorithm: result?.algorithm, persistent: result?.persistent === true, bufferCapacity: result?.bufferCapacity, candidateCount: entries.length, selectedCount: result?.selectedCount || 0, reason: result?.reason });
@@ -970,6 +979,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const frontierRanker = gpuAdapter(options.frontierRanker);
   const frontierScorer = gpuAdapter(options.frontierScorer);
   const frontierCompactor = gpuAdapter(options.frontierCompactor);
+  const residentBeamSelector = gpuAdapter(options.residentBeamSelector);
   const frontierDeduplicator = gpuAdapter(options.frontierDeduplicator);
   const frontierTopologyAvailabilityReceipt = frontierTopology?.availability ? await frontierTopology.availability() : null;
   const frontierGeneratorStatus = frontierGenerator?.availability ? await frontierGenerator.availability() : null;
@@ -1278,7 +1288,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       return a[0].score - b[0].score;
     }), retained = [], retainedSet = new Set(), seedCounts = new Map();
     if (searchStrategy === 'depth') {
-      const compactedBeam = await compactFrontierRows(nextBeam.map((state, index) => ({ state, score: state.score, tie: index })), BEAM_LIMIT, frontierCompactor, receipt => { frontierCompactorReceipt = receipt; });
+      const compactedBeam = await compactFrontierRows(nextBeam.map((state, index) => ({ state, score: state.score, tie: index })), BEAM_LIMIT, frontierCompactor, receipt => { frontierCompactorReceipt = receipt; }, residentBeamSelector, isCancelled);
       for (const { state } of compactedBeam) { retained.push(state); retainedSet.add(state); seedCounts.set(state.centroidFamilyId, (seedCounts.get(state.centroidFamilyId) || 0) + 1); }
     } else {
       const seedQuota = searchStrategy === 'breadth' ? 3 : 8;
@@ -1288,7 +1298,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
           const state = bucket[round]; if (!state) continue;
           quotaRows.push({ state, score: round * 4096 + bucketIndex, tie: quotaRows.length });
         }
-        const compactedQuota = await compactFrontierRows(quotaRows, BEAM_LIMIT, frontierCompactor, receipt => { frontierCompactorReceipt = { ...receipt, batch: 'breadth-quota' }; });
+        const compactedQuota = await compactFrontierRows(quotaRows, BEAM_LIMIT, frontierCompactor, receipt => { frontierCompactorReceipt = { ...receipt, batch: 'breadth-quota' }; }, residentBeamSelector, isCancelled);
         for (const { state } of compactedQuota) { retained.push(state); retainedSet.add(state); seedCounts.set(state.centroidFamilyId, (seedCounts.get(state.centroidFamilyId) || 0) + 1); }
       } else for (let round = 0; round < seedQuota && retained.length < BEAM_LIMIT; round++) for (const bucket of orderedBuckets) {
         const state = bucket[round]; if (!state || retained.length >= BEAM_LIMIT) continue;
