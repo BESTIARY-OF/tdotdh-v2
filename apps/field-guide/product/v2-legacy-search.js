@@ -263,7 +263,21 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
     if (result?.persistent) { persistent = true; persistentDispatchCount = result.dispatchCount; persistentBufferCapacity = result.bufferCapacity; }
     if (result?.status === 'completed' && Array.isArray(result.items) && result.items.length === chunk.inputs.length) {
       let residentRecordsByItem = null;
-      if (result.residentHandle && frontierCandidateRecords?.compactResident) {
+      const directResidentNavigation = Boolean(result.residentHandle && !materializeCandidates);
+      if (directResidentNavigation) {
+        const expectedRows = [];
+        result.items.forEach((item, itemOrdinal) => {
+          const ref = chunk.refs[itemOrdinal], pieceCount = Number(item.pieceCount) || applyLock(ref?.piece || {}).length;
+          if (!ref || !pieceCount) return;
+          (item.origins || []).forEach((origin, index) => {
+            const target = ref.plan.targetPool[Math.floor(index / pieceCount)];
+            if (!target || !origin || !Number.isSafeInteger(origin.x) || !Number.isSafeInteger(origin.y)) return;
+            expectedRows.push({ planIndex: ref.planIndex, targetOrdinal: Math.floor(index / pieceCount), pieceId: ref.piece.id, candidateIndex: index, originX: origin.x, originY: origin.y, targetX: target.x, targetY: target.y, valid: item.validity?.[index] === 1 ? 1 : 0 });
+          });
+        });
+        residentNavigationEntries.push({ residentHandle: result.residentHandle, piecePlans: chunk.refs.map(ref => ref.planIndex), expectedRows, direct: true });
+        recordBackend = 'webgpu'; recordParity = 'deferred'; recordPersistent = true; recordDispatchCount = result.dispatchCount; recordBufferCapacity = result.bufferCapacity;
+      } else if (result.residentHandle && frontierCandidateRecords?.compactResident) {
         const expectedRecords = [];
         result.items.forEach((item, itemOrdinal) => (item.origins || []).forEach((origin, index) => {
           if (item.validity?.[index] === 1 && origin && Number.isSafeInteger(origin.x) && Number.isSafeInteger(origin.y)) expectedRecords.push({ pieceId: itemOrdinal, targetOrdinal: Math.floor(index / (Number(item.pieceCount) || 1)), originX: origin.x, originY: origin.y, inputOrdinal: index });
@@ -282,7 +296,7 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
           for (const record of compacted.records || []) { const records = residentRecordsByItem.get(record.pieceId) || []; records.push(record); residentRecordsByItem.set(record.pieceId, records); }
         } else fallbackReason = compacted.reason || 'resident-record-compaction-fallback';
       }
-      result.items.forEach((item, offset) => items.push({ item, ref: chunk.refs[offset], residentRecords: residentRecordsByItem?.get(offset) || null }));
+      result.items.forEach((item, offset) => items.push({ item, ref: chunk.refs[offset], residentRecords: residentRecordsByItem?.get(offset) || null, directResidentNavigation }));
     }
     else for (const ref of chunk.refs) {
       const byTarget = generated[ref.planIndex] || new Map();
@@ -296,7 +310,7 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
     }
     totalCandidateCount += Number(result?.candidateCount) || chunk.candidateCount; batches += 1;
   }
-  for (const { item, ref, residentRecords } of items) {
+  for (const { item, ref, residentRecords, directResidentNavigation } of items) {
     const byTarget = generated[ref.planIndex] || new Map(), piece = ref.piece, pieceCount = Number(item.pieceCount) || applyLock(piece).length, records = residentRecords ? residentRecords.map(record => ({ ...record, pieceId: piece.id })) : [];
     if (!Array.isArray(byTarget.records)) byTarget.records = [];
     for (let index = 0; !residentRecords && index < (item.origins || []).length; index++) {
@@ -305,7 +319,7 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
       if (!origin || !Number.isSafeInteger(origin.x) || !Number.isSafeInteger(origin.y)) continue;
       records.push({ pieceId: piece.id, targetOrdinal: Math.floor(index / pieceCount), originX: origin.x, originY: origin.y, inputOrdinal: index });
     }
-    const compacted = residentRecords ? { status: 'completed', backend: 'webgpu', parity: 'verified', persistent: true, dispatch: 'webgpu-frontier-record-compaction-resident', dispatchCount: recordDispatchCount, bufferCapacity: recordBufferCapacity, inputCount: item.candidateCount, outputCount: records.length, records } : frontierCandidateRecords?.compact ? await frontierCandidateRecords.compact(records) : { status: 'completed', backend: 'cpu-oracle', parity: 'oracle', inputCount: records.length, outputCount: records.length, records };
+    const compacted = residentRecords ? { status: 'completed', backend: 'webgpu', parity: 'verified', persistent: true, dispatch: 'webgpu-frontier-record-compaction-resident', dispatchCount: recordDispatchCount, bufferCapacity: recordBufferCapacity, inputCount: item.candidateCount, outputCount: records.length, records } : directResidentNavigation ? { status: 'completed', backend: 'webgpu', parity: 'deferred', persistent: true, dispatch: 'webgpu-frontier-target-resident-records', dispatchCount: recordDispatchCount, bufferCapacity: recordBufferCapacity, inputCount: item.candidateCount, outputCount: 0, records: [] } : frontierCandidateRecords?.compact ? await frontierCandidateRecords.compact(records) : { status: 'completed', backend: 'cpu-oracle', parity: 'oracle', inputCount: records.length, outputCount: records.length, records };
     recordBackend = compacted.backend || recordBackend; recordParity = compacted.parity || recordParity; recordInputCount += Number(compacted.inputCount) || records.length; recordOutputCount += Number(compacted.outputCount) || compacted.records?.length || 0; if (compacted.persistent) { recordPersistent = true; recordDispatchCount = compacted.dispatchCount; recordBufferCapacity = compacted.bufferCapacity; }
     for (const record of compacted.records || []) {
       const target = ref.plan.targetPool[record.targetOrdinal];
@@ -1157,7 +1171,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         : useFlatTargetPlan
         ? await navigationScheduler.selectCandidateRecords(targetPlanEntries, { planCount: beamPlans.length })
         : await navigationScheduler.select(navigationRows, { planCount: beamPlans.length });
-      navigationPlanReceipt = { status: navigationPlan.rowCount === 0 ? 'not-used' : navigationPlan.status === 'completed' && navigationPlan.backend === 'webgpu' && navigationPlan.parity === 'verified' ? 'used' : navigationPlan.status, backend: navigationPlan.backend, parity: navigationPlan.parity, rowCount: navigationPlan.rowCount, selectedCount: navigationPlan.selectedCount, planCount: navigationPlan.planCount, inputDigest: navigationPlan.inputDigest, inputRepresentation: useResidentNavigation ? 'gpu-resident-compacted-records' : useFlatTargetPlan ? 'gpu-flat-target-records' : useTargetGeneratedFrontier ? 'flat-target-records' : 'materialized-candidates', ...(useResidentNavigation ? { resident: true } : {}), ...(navigationPlan.rowCount === 0 ? { reason: 'no-navigation-candidates' } : navigationPlan.reason ? { reason: navigationPlan.reason } : {}), ...(navigationPlan.dispatch ? { dispatch: navigationPlan.dispatch } : {}), ...(navigationPlan.persistent ? { persistent: true, bufferCapacity: navigationPlan.bufferCapacity, dispatchCount: navigationPlan.dispatchCount } : {}) };
+      navigationPlanReceipt = { status: navigationPlan.rowCount === 0 ? 'not-used' : navigationPlan.status === 'completed' && navigationPlan.backend === 'webgpu' && navigationPlan.parity === 'verified' ? 'used' : navigationPlan.status, backend: navigationPlan.backend, parity: navigationPlan.parity, rowCount: navigationPlan.rowCount, selectedCount: navigationPlan.selectedCount, planCount: navigationPlan.planCount, inputDigest: navigationPlan.inputDigest, inputRepresentation: useResidentNavigation ? (residentNavigationEntries.some(entry => entry.direct) ? 'gpu-resident-target-records' : 'gpu-resident-compacted-records') : useFlatTargetPlan ? 'gpu-flat-target-records' : useTargetGeneratedFrontier ? 'flat-target-records' : 'materialized-candidates', ...(useResidentNavigation ? { resident: true } : {}), ...(navigationPlan.rowCount === 0 ? { reason: 'no-navigation-candidates' } : navigationPlan.reason ? { reason: navigationPlan.reason } : {}), ...(navigationPlan.dispatch ? { dispatch: navigationPlan.dispatch } : {}), ...(navigationPlan.persistent ? { persistent: true, bufferCapacity: navigationPlan.bufferCapacity, dispatchCount: navigationPlan.dispatchCount } : {}) };
       const selectedByPlan = new Map();
       for (const rowIndex of navigationPlan.selectedRows || []) {
         if (useResidentNavigation) {

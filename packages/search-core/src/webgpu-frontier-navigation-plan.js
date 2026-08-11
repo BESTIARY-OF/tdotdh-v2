@@ -49,7 +49,7 @@ fn select(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 `;
 
-export const FRONTIER_NAVIGATION_RESIDENT_META_STRIDE = 4;
+export const FRONTIER_NAVIGATION_RESIDENT_META_STRIDE = 5;
 export const FRONTIER_NAVIGATION_RESIDENT_SHADER = `
 struct Params { recordCount: u32, handleCount: u32, planCount: u32, reserved0: u32 };
 @group(0) @binding(0) var<storage, read> records: array<i32>;
@@ -57,6 +57,7 @@ struct Params { recordCount: u32, handleCount: u32, planCount: u32, reserved0: u
 @group(0) @binding(2) var<storage, read> piecePlans: array<u32>;
 @group(0) @binding(3) var<storage, read_write> selected: array<u32>;
 @group(0) @binding(4) var<uniform> params: Params;
+@group(0) @binding(5) var<storage, read> validity: array<u32>;
 
 fn handleFor(recordIndex: u32) -> u32 {
   for (var handle: u32 = 0u; handle < params.handleCount; handle = handle + 1u) {
@@ -78,18 +79,25 @@ fn selectResident(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= params.recordCount) { return; }
   let currentHandle = handleFor(id.x);
   if (currentHandle == 0xffffffffu) { selected[id.x] = 0u; return; }
+  let currentMeta = currentHandle * ${FRONTIER_NAVIGATION_RESIDENT_META_STRIDE}u;
+  if (validity[handleMeta[currentMeta + 4u] + id.x - handleMeta[currentMeta]] == 0u) { selected[id.x] = 0u; return; }
   let currentPlan = planFor(currentHandle, id.x);
   if (currentPlan == 0xffffffffu) { selected[id.x] = 0u; return; }
   var bestTarget = 0xffffffffu;
   var bestCount = 0xffffffffu;
   for (var candidate: u32 = 0u; candidate < params.recordCount; candidate = candidate + 1u) {
     let candidateHandle = handleFor(candidate);
-    if (candidateHandle == 0xffffffffu || planFor(candidateHandle, candidate) != currentPlan) { continue; }
+    if (candidateHandle == 0xffffffffu) { continue; }
+    let candidateMeta = candidateHandle * ${FRONTIER_NAVIGATION_RESIDENT_META_STRIDE}u;
+    if (validity[candidateMeta + 4u + candidate - handleMeta[candidateMeta]] == 0u || planFor(candidateHandle, candidate) != currentPlan) { continue; }
     let candidateTarget = u32(records[candidate * 5u + 1u]);
     var count = 0u;
     for (var other: u32 = 0u; other < params.recordCount; other = other + 1u) {
       let otherHandle = handleFor(other);
-      if (otherHandle != 0xffffffffu && planFor(otherHandle, other) == currentPlan && u32(records[other * 5u + 1u]) == candidateTarget) { count = count + 1u; }
+      if (otherHandle != 0xffffffffu) {
+        let otherMeta = otherHandle * ${FRONTIER_NAVIGATION_RESIDENT_META_STRIDE}u;
+        if (validity[otherMeta + 4u + other - handleMeta[otherMeta]] != 0u && planFor(otherHandle, other) == currentPlan && u32(records[other * 5u + 1u]) == candidateTarget) { count = count + 1u; }
+      }
     }
     if (count < bestCount || (count == bestCount && candidateTarget < bestTarget)) { bestCount = count; bestTarget = candidateTarget; }
   }
@@ -329,6 +337,9 @@ function normalizeResidentEntries(entries) {
     if (!handle.recordsBuffer || typeof handle.recordsBuffer !== 'object') throw new TypeError(`resident navigation entry ${index} has no recordsBuffer`);
     if (handle.recordsOffsetBytes !== undefined && (!Number.isSafeInteger(handle.recordsOffsetBytes) || handle.recordsOffsetBytes < 0 || handle.recordsOffsetBytes % 4)) throw new RangeError(`resident navigation entry ${index} has an invalid recordsOffsetBytes`);
     if (handle.recordStrideBytes !== undefined && handle.recordStrideBytes !== 5 * 4) throw new RangeError(`resident navigation entry ${index} has an incompatible recordStrideBytes`);
+    if (handle.validityBuffer !== undefined && (!handle.validityBuffer || typeof handle.validityBuffer !== 'object')) throw new TypeError(`resident navigation entry ${index} has an invalid validityBuffer`);
+    if (handle.validityOffsetBytes !== undefined && (!Number.isSafeInteger(handle.validityOffsetBytes) || handle.validityOffsetBytes < 0 || handle.validityOffsetBytes % 4)) throw new RangeError(`resident navigation entry ${index} has an invalid validityOffsetBytes`);
+    if (handle.validityStrideBytes !== undefined && handle.validityStrideBytes !== 4) throw new RangeError(`resident navigation entry ${index} has an incompatible validityStrideBytes`);
     const piecePlans = Array.from(entry?.piecePlans || handle.piecePlans || []);
     if (!piecePlans.length && handle.recordCount) throw new TypeError(`resident navigation entry ${index} must provide piecePlans`);
     for (const [planIndex, value] of piecePlans.entries()) uint(value, 'piecePlans', planIndex);
@@ -362,9 +373,10 @@ function createPersistentGpuResidentNavigationRunner(device, shaderSource) {
         piecePlans: device.createBuffer({ size: piecePlanBytes, usage: usage.STORAGE | usage.COPY_DST }),
         selected: device.createBuffer({ size: recordCountBytes, usage: usage.STORAGE | usage.COPY_SRC }),
         params: device.createBuffer({ size: 16, usage: usage.UNIFORM | usage.COPY_DST }),
+        validity: device.createBuffer({ size: recordCountBytes, usage: usage.STORAGE | usage.COPY_DST }),
         selectedReadback: device.createBuffer({ size: recordCountBytes, usage: usage.MAP_READ | usage.COPY_DST }),
       };
-      const module = device.createShaderModule({ code: shaderSource }), pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'selectResident' } }), bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [0, 1, 2, 3, 4].map((binding, index) => ({ binding, resource: { buffer: [buffers.records, buffers.handleMeta, buffers.piecePlans, buffers.selected, buffers.params][index] } })) });
+      const module = device.createShaderModule({ code: shaderSource }), pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'selectResident' } }), bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [0, 1, 2, 3, 4, 5].map((binding, index) => ({ binding, resource: { buffer: [buffers.records, buffers.handleMeta, buffers.piecePlans, buffers.selected, buffers.params, buffers.validity][index] } })) });
       const previous = resources;
       resources = { buffers, pipeline, bindGroup, recordCapacity, handleCapacity, piecePlanCapacity };
       dispose(previous);
@@ -377,17 +389,24 @@ function createPersistentGpuResidentNavigationRunner(device, shaderSource) {
     for (const [index, entry] of entries.entries()) {
       if (entry.handle.device && entry.handle.device !== device) throw new TypeError(`resident navigation entry ${index} belongs to another WebGPU device`);
       if (entry.handle.recordsBuffer.size !== undefined && (entry.handle.recordsOffsetBytes || 0) + entry.handle.recordCount * 5 * 4 > entry.handle.recordsBuffer.size) throw new RangeError(`resident navigation entry ${index} records exceed source buffer size`);
+      if (entry.handle.validityBuffer?.size !== undefined && (entry.handle.validityOffsetBytes || 0) + entry.handle.recordCount * 4 > entry.handle.validityBuffer.size) throw new RangeError(`resident navigation entry ${index} validity exceeds source buffer size`);
     }
     const recordCount = entries.reduce((sum, entry) => sum + entry.handle.recordCount, 0), piecePlanCount = entries.reduce((sum, entry) => sum + entry.piecePlans.length, 0), current = ensure(recordCount, entries.length, piecePlanCount), { buffers } = current;
-    const handleMeta = new Uint32Array(entries.length * FRONTIER_NAVIGATION_RESIDENT_META_STRIDE), piecePlans = new Uint32Array(piecePlanCount); let recordOffset = 0, piecePlanOffset = 0;
+    const handleMeta = new Uint32Array(entries.length * FRONTIER_NAVIGATION_RESIDENT_META_STRIDE), piecePlans = new Uint32Array(piecePlanCount), validity = new Uint32Array(recordCount); validity.fill(1); let recordOffset = 0, piecePlanOffset = 0;
     for (const [index, entry] of entries.entries()) {
       const meta = index * FRONTIER_NAVIGATION_RESIDENT_META_STRIDE;
-      handleMeta.set([recordOffset, entry.handle.recordCount, piecePlanOffset, entry.piecePlans.length], meta);
+      handleMeta.set([recordOffset, entry.handle.recordCount, piecePlanOffset, entry.piecePlans.length, recordOffset], meta);
       piecePlans.set(entry.piecePlans, piecePlanOffset); recordOffset += entry.handle.recordCount; piecePlanOffset += entry.piecePlans.length;
     }
-    device.queue.writeBuffer(buffers.handleMeta, 0, handleMeta); device.queue.writeBuffer(buffers.piecePlans, 0, piecePlans); device.queue.writeBuffer(buffers.params, 0, new Uint32Array([recordCount, entries.length, 0, 0]));
+    device.queue.writeBuffer(buffers.handleMeta, 0, handleMeta); device.queue.writeBuffer(buffers.piecePlans, 0, piecePlans); device.queue.writeBuffer(buffers.validity, 0, validity); device.queue.writeBuffer(buffers.params, 0, new Uint32Array([recordCount, entries.length, 0, 0]));
     const encoder = device.createCommandEncoder(); recordOffset = 0;
-    for (const entry of entries) { if (entry.handle.recordCount) encoder.copyBufferToBuffer(entry.handle.recordsBuffer, entry.handle.recordsOffsetBytes || 0, buffers.records, recordOffset * 5 * 4, entry.handle.recordCount * 5 * 4); recordOffset += entry.handle.recordCount; }
+    for (const entry of entries) {
+      if (entry.handle.recordCount) {
+        encoder.copyBufferToBuffer(entry.handle.recordsBuffer, entry.handle.recordsOffsetBytes || 0, buffers.records, recordOffset * 5 * 4, entry.handle.recordCount * 5 * 4);
+        if (entry.handle.validityBuffer) encoder.copyBufferToBuffer(entry.handle.validityBuffer, entry.handle.validityOffsetBytes || 0, buffers.validity, recordOffset * 4, entry.handle.recordCount * 4);
+      }
+      recordOffset += entry.handle.recordCount;
+    }
     assertNotAborted(signal);
     const pass = encoder.beginComputePass(); pass.setPipeline(current.pipeline); pass.setBindGroup(0, current.bindGroup); pass.dispatchWorkgroups(Math.ceil(recordCount / FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE)); pass.end(); encoder.copyBufferToBuffer(buffers.selected, 0, buffers.selectedReadback, 0, Math.max(4, recordCount * 4)); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone(); assertNotAborted(signal); if (lost) throw new Error('webgpu-device-lost');
     await buffers.selectedReadback.mapAsync(mapMode.READ); assertNotAborted(signal); const selectedValues = new Uint32Array(buffers.selectedReadback.getMappedRange().slice(0, Math.max(4, recordCount * 4))); buffers.selectedReadback.unmap(); dispatchCount += 1;
@@ -440,7 +459,9 @@ export function createWebGpuFrontierNavigationScheduler({ gpu = globalThis.navig
     },
     async selectResidentCandidateRecords(entries, { expectedRows = null, planCount = null, signal } = {}) {
       const normalized = normalizeResidentEntries(entries), rowCount = normalized.reduce((sum, entry) => sum + entry.handle.recordCount, 0), inputDigest = residentInputDigest(normalized);
-      const expected = expectedRows ? cpuSelectFrontierNavigationRows(createWebGpuFrontierNavigationPlan(expectedRows), { planCount }) : null;
+      const expectedRowIndices = expectedRows ? expectedRows.flatMap((row, index) => row?.valid === 0 ? [] : [index]) : null;
+      const expected = expectedRows ? cpuSelectFrontierNavigationRows(createWebGpuFrontierNavigationPlan(expectedRows.filter(row => row?.valid !== 0)), { planCount }) : null;
+      const expectedResidentRows = expected ? Uint32Array.from(expected.selectedRows, index => expectedRowIndices[index]) : null;
       if (!rowCount) return Object.freeze({ schema: WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA, status: 'not-used', backend: 'webgpu', parity: expected ? 'verified' : 'deferred', rowCount: 0, selectedCount: 0, selectedRows: new Uint32Array(), planCount: planCount || 0, inputDigest, dispatch: 'webgpu-navigation-resident-records' });
       try {
         assertNotAborted(signal);
@@ -448,15 +469,15 @@ export function createWebGpuFrontierNavigationScheduler({ gpu = globalThis.navig
         if (typeof accelerator === 'function') result = await accelerator({ entries: normalized, oracle: expected, inputDigest });
         else {
           const status = await availability();
-          if (status.status !== 'available') return Object.freeze({ ...(expected || {}), status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', rowCount, selectedCount: expected?.selectedRows?.length || 0, selectedRows: expected?.selectedRows || new Uint32Array(), planCount: planCount || 0, inputDigest, reason: status.reason });
+          if (status.status !== 'available') return Object.freeze({ ...(expected || {}), status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', rowCount, selectedCount: expectedResidentRows?.length || 0, selectedRows: expectedResidentRows || new Uint32Array(), planCount: planCount || 0, inputDigest, reason: status.reason });
           const device = await deviceCache.getDevice();
           if (persistent && !residentRunner) residentRunner = createPersistentGpuResidentNavigationRunner(device, FRONTIER_NAVIGATION_RESIDENT_SHADER);
           result = residentRunner ? await residentRunner.run(normalized, { signal }) : null;
         }
         const selected = result?.selectedRows instanceof Uint32Array ? result.selectedRows : Uint32Array.from(result?.selectedRows || []);
-        if (expected && (selected.length !== expected.selectedRows.length || JSON.stringify(Array.from(selected)) !== JSON.stringify(Array.from(expected.selectedRows)))) return Object.freeze({ ...expected, status: 'rejected', backend: 'cpu-oracle', reason: 'resident-navigation-oracle-parity-mismatch', rowCount, inputDigest });
+        if (expected && (selected.length !== expectedResidentRows.length || JSON.stringify(Array.from(selected)) !== JSON.stringify(Array.from(expectedResidentRows)))) return Object.freeze({ ...expected, status: 'rejected', backend: 'cpu-oracle', selectedRows: expectedResidentRows, selectedCount: expectedResidentRows.length, reason: 'resident-navigation-oracle-parity-mismatch', rowCount, inputDigest });
         return Object.freeze({ ...(expected || { schema: WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA, rowCount, planCount: planCount || 0 }), status: 'completed', backend: 'webgpu', parity: expected ? 'verified' : 'deferred', rowCount, selectedCount: selected.length, selectedRows: selected, inputDigest, dispatch: result?.dispatch || 'webgpu-navigation-resident-records', ...(result?.persistent ? { persistent: true, dispatchCount: result.dispatchCount, bufferCapacity: result.bufferCapacity } : {}) });
-      } catch (error) { residentRunner?.reset(); residentRunner = null; deviceCache.reset(); return Object.freeze({ ...(expected || { schema: WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA, rowCount, planCount: planCount || 0, selectedRows: new Uint32Array() }), status: error?.name === 'AbortError' ? 'cancelled' : 'fallback', backend: 'cpu-oracle', parity: expected ? 'oracle' : 'deferred', rowCount, inputDigest, reason: error?.name === 'AbortError' ? 'navigation-cancelled' : `resident-navigation-failed:${error?.message || String(error)}` }); }
+      } catch (error) { residentRunner?.reset(); residentRunner = null; deviceCache.reset(); return Object.freeze({ ...(expected || { schema: WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA, rowCount, planCount: planCount || 0, selectedRows: new Uint32Array() }), status: error?.name === 'AbortError' ? 'cancelled' : 'fallback', backend: 'cpu-oracle', parity: expected ? 'oracle' : 'deferred', rowCount, inputDigest, selectedRows: expectedResidentRows || new Uint32Array(), selectedCount: expectedResidentRows?.length || 0, reason: error?.name === 'AbortError' ? 'navigation-cancelled' : `resident-navigation-failed:${error?.message || String(error)}` }); }
     },
   });
 }

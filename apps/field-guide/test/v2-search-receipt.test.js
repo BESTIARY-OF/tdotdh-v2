@@ -137,6 +137,7 @@ const result = await search(pieces, [], { ...sharedOptions, frontierGenerator })
 const targetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator, frontierCandidateRecords });
 const flatTargetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator, frontierCandidateRecords, navigationScheduler: flatNavigationScheduler });
 let residentNavigationSelectCalls = 0;
+let residentCompactionCalls = 0;
 const residentTargetGenerator = {
   availability: async () => ({ status: 'available', backend: 'webgpu' }),
   generateBatch: async inputs => {
@@ -146,7 +147,7 @@ const residentTargetGenerator = {
 };
 const residentCandidateRecords = {
   compact: async records => ({ ...cpuCompactFrontierCandidateRecords(records), status: 'completed', backend: 'test-frontier-candidate-records', parity: 'verified' }),
-  compactResident: async (_handle, { expectedRecords }) => ({ status: 'completed', backend: 'test-frontier-candidate-records', parity: 'verified', persistent: true, residentHandle: { schema: 'tdotdh.webgpu-frontier-candidate-records-resident.v0', recordsBuffer: {}, recordCount: expectedRecords.length }, records: expectedRecords, inputCount: expectedRecords.length, outputCount: expectedRecords.length }),
+  compactResident: async (_handle, { expectedRecords }) => { residentCompactionCalls += 1; return { status: 'completed', backend: 'test-frontier-candidate-records', parity: 'verified', persistent: true, residentHandle: { schema: 'tdotdh.webgpu-frontier-candidate-records-resident.v0', recordsBuffer: {}, recordCount: expectedRecords.length }, records: expectedRecords, inputCount: expectedRecords.length, outputCount: expectedRecords.length }; },
 };
 const residentNavigationScheduler = {
   ...flatNavigationScheduler,
@@ -154,7 +155,8 @@ const residentNavigationScheduler = {
 };
 const residentTargetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator: residentTargetGenerator, frontierCandidateRecords: residentCandidateRecords, navigationScheduler: residentNavigationScheduler });
 assert.ok(residentNavigationSelectCalls > 0);
-assert.equal(residentTargetResult.navigationPlan.inputRepresentation, 'gpu-resident-compacted-records');
+assert.equal(residentCompactionCalls, 0);
+assert.equal(residentTargetResult.navigationPlan.inputRepresentation, 'gpu-resident-target-records');
 const fallbackTargetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator: fallbackTargetGenerator, navigationScheduler: fallbackFlatNavigationScheduler });
 let targetFallbackGeneratorCalls = 0;
 const targetFallbackGenerator = {

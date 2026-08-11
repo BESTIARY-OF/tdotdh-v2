@@ -18,6 +18,7 @@ assert.ok(plan.groupValues instanceof Uint32Array);
 assert.match(FRONTIER_NAVIGATION_PLAN_SHADER, /fn choose/);
 assert.match(FRONTIER_NAVIGATION_PLAN_SHADER, /fn select/);
 assert.match(FRONTIER_NAVIGATION_RESIDENT_SHADER, /fn selectResident/);
+assert.match(FRONTIER_NAVIGATION_RESIDENT_SHADER, /var<storage, read> validity/);
 assert.ok(plan.values instanceof Int32Array);
 assert.deepEqual(decodeWebGpuFrontierNavigationRow(plan, 2), rows[2]);
 const oracle = cpuSelectFrontierNavigationRows(plan, { planCount: 2 });
@@ -61,6 +62,12 @@ assert.equal(residentReceipt.backend, 'webgpu');
 assert.equal(residentReceipt.parity, 'verified');
 assert.equal(residentReceipt.dispatch, 'fake-resident-record-dispatch');
 assert.deepEqual(Array.from(residentReceipt.selectedRows), [2, 3]);
+const validityScheduler = createWebGpuFrontierNavigationScheduler({ accelerator: async ({ oracle }) => ({ status: 'completed', selectedRows: Array.from(oracle.selectedRows, index => [0, 1, 3][index]), dispatch: 'fake-resident-validity-dispatch' }) });
+const validityReceipt = await validityScheduler.selectResidentCandidateRecords([
+  { residentHandle: { schema: 'tdotdh.webgpu-frontier-candidate-records-resident.v0', recordCount: rows.length, recordsBuffer: {} }, piecePlans: [0, 0, 0, 0, 0, 0, 0, 1] },
+], { planCount: 2, expectedRows: rows.map((row, index) => ({ ...row, valid: index === 2 ? 0 : 1 })) });
+assert.equal(validityReceipt.parity, 'verified');
+assert.deepEqual(Array.from(validityReceipt.selectedRows), [0, 1, 3]);
 
 {
   const previousBufferUsage = globalThis.GPUBufferUsage, previousMapMode = globalThis.GPUMapMode;
