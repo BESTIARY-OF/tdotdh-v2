@@ -24,6 +24,10 @@ continues to require `parity: verified`.
   explicit CPU/oracle stages (`frontierGeneration`, `frontierCompactor`).
 - The browser smoke pass reported `GPU device ready` and completed in 452 ms;
   this is a stage/runtime receipt, not a full-search speed claim.
+- Three repeated browser passes each reported 11 GPU stages and 2 stages not
+  used, with no CPU fallback stage; a cancellation pass reported 5 GPU stages
+  before cancellation and saved its checkpoint, and the next pass resumed to
+  an 11-GPU-stage receipt.
 - Recent full-search repeats remain parity-exact but noisy: 7,632.9 ms GPU vs
   7,690.5 ms CPU, then 8,284.6 ms GPU vs 7,949.4 ms CPU. No stable throughput
   improvement is claimed.

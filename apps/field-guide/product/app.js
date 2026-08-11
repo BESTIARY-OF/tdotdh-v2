@@ -1039,19 +1039,23 @@ function launchSearchPass() {
     };
     const isGpuReceipt = receipt => ['used', 'resident', 'completed'].includes(receipt?.status) && ['webgpu', 'compute-shader', 'resident-webgpu'].includes(receipt?.backend);
     const gpuStages = Object.entries(stageReceipts).filter(([, receipt]) => isGpuReceipt(receipt)).map(([name]) => name);
-    const cpuFallbackStages = Object.entries(stageReceipts).filter(([, receipt]) => receipt?.status === 'fallback' || receipt?.status === 'cpu-oracle' || receipt?.status === 'not-used').map(([name]) => name);
+    const isNotUsedReceipt = receipt => receipt?.status === 'not-used' || receipt?.reason === 'stage-not-executed';
+    const isCpuFallbackReceipt = receipt => receipt?.status === 'fallback' || (receipt?.status === 'cpu-oracle' && !isNotUsedReceipt(receipt));
+    const cpuFallbackStages = Object.entries(stageReceipts).filter(([, receipt]) => isCpuFallbackReceipt(receipt)).map(([name]) => name);
+    const notUsedStages = Object.entries(stageReceipts).filter(([, receipt]) => isNotUsedReceipt(receipt)).map(([name]) => name);
     const stageAvailability = result.gpuExecution?.stageAvailability || {};
-    const cpuFallbackReasons = Object.fromEntries(Object.entries(stageReceipts).filter(([, receipt]) => receipt?.status === 'fallback' || receipt?.status === 'cpu-oracle' || receipt?.status === 'not-used').map(([name, receipt]) => [name, receipt?.reason || (receipt?.status === 'cpu-oracle' ? 'not-executed' : stageAvailability[name]?.reason || stageAvailability[name]?.status || receipt?.status || 'unknown')]));
+    const cpuFallbackReasons = Object.fromEntries(Object.entries(stageReceipts).filter(([, receipt]) => isCpuFallbackReceipt(receipt)).map(([name, receipt]) => [name, receipt?.reason || stageAvailability[name]?.reason || stageAvailability[name]?.status || receipt?.status || 'unknown']));
     const elapsedMs = Math.max(0, performance.now() - startedAt);
     globalThis.__TDOTDH_V2_LAST_SEARCH_RECEIPT__ = Object.freeze({ schema: 'tdotdh.v2.search-receipt.v1', elapsedMs, gpuExecution: result.gpuExecution || null, executionDecision: result.executionDecision || null, stageTimings: result.stageTimings || null, gpuStages: Object.freeze(gpuStages), cpuFallbackStages: Object.freeze(cpuFallbackStages), cpuFallbackReasons: Object.freeze(cpuFallbackReasons), ...stageReceipts, placements: Array.isArray(result.placements) ? result.placements.length : 0, nodes: Number(result.nodes) || 0 });
     const runtimeStatus = document.querySelector('#v2RuntimeStatus');
     if (runtimeStatus) {
       const executionLabel = result.gpuExecution?.deviceAvailable ? 'GPU device ready' : `CPU oracle · GPU unavailable (${result.gpuExecution?.reason || 'execution not verified'})`;
-      runtimeStatus.textContent = `V2 product · ${executionLabel} · ${gpuStages.length} GPU stages · ${cpuFallbackStages.length} CPU fallbacks · ${Math.round(elapsedMs).toLocaleString()} ms`;
+      runtimeStatus.textContent = `V2 product · ${executionLabel} · ${gpuStages.length} GPU stages · ${cpuFallbackStages.length} CPU fallbacks${notUsedStages.length ? ` · ${notUsedStages.length} not used` : ''} · ${Math.round(elapsedMs).toLocaleString()} ms`;
       const fallbackText = Object.entries(cpuFallbackReasons).map(([name, reason]) => `${name}=${reason}`).join(', ');
+      const notUsedText = notUsedStages.join(', ');
       const unavailableStageText = Object.entries(stageAvailability).filter(([, availability]) => availability?.status && availability.status !== 'available').map(([name, availability]) => `${name}=${availability.reason || availability.status}`).join(', ');
       runtimeStatus.dataset.stageAvailability = unavailableStageText || 'all-adapters-available';
-      runtimeStatus.title = `Execution gate: ${result.gpuExecution?.deviceAvailable ? 'a WebGPU device was created' : `no usable WebGPU device (${result.gpuExecution?.reason || 'not verified'})`}. This completed search pass ran ${gpuStages.length} accelerated stage${gpuStages.length === 1 ? '' : 's'} and retained ${cpuFallbackStages.length} CPU/oracle stage${cpuFallbackStages.length === 1 ? '' : 's'}. GPU stages: ${gpuStages.join(', ') || 'none'}. CPU fallbacks: ${cpuFallbackStages.join(', ') || 'none'}. Reasons: ${fallbackText || 'none'}. Stage availability: ${unavailableStageText || 'all adapters available'}. Decision: ${result.executionDecision?.gpuFirstSearch ? 'GPU-first' : 'CPU seed/fallback'}.`;
+      runtimeStatus.title = `Execution gate: ${result.gpuExecution?.deviceAvailable ? 'a WebGPU device was created' : `no usable WebGPU device (${result.gpuExecution?.reason || 'not verified'})`}. This completed search pass ran ${gpuStages.length} accelerated stage${gpuStages.length === 1 ? '' : 's'} and retained ${cpuFallbackStages.length} CPU/oracle fallback stage${cpuFallbackStages.length === 1 ? '' : 's'}${notUsedStages.length ? `; ${notUsedStages.length} stage${notUsedStages.length === 1 ? '' : 's'} not used` : ''}. GPU stages: ${gpuStages.join(', ') || 'none'}. CPU fallbacks: ${cpuFallbackStages.join(', ') || 'none'}. Not used: ${notUsedText || 'none'}. Reasons: ${fallbackText || 'none'}. Stage availability: ${unavailableStageText || 'all adapters available'}. Decision: ${result.executionDecision?.gpuFirstSearch ? 'GPU-first' : 'CPU seed/fallback'}.`;
       runtimeStatus.dataset.backend = gpuStages.length ? 'webgpu-search' : 'cpu-oracle-search';
     }
     if (result.hasPlacement || (Array.isArray(result.placements) && result.placements.length)) app.searchCheckpoint = null;
