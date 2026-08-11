@@ -116,7 +116,28 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (labelAt(candidate, x - 1, y) != 0u) { label = min(label, labelAt(candidate, x - 1, y)); }
   if (labelAt(candidate, x, y + 1) != 0u) { label = min(label, labelAt(candidate, x, y + 1)); }
   if (labelAt(candidate, x, y - 1) != 0u) { label = min(label, labelAt(candidate, x, y - 1)); }
-  nextLabels[id.x] = label;
+nextLabels[id.x] = label;
+}`;
+
+const BATCH_LABEL_SEED_SHADER = `
+struct Params {
+  candidateCount: u32,
+  cellCount: u32,
+  wordCount: u32,
+  active: u32,
+};
+@group(0) @binding(0) var<storage, read> occupiedMasks: array<u32>;
+@group(0) @binding(1) var<storage, read_write> labels: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let totalCells = params.candidateCount * params.cellCount;
+  if (id.x >= totalCells) { return; }
+  let candidate = id.x / params.cellCount;
+  let cell = id.x % params.cellCount;
+  let occupied = ((occupiedMasks[candidate * params.wordCount + cell / 32u] >> (cell % 32u)) & 1u) != 0u;
+  labels[id.x] = select(0u, cell + 1u, occupied == (params.active != 0u));
 }`;
 
 const BATCH_LABEL_SUMMARY_SHADER = `
@@ -501,26 +522,26 @@ async function runWebGpuBatchReduction(deviceCache, normalizedInputs, grid, { re
     ];
     const labelReadback = readback ? device.createBuffer({ size: cellByteLength, usage: usage.MAP_READ | usage.COPY_DST }) : null;
     const labelParams = device.createBuffer({ size: 16, usage: usage.UNIFORM | usage.COPY_DST });
+    const seedParams = device.createBuffer({ size: 16, usage: usage.UNIFORM | usage.COPY_DST });
     const summaryByteLength = candidateCount * 2 * 4;
     const summaryBuffer = device.createBuffer({ size: summaryByteLength, usage: usage.STORAGE | usage.COPY_DST | usage.COPY_SRC });
     const summaryReadback = device.createBuffer({ size: summaryByteLength, usage: usage.MAP_READ | usage.COPY_DST });
     const summaryParams = device.createBuffer({ size: 16, usage: usage.UNIFORM | usage.COPY_DST });
     const summaryModule = device.createShaderModule({ code: BATCH_LABEL_SUMMARY_SHADER });
     const summaryPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: summaryModule, entryPoint: 'main' } });
-    labelResources.push(...labelBuffers, labelReadback, labelParams, summaryBuffer, summaryReadback, summaryParams);
-    const initialLabels = active => Uint32Array.from({ length: candidateCount * cellCount }, (_, index) => {
-      const candidate = Math.floor(index / cellCount);
-      const cell = index % cellCount;
-      const words = normalizedInputs[candidate].occupiedMask;
-      const occupied = ((occupiedFlat ? occupiedFlat[candidate * wordCount + Math.floor(cell / 32)] : words[Math.floor(cell / 32)]) >>> (cell % 32)) & 1;
-      return Boolean(occupied) === active ? cell + 1 : 0;
-    });
-    const runBatchLabels = async initial => {
-      device.queue.writeBuffer(labelBuffers[0], 0, initial);
-      device.queue.writeBuffer(labelBuffers[1], 0, new Uint32Array(initial.length));
+    const seedModule = device.createShaderModule({ code: BATCH_LABEL_SEED_SHADER });
+    const seedPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: seedModule, entryPoint: 'main' } });
+    labelResources.push(...labelBuffers, labelReadback, labelParams, seedParams, summaryBuffer, summaryReadback, summaryParams);
+    const runBatchLabels = async active => {
       device.queue.writeBuffer(labelParams, 0, new Uint32Array([candidateCount, cellCount, grid.width, grid.height]));
+      device.queue.writeBuffer(seedParams, 0, new Uint32Array([candidateCount, cellCount, wordCount, active ? 1 : 0]));
       let current = 0;
       const encoder = device.createCommandEncoder();
+      const seed = encoder.beginComputePass();
+      const seedGroup = device.createBindGroup({ layout: seedPipeline.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: { buffer: occupiedBuffer } }, { binding: 1, resource: { buffer: labelBuffers[0] } }, { binding: 2, resource: { buffer: seedParams } },
+      ] });
+      seed.setPipeline(seedPipeline); seed.setBindGroup(0, seedGroup); seed.dispatchWorkgroups(Math.ceil((candidateCount * cellCount) / 64)); seed.end();
       const bindGroups = [
         device.createBindGroup({ layout: labelPipeline.getBindGroupLayout(0), entries: [
           { binding: 0, resource: { buffer: labelBuffers[0] } }, { binding: 1, resource: { buffer: labelBuffers[1] } }, { binding: 2, resource: { buffer: labelParams } },
@@ -555,10 +576,10 @@ async function runWebGpuBatchReduction(deviceCache, normalizedInputs, grid, { re
       pass.setPipeline(summaryPipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(candidateCount * cellCount / 64)); pass.end();
       device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
     };
-    const occupiedResult = await runBatchLabels(initialLabels(true));
+    const occupiedResult = await runBatchLabels(true);
     if (!readback) device.queue.writeBuffer(summaryBuffer, 0, new Uint32Array(candidateCount * 2));
     if (!readback) await runSummary(occupiedResult.buffer, 0);
-    const emptyResult = await runBatchLabels(initialLabels(false));
+    const emptyResult = await runBatchLabels(false);
     if (!readback) {
       await runSummary(emptyResult.buffer, 1);
       await summaryReadback.mapAsync(mapMode.READ);
