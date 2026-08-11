@@ -889,6 +889,30 @@ async function scoreFrontierCandidates(entries, frontierScorer, onScore = () => 
   return { entries, residentRanked: false };
 }
 
+async function scoreFrontierCandidatesAcrossBeam(jobs, frontierScorer, onScore = () => {}) {
+  const pending = jobs.flatMap((job, jobIndex) => job.entries.map((entry, entryIndex) => ({ jobIndex, entryIndex, entry })));
+  if (!pending.length) return jobs;
+  if (!frontierScorer?.score) {
+    onScore({ status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', candidateCount: pending.length, batch: 'beam' });
+    return jobs;
+  }
+  try {
+    const result = await frontierScorer.score(pending.map(item => item.entry.scoreInput));
+    if (result?.status === 'completed' && result.parity === 'verified' && Array.isArray(result.scores) && result.scores.length === pending.length) {
+      for (const [index, item] of pending.entries()) {
+        const score = result.scores[index];
+        jobs[item.jobIndex].entries[item.entryIndex] = { ...item.entry, score, rankScore: canonicalFrontierRankScore(score) };
+      }
+      onScore({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, algorithm: result.algorithm, candidateCount: pending.length, batch: 'beam', grouped: true });
+      return jobs;
+    }
+    onScore({ status: 'fallback', backend: 'cpu-oracle', parity: result?.parity, reason: result?.reason || 'frontier-scorer-unavailable', candidateCount: pending.length, batch: 'beam' });
+  } catch (error) {
+    onScore({ status: 'fallback', backend: 'cpu-oracle', reason: `frontier-score-failed:${error.message}`, candidateCount: pending.length, batch: 'beam' });
+  }
+  return jobs;
+}
+
 async function compactFrontierRows(entries, retain, frontierCompactor, onCompact = () => {}, residentBeamSelector = null, isCancelled = () => false) {
   const cpu = () => entries.map((entry, index) => ({ entry, index })).sort((left, right) => (left.entry.rankScore ?? canonicalFrontierRankScore(left.entry.score)) - (right.entry.rankScore ?? canonicalFrontierRankScore(right.entry.score)) || left.index - right.index).slice(0, retain).map(row => row.entry);
   if (!entries.length) { onCompact({ status: 'not-used', backend: 'cpu-oracle', parity: 'oracle', candidateCount: 0, selectedCount: 0 }); return entries; }
@@ -1400,10 +1424,12 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         const score = cpuScoreFrontierCandidate(scoreInput);
         return { piece, candidate, gpuState, metrics: candidateMetrics, score, rankScore: canonicalFrontierRankScore(score), scoreInput, nextBounds, hintMatches };
       }).filter(Boolean);
-      const scoredCandidates = await scoreFrontierCandidates(rankedCandidates, frontierScorer, receipt => { frontierScoreReceipt = receipt; stageHistory.frontierScore.push({ depth, ...receipt }); }, residentBeamSelector, receipt => { frontierRankerReceipt = receipt; stageHistory.frontierRanker.push({ depth, ...receipt }); }, isCancelled);
-      const ranked = scoredCandidates.residentRanked ? scoredCandidates.entries : await rankFrontierOptions(scoredCandidates.entries, frontierRanker, receipt => { frontierRankerReceipt = receipt; stageHistory.frontierRanker.push({ depth, ...receipt }); });
-      rankedJobs.push({ state, entries: ranked });
+      rankedJobs.push({ state, entries: rankedCandidates });
     }
+    await scoreFrontierCandidatesAcrossBeam(rankedJobs, frontierScorer, receipt => { frontierScoreReceipt = receipt; stageHistory.frontierScore.push({ depth, ...receipt }); });
+    if (isCancelled()) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierDedup: frontierDedupReceipt, frontierScore: frontierScoreReceipt };
+    const rankedBuckets = await orderFrontierRowsMany(rankedJobs.map(job => job.entries), frontierRanker, receipt => { frontierRankerReceipt = receipt; stageHistory.frontierRanker.push({ depth, ...receipt }); });
+    for (const [jobIndex, job] of rankedJobs.entries()) job.entries = rankedBuckets[jobIndex].slice(0, BRANCH_LIMIT);
     const deduplicatedJobs = await deduplicateRankedOptionsMany(rankedJobs);
     for (const { state, entries: deduplicated } of deduplicatedJobs) {
       for (const option of deduplicated) {
