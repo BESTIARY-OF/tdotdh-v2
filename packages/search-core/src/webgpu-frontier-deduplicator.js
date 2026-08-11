@@ -147,7 +147,7 @@ function createPersistentGpuDedupRunner(device, shaderSource) {
       table: device.createBuffer({ size: requiredTable * 4, usage: usage.STORAGE | usage.COPY_DST }),
       fingerprints: device.createBuffer({ size: requiredRows * 16, usage: usage.STORAGE | usage.COPY_DST }),
       params: device.createBuffer({ size: 16, usage: usage.UNIFORM | usage.COPY_DST }),
-      readback: device.createBuffer({ size: requiredRows * 4, usage: mapMode.MAP_READ | usage.COPY_DST }),
+      readback: device.createBuffer({ size: requiredRows * 4, usage: usage.MAP_READ | usage.COPY_DST }),
     };
     const module = device.createShaderModule({ code: shaderSource }), finalizeModule = device.createShaderModule({ code: FINALIZE_SHADER });
     const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
@@ -194,21 +194,31 @@ export function createWebGpuFrontierDeduplicator({ gpu = globalThis.navigator?.g
       : Object.freeze({ schema: WEBGPU_FRONTIER_DEDUPLICATOR_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: probe.adapterAvailable ? 'webgpu-required-limits-unsatisfied' : 'webgpu-adapter-unavailable' }));
     return availabilityPromise;
   };
+  const deduplicateMany = async groups => {
+    if (!Array.isArray(groups) || groups.length === 0) throw new TypeError('frontier dedup groups must contain at least one group');
+    const normalizedGroups = groups.map((rows, groupIndex) => normalizeRows(rows.map(row => ({ hash: ((Number(row?.hash) >>> 0) ^ Math.imul(groupIndex + 1, 0x9e3779b9)) >>> 0, signature: `${groupIndex}\u0000${row?.signature}` }))));
+    const cpuKeeps = normalizedGroups.map(rows => Array.from(cpuDeduplicateFrontierStates(rows).keep)), flatRows = normalizedGroups.flat(), flatExpected = cpuKeeps.flat(), candidateCount = flatRows.length;
+    if (candidateCount > MAX_FRONTIER_DEDUP_ROWS) return Object.freeze({ schema: WEBGPU_FRONTIER_DEDUPLICATOR_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: 'frontier-dedup-batch-capacity', keep: Object.freeze(cpuKeeps), candidateCount, groupCount: groups.length });
+    const status = await availability();
+    if (status.status !== 'available') return Object.freeze({ schema: WEBGPU_FRONTIER_DEDUPLICATOR_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: status.reason, keep: Object.freeze(cpuKeeps), candidateCount, groupCount: groups.length });
+    try {
+      if (!persistentRunner) persistentRunner = createPersistentGpuDedupRunner(await deviceCache.getDevice(), shaderSource);
+      const gpuKeep = await persistentRunner.run(flatRows);
+      if (JSON.stringify(gpuKeep) !== JSON.stringify(flatExpected)) return Object.freeze({ schema: WEBGPU_FRONTIER_DEDUPLICATOR_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: 'oracle-parity-mismatch', keep: Object.freeze(cpuKeeps), candidateCount, groupCount: groups.length });
+      let offset = 0; const keep = cpuKeeps.map(group => { const result = Object.freeze(gpuKeep.slice(offset, offset + group.length)); offset += group.length; return result; });
+      return Object.freeze({ schema: WEBGPU_FRONTIER_DEDUPLICATOR_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'verified', algorithm: 'stable-open-addressing-fingerprint-min', keep: Object.freeze(keep), candidateCount, groupCount: groups.length });
+    } catch (error) {
+      persistentRunner?.reset(); persistentRunner = null; deviceCache.reset();
+      return Object.freeze({ schema: WEBGPU_FRONTIER_DEDUPLICATOR_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: `webgpu-execution-failed:${error?.message || String(error)}`, keep: Object.freeze(cpuKeeps), candidateCount, groupCount: groups.length });
+    }
+  };
   return Object.freeze({
     availability,
     async deduplicate(rows) {
-      const normalized = normalizeRows(rows), cpu = cpuDeduplicateFrontierStates(normalized), status = await availability();
-      if (status.status !== 'available') return unavailable(status.reason, cpu);
-      try {
-        if (!persistentRunner) persistentRunner = createPersistentGpuDedupRunner(await deviceCache.getDevice(), shaderSource);
-        const gpuKeep = await persistentRunner.run(normalized);
-        if (JSON.stringify(gpuKeep) !== JSON.stringify(cpu.keep)) return unavailable('oracle-parity-mismatch', cpu);
-        return Object.freeze({ ...cpu, status: 'completed', backend: 'webgpu', parity: 'verified', algorithm: 'stable-open-addressing-fingerprint-min' });
-      } catch (error) {
-        persistentRunner?.reset(); persistentRunner = null;
-        deviceCache.reset();
-        return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, cpu);
-      }
+      const normalized = normalizeRows(rows), cpu = cpuDeduplicateFrontierStates(normalized), result = await deduplicateMany([normalized]);
+      if (result.status !== 'completed') return unavailable(result.reason, cpu);
+      return Object.freeze({ ...cpu, status: 'completed', backend: 'webgpu', parity: 'verified', algorithm: result.algorithm });
     },
+    deduplicateMany,
   });
 }

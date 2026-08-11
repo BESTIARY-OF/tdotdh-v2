@@ -1128,6 +1128,23 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     if (frontierDedupReceipt.status === 'cpu-oracle') frontierDedupReceipt = { status: 'fallback', reason: result?.reason || 'frontier-deduplicator-unavailable' };
     return entries;
   }
+  async function deduplicateRankedOptionsMany(jobs) {
+    if (!jobs.length) return jobs;
+    if (!frontierDeduplicator?.deduplicateMany || frontierDeduplicatorStatus?.status !== 'available' || jobs.some(job => job.entries.some(entry => !entry.gpuState))) {
+      const entries = [];
+      for (const job of jobs) entries.push({ ...job, entries: await deduplicateRankedOptions(job.entries, job.state) });
+      return entries;
+    }
+    const groups = jobs.map(job => job.entries.map(entry => ({ hash: entry.gpuState.absoluteHash >>> 0, signature: arrangementSignature([...job.state.placements, entry.candidate]) })));
+    const result = await frontierDeduplicator.deduplicateMany(groups), total = groups.reduce((sum, group) => sum + group.length, 0);
+    if (result?.status === 'completed' && result?.parity === 'verified' && Array.isArray(result.keep) && result.keep.length === jobs.length && result.keep.every((keep, index) => Array.isArray(keep) && keep.length === jobs[index].entries.length)) {
+      frontierDedupReceipt = { status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: total, batch: 'beam-groups', groupCount: jobs.length };
+      return jobs.map((job, jobIndex) => ({ ...job, entries: job.entries.filter((entry, entryIndex) => result.keep[jobIndex][entryIndex] === 1) }));
+    }
+    const entries = [];
+    for (const job of jobs) entries.push({ ...job, entries: await deduplicateRankedOptions(job.entries, job.state) });
+    return entries;
+  }
   const searchHints = Boolean(options.searchHints);
   const gpuStateDedupEnabled = options.disableGpuStateDedup !== true;
   const searchStrategy = options.searchStrategy || 'balanced';
@@ -1368,6 +1385,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     if (navigationCancellation) navigationCancellation(cancelledAfterGpu);
     if (cancelledAfterGpu) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierDedup: frontierDedupReceipt };
     await evaluateFrontierTopologyAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateTopology ? null : frontierTopology, receipt => { frontierTopologyReceipt = receipt; stageHistory.frontierTopology.push({ depth, ...receipt }); }, frontierTopologyAvailabilityReceipt);
+    const rankedJobs = [];
     for (const job of beamJobs) {
       const state = job.state;
       let selectedOptions = job.entries;
@@ -1394,7 +1412,10 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       }).filter(Boolean);
       const scoredCandidates = await scoreFrontierCandidates(rankedCandidates, frontierScorer, receipt => { frontierScoreReceipt = receipt; stageHistory.frontierScore.push({ depth, ...receipt }); }, residentBeamSelector, receipt => { frontierRankerReceipt = receipt; stageHistory.frontierRanker.push({ depth, ...receipt }); }, isCancelled);
       const ranked = scoredCandidates.residentRanked ? scoredCandidates.entries : await rankFrontierOptions(scoredCandidates.entries, frontierRanker, receipt => { frontierRankerReceipt = receipt; stageHistory.frontierRanker.push({ depth, ...receipt }); });
-      const deduplicated = await deduplicateRankedOptions(ranked, state);
+      rankedJobs.push({ state, entries: ranked });
+    }
+    const deduplicatedJobs = await deduplicateRankedOptionsMany(rankedJobs);
+    for (const { state, entries: deduplicated } of deduplicatedJobs) {
       for (const option of deduplicated) {
         const placements = [...state.placements, option.candidate], metrics = option.metrics, field = new Set(state.field); option.candidate.cells.forEach(c => field.add(key(c.x, c.y)));
         if (metrics.holes > 0) continue;

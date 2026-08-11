@@ -1,6 +1,6 @@
 const output = document.querySelector('#output');
 const runButton = document.querySelector('#run');
-const workerUrl = new URL('./v2-search-worker.js?v=20260811-matched77', import.meta.url);
+const workerUrl = new URL('./v2-search-worker.js?v=20260811-matched78', import.meta.url);
 
 function signature(placements) {
   if (!Array.isArray(placements) || placements.length === 0) return null;
