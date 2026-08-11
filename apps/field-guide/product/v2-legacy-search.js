@@ -7,15 +7,15 @@ const BEAM_LIMIT = 72;
 const yieldToEventLoop = () => new Promise(resolve => setTimeout(resolve, 0));
 const BRANCH_LIMIT = 30;
 
-import { createFrontierEvaluationCandidate } from '../../../packages/search-core/src/webgpu-frontier-evaluator.js';
-import { cpuScoreFrontierCandidate } from '../../../packages/search-core/src/webgpu-frontier-scorer.js';
+import { createFrontierEvaluationCandidate } from '../../../packages/search-core/src/webgpu-frontier-evaluator.js?v=20260811-pipelinecache1';
+import { cpuScoreFrontierCandidate } from '../../../packages/search-core/src/webgpu-frontier-scorer.js?v=20260811-pipelinecache1';
 import { createFrontierMaskFromCells } from '../../../packages/search-core/src/webgpu-frontier-validator.js';
-import { createFrontierMetricsCandidate } from '../../../packages/search-core/src/webgpu-frontier-metrics.js?v=20260810-gpu26';
+import { createFrontierMetricsCandidate } from '../../../packages/search-core/src/webgpu-frontier-metrics.js?v=20260811-pipelinecache1';
 import { createFieldMetricsCandidate } from '../../../packages/search-core/src/webgpu-field-metrics.js';
 import { createLabeledFrontierStateCandidate } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 import { canonicalSignatureFromLabeledFrontierState } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 import { DEFAULT_FRONTIER_GRID } from '../../../packages/search-core/src/webgpu-frontier-topology.js';
-import { MAX_FRONTIER_GENERATION_CANDIDATES } from '../../../packages/search-core/src/webgpu-frontier-generator.js';
+import { MAX_FRONTIER_GENERATION_CANDIDATES } from '../../../packages/search-core/src/webgpu-frontier-generator.js?v=20260811-pipelinecache1';
 import { MAX_FRONTIER_TARGET_GENERATION_CANDIDATES } from '../../../packages/search-core/src/webgpu-frontier-target-generator.js?v=20260811-resident3';
 import { createWebGpuFrontierNavigationScheduler, decodeWebGpuFrontierNavigationRow } from '../../../packages/search-core/src/webgpu-frontier-navigation-plan.js?v=20260811-resident2';
 
