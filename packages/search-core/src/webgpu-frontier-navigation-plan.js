@@ -6,6 +6,7 @@ export const WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA = 'tdotdh.webgpu-frontier-na
 export const FRONTIER_NAVIGATION_PLAN_STRIDE = 8;
 export const FRONTIER_NAVIGATION_GROUP_STRIDE = 3;
 export const FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE = 64;
+export const FRONTIER_NAVIGATION_RESIDENT_MAX_TARGETS = 1024;
 export const FRONTIER_NAVIGATION_PLAN_SHADER = `
 struct Params { rowCount: u32, planCount: u32, groupCount: u32, reserved0: u32 };
 @group(0) @binding(0) var<storage, read> rows: array<i32>;
@@ -58,6 +59,7 @@ struct Params { recordCount: u32, handleCount: u32, planCount: u32, reserved0: u
 @group(0) @binding(3) var<storage, read_write> selected: array<u32>;
 @group(0) @binding(4) var<uniform> params: Params;
 @group(0) @binding(5) var<storage, read> validity: array<u32>;
+@group(0) @binding(6) var<storage, read_write> targetCounts: array<atomic<u32>>;
 
 fn handleFor(recordIndex: u32) -> u32 {
   for (var handle: u32 = 0u; handle < params.handleCount; handle = handle + 1u) {
@@ -75,6 +77,19 @@ fn planFor(handle: u32, recordIndex: u32) -> u32 {
 }
 
 @compute @workgroup_size(${FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE})
+fn countResident(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= params.recordCount) { return; }
+  let currentHandle = handleFor(id.x);
+  if (currentHandle == 0xffffffffu) { return; }
+  let currentMeta = currentHandle * ${FRONTIER_NAVIGATION_RESIDENT_META_STRIDE}u;
+  if (validity[handleMeta[currentMeta + 4u] + id.x - handleMeta[currentMeta]] == 0u) { return; }
+  let currentPlan = planFor(currentHandle, id.x);
+  if (currentPlan == 0xffffffffu || currentPlan >= params.planCount) { return; }
+  let currentTarget = u32(records[id.x * 5u + 1u]);
+  if (currentTarget < ${FRONTIER_NAVIGATION_RESIDENT_MAX_TARGETS}u) { atomicAdd(&targetCounts[currentPlan * ${FRONTIER_NAVIGATION_RESIDENT_MAX_TARGETS}u + currentTarget], 1u); }
+}
+
+@compute @workgroup_size(${FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE})
 fn selectResident(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= params.recordCount) { return; }
   let currentHandle = handleFor(id.x);
@@ -82,24 +97,12 @@ fn selectResident(@builtin(global_invocation_id) id: vec3<u32>) {
   let currentMeta = currentHandle * ${FRONTIER_NAVIGATION_RESIDENT_META_STRIDE}u;
   if (validity[handleMeta[currentMeta + 4u] + id.x - handleMeta[currentMeta]] == 0u) { selected[id.x] = 0u; return; }
   let currentPlan = planFor(currentHandle, id.x);
-  if (currentPlan == 0xffffffffu) { selected[id.x] = 0u; return; }
+  if (currentPlan == 0xffffffffu || currentPlan >= params.planCount) { selected[id.x] = 0u; return; }
   var bestTarget = 0xffffffffu;
   var bestCount = 0xffffffffu;
-  for (var candidate: u32 = 0u; candidate < params.recordCount; candidate = candidate + 1u) {
-    let candidateHandle = handleFor(candidate);
-    if (candidateHandle == 0xffffffffu) { continue; }
-    let candidateMeta = candidateHandle * ${FRONTIER_NAVIGATION_RESIDENT_META_STRIDE}u;
-    if (validity[candidateMeta + 4u + candidate - handleMeta[candidateMeta]] == 0u || planFor(candidateHandle, candidate) != currentPlan) { continue; }
-    let candidateTarget = u32(records[candidate * 5u + 1u]);
-    var count = 0u;
-    for (var other: u32 = 0u; other < params.recordCount; other = other + 1u) {
-      let otherHandle = handleFor(other);
-      if (otherHandle != 0xffffffffu) {
-        let otherMeta = otherHandle * ${FRONTIER_NAVIGATION_RESIDENT_META_STRIDE}u;
-        if (validity[otherMeta + 4u + other - handleMeta[otherMeta]] != 0u && planFor(otherHandle, other) == currentPlan && u32(records[other * 5u + 1u]) == candidateTarget) { count = count + 1u; }
-      }
-    }
-    if (count < bestCount || (count == bestCount && candidateTarget < bestTarget)) { bestCount = count; bestTarget = candidateTarget; }
+  for (var candidateTarget: u32 = 0u; candidateTarget < ${FRONTIER_NAVIGATION_RESIDENT_MAX_TARGETS}u; candidateTarget = candidateTarget + 1u) {
+    let candidateCount = atomicLoad(&targetCounts[currentPlan * ${FRONTIER_NAVIGATION_RESIDENT_MAX_TARGETS}u + candidateTarget]);
+    if (candidateCount != 0u && (candidateCount < bestCount || (candidateCount == bestCount && candidateTarget < bestTarget))) { bestCount = candidateCount; bestTarget = candidateTarget; }
   }
   selected[id.x] = select(0u, 1u, u32(records[id.x * 5u + 1u]) == bestTarget);
 }
@@ -361,9 +364,9 @@ function createPersistentGpuResidentNavigationRunner(device, shaderSource) {
   const dispose = bundle => { if (bundle) for (const buffer of Object.values(bundle.buffers)) buffer.destroy(); };
   const destroy = () => { dispose(resources); resources = null; };
   if (device?.lost && typeof device.lost.then === 'function') device.lost.then(() => { lost = true; destroy(); }).catch(() => { lost = true; destroy(); });
-  const ensure = (recordCount, handleCount, piecePlanCount) => {
-    const recordCapacity = nextCapacity(Math.max(1, recordCount)), handleCapacity = nextCapacity(Math.max(1, handleCount)), piecePlanCapacity = nextCapacity(Math.max(1, piecePlanCount));
-    if (resources && resources.recordCapacity >= recordCapacity && resources.handleCapacity >= handleCapacity && resources.piecePlanCapacity >= piecePlanCapacity) return resources;
+  const ensure = (recordCount, handleCount, piecePlanCount, planCount) => {
+    const recordCapacity = nextCapacity(Math.max(1, recordCount)), handleCapacity = nextCapacity(Math.max(1, handleCount)), piecePlanCapacity = nextCapacity(Math.max(1, piecePlanCount)), planTargetCapacity = nextCapacity(Math.max(1, planCount));
+    if (resources && resources.recordCapacity >= recordCapacity && resources.handleCapacity >= handleCapacity && resources.piecePlanCapacity >= piecePlanCapacity && resources.planTargetCapacity >= planTargetCapacity) return resources;
     const recordsBytes = recordCapacity * 5 * 4, metaBytes = handleCapacity * FRONTIER_NAVIGATION_RESIDENT_META_STRIDE * 4, piecePlanBytes = piecePlanCapacity * 4, recordCountBytes = recordCapacity * 4;
     const maxStorageBufferBindingSize = device.limits?.maxStorageBufferBindingSize;
     if (Number.isFinite(maxStorageBufferBindingSize) && recordsBytes > maxStorageBufferBindingSize) throw new RangeError(`resident navigation requires ${recordsBytes} bytes but device allows ${maxStorageBufferBindingSize}`);
@@ -376,16 +379,20 @@ function createPersistentGpuResidentNavigationRunner(device, shaderSource) {
         selected: device.createBuffer({ size: recordCountBytes, usage: usage.STORAGE | usage.COPY_SRC }),
         params: device.createBuffer({ size: 16, usage: usage.UNIFORM | usage.COPY_DST }),
         validity: device.createBuffer({ size: recordCountBytes, usage: usage.STORAGE | usage.COPY_DST }),
+        targetCounts: device.createBuffer({ size: planTargetCapacity * FRONTIER_NAVIGATION_RESIDENT_MAX_TARGETS * 4, usage: usage.STORAGE | usage.COPY_DST }),
         selectedReadback: device.createBuffer({ size: recordCountBytes, usage: usage.MAP_READ | usage.COPY_DST }),
       };
-      const module = device.createShaderModule({ code: shaderSource }), pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'selectResident' } }), bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [0, 1, 2, 3, 4, 5].map((binding, index) => ({ binding, resource: { buffer: [buffers.records, buffers.handleMeta, buffers.piecePlans, buffers.selected, buffers.params, buffers.validity][index] } })) });
+      const module = device.createShaderModule({ code: shaderSource });
+      const countPipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'countResident' } });
+      const selectPipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'selectResident' } });
+      const bindGroup = device.createBindGroup({ layout: countPipeline.getBindGroupLayout(0), entries: [0, 1, 2, 3, 4, 5, 6].map((binding, index) => ({ binding, resource: { buffer: [buffers.records, buffers.handleMeta, buffers.piecePlans, buffers.selected, buffers.params, buffers.validity, buffers.targetCounts][index] } })) });
       const previous = resources;
-      resources = { buffers, pipeline, bindGroup, recordCapacity, handleCapacity, piecePlanCapacity };
+      resources = { buffers, countPipeline, selectPipeline, bindGroup, recordCapacity, handleCapacity, piecePlanCapacity, planTargetCapacity };
       dispose(previous);
     } catch (error) { dispose({ buffers }); throw error; }
     return resources;
   };
-  async function runExclusive(entries, signal) {
+  async function runExclusive(entries, { signal, planCount = 0 } = {}) {
     assertNotAborted(signal);
     if (lost) throw new Error('webgpu-device-lost');
     for (const [index, entry] of entries.entries()) {
@@ -393,14 +400,14 @@ function createPersistentGpuResidentNavigationRunner(device, shaderSource) {
       if (entry.handle.recordsBuffer.size !== undefined && (entry.handle.recordsOffsetBytes || 0) + entry.handle.recordCount * 5 * 4 > entry.handle.recordsBuffer.size) throw new RangeError(`resident navigation entry ${index} records exceed source buffer size`);
       if (entry.handle.validityBuffer?.size !== undefined && (entry.handle.validityOffsetBytes || 0) + entry.handle.recordCount * 4 > entry.handle.validityBuffer.size) throw new RangeError(`resident navigation entry ${index} validity exceeds source buffer size`);
     }
-    const recordCount = entries.reduce((sum, entry) => sum + entry.handle.recordCount, 0), piecePlanCount = entries.reduce((sum, entry) => sum + entry.piecePlans.length, 0), current = ensure(recordCount, entries.length, piecePlanCount), { buffers } = current;
+    const recordCount = entries.reduce((sum, entry) => sum + entry.handle.recordCount, 0), piecePlanCount = entries.reduce((sum, entry) => sum + entry.piecePlans.length, 0), resolvedPlanCount = Math.max(1, Number(planCount) || 0, ...entries.flatMap(entry => entry.piecePlans).map(value => value + 1)), current = ensure(recordCount, entries.length, piecePlanCount, resolvedPlanCount), { buffers } = current;
     const handleMeta = new Uint32Array(entries.length * FRONTIER_NAVIGATION_RESIDENT_META_STRIDE), piecePlans = new Uint32Array(piecePlanCount), validity = new Uint32Array(recordCount); validity.fill(1); let recordOffset = 0, piecePlanOffset = 0;
     for (const [index, entry] of entries.entries()) {
       const meta = index * FRONTIER_NAVIGATION_RESIDENT_META_STRIDE;
       handleMeta.set([recordOffset, entry.handle.recordCount, piecePlanOffset, entry.piecePlans.length, recordOffset], meta);
       piecePlans.set(entry.piecePlans, piecePlanOffset); recordOffset += entry.handle.recordCount; piecePlanOffset += entry.piecePlans.length;
     }
-    device.queue.writeBuffer(buffers.handleMeta, 0, handleMeta); device.queue.writeBuffer(buffers.piecePlans, 0, piecePlans); device.queue.writeBuffer(buffers.validity, 0, validity); device.queue.writeBuffer(buffers.params, 0, new Uint32Array([recordCount, entries.length, 0, 0]));
+    device.queue.writeBuffer(buffers.handleMeta, 0, handleMeta); device.queue.writeBuffer(buffers.piecePlans, 0, piecePlans); device.queue.writeBuffer(buffers.validity, 0, validity); device.queue.writeBuffer(buffers.targetCounts, 0, new Uint32Array(current.planTargetCapacity * FRONTIER_NAVIGATION_RESIDENT_MAX_TARGETS)); device.queue.writeBuffer(buffers.params, 0, new Uint32Array([recordCount, entries.length, resolvedPlanCount, 0]));
     const encoder = device.createCommandEncoder(); recordOffset = 0;
     for (const entry of entries) {
       if (entry.handle.recordCount) {
@@ -410,11 +417,13 @@ function createPersistentGpuResidentNavigationRunner(device, shaderSource) {
       recordOffset += entry.handle.recordCount;
     }
     assertNotAborted(signal);
-    const pass = encoder.beginComputePass(); pass.setPipeline(current.pipeline); pass.setBindGroup(0, current.bindGroup); pass.dispatchWorkgroups(Math.ceil(recordCount / FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE)); pass.end(); encoder.copyBufferToBuffer(buffers.selected, 0, buffers.selectedReadback, 0, Math.max(4, recordCount * 4)); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone(); assertNotAborted(signal); if (lost) throw new Error('webgpu-device-lost');
+    const countPass = encoder.beginComputePass(); countPass.setPipeline(current.countPipeline); countPass.setBindGroup(0, current.bindGroup); countPass.dispatchWorkgroups(Math.ceil(recordCount / FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE)); countPass.end();
+    const selectPass = encoder.beginComputePass(); selectPass.setPipeline(current.selectPipeline); selectPass.setBindGroup(0, current.bindGroup); selectPass.dispatchWorkgroups(Math.ceil(recordCount / FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE)); selectPass.end();
+    encoder.copyBufferToBuffer(buffers.selected, 0, buffers.selectedReadback, 0, Math.max(4, recordCount * 4)); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone(); assertNotAborted(signal); if (lost) throw new Error('webgpu-device-lost');
     await buffers.selectedReadback.mapAsync(mapMode.READ); assertNotAborted(signal); const selectedValues = new Uint32Array(buffers.selectedReadback.getMappedRange().slice(0, Math.max(4, recordCount * 4))); buffers.selectedReadback.unmap(); dispatchCount += 1;
     return { selectedRows: Array.from(selectedValues).flatMap((value, index) => value ? [index] : []), dispatch: 'webgpu-navigation-resident-records', persistent: true, dispatchCount, bufferCapacity: { records: current.recordCapacity, handles: current.handleCapacity, piecePlans: current.piecePlanCapacity } };
   }
-  return Object.freeze({ reset: destroy, run(entries, { signal } = {}) { const task = queue.then(() => runExclusive(entries, signal)); queue = task.catch(() => {}); return task; } });
+  return Object.freeze({ reset: destroy, run(entries, options = {}) { const task = queue.then(() => runExclusive(entries, options)); queue = task.catch(() => {}); return task; } });
 }
 
 export function createWebGpuFrontierNavigationScheduler({ gpu = globalThis.navigator?.gpu, requiredLimits = { maxStorageBufferBindingSize: 262144 }, shaderSource = FRONTIER_NAVIGATION_PLAN_SHADER, deviceCache = createWebGpuDeviceCache({ gpu }), accelerator = null, persistent = true } = {}) {
@@ -474,7 +483,7 @@ export function createWebGpuFrontierNavigationScheduler({ gpu = globalThis.navig
           if (status.status !== 'available') return Object.freeze({ ...(expected || {}), status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', rowCount, selectedCount: expectedResidentRows?.length || 0, selectedRows: expectedResidentRows || new Uint32Array(), planCount: planCount || 0, inputDigest, reason: status.reason });
           const device = await deviceCache.getDevice();
           if (persistent && !residentRunner) residentRunner = createPersistentGpuResidentNavigationRunner(device, FRONTIER_NAVIGATION_RESIDENT_SHADER);
-          result = residentRunner ? await residentRunner.run(normalized, { signal }) : null;
+          result = residentRunner ? await residentRunner.run(normalized, { signal, planCount }) : null;
         }
         const selected = result?.selectedRows instanceof Uint32Array ? result.selectedRows : Uint32Array.from(result?.selectedRows || []);
         if (expected && (selected.length !== expectedResidentRows.length || JSON.stringify(Array.from(selected)) !== JSON.stringify(Array.from(expectedResidentRows)))) return Object.freeze({ ...expected, status: 'rejected', backend: 'cpu-oracle', selectedRows: expectedResidentRows, selectedCount: expectedResidentRows.length, reason: 'resident-navigation-oracle-parity-mismatch', rowCount, inputDigest });

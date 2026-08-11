@@ -18,6 +18,7 @@ assert.ok(plan.groupValues instanceof Uint32Array);
 assert.match(FRONTIER_NAVIGATION_PLAN_SHADER, /fn choose/);
 assert.match(FRONTIER_NAVIGATION_PLAN_SHADER, /fn select/);
 assert.match(FRONTIER_NAVIGATION_RESIDENT_SHADER, /fn selectResident/);
+assert.match(FRONTIER_NAVIGATION_RESIDENT_SHADER, /fn countResident/);
 assert.match(FRONTIER_NAVIGATION_RESIDENT_SHADER, /var<storage, read> validity/);
 assert.ok(plan.values instanceof Int32Array);
 assert.deepEqual(decodeWebGpuFrontierNavigationRow(plan, 2), rows[2]);
