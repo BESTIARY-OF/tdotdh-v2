@@ -59,6 +59,8 @@ assert.deepEqual(receipt.records, oracle.records);
   assert.equal(residentReceipt.parity, 'verified');
   assert.equal(residentReceipt.persistent, true);
   assert.equal(residentReceipt.dispatchCount, 3);
+  assert.equal(residentReceipt.residentHandle.schema, 'tdotdh.webgpu-frontier-candidate-records-resident.v0');
+  assert.equal(residentReceipt.residentHandle.recordCount, 3);
   if (previousBufferUsage === undefined) delete globalThis.GPUBufferUsage; else globalThis.GPUBufferUsage = previousBufferUsage;
   if (previousMapMode === undefined) delete globalThis.GPUMapMode; else globalThis.GPUMapMode = previousMapMode;
 }

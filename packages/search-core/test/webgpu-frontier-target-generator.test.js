@@ -58,6 +58,8 @@ assert.deepEqual(batchReceipt.items[0].validity, single.validity);
   assert.equal(firstPersistent.dispatchCount, 1);
   assert.equal(firstPersistent.residentHandle.schema, 'tdotdh.webgpu-frontier-target-records.v0');
   assert.equal(firstPersistent.residentHandle.recordCount, 4);
+  assert.equal(firstPersistent.residentHandle.targetCellsBuffer != null, true);
+  assert.equal(firstPersistent.residentHandle.itemMetadata[0].targetOffset, 0);
   assert.equal(secondPersistent.dispatchCount, 2);
   assert.equal(createdBuffers, 10, 'persistent target generation reuses its ten GPU buffers');
   if (previousBufferUsage === undefined) delete globalThis.GPUBufferUsage; else globalThis.GPUBufferUsage = previousBufferUsage;

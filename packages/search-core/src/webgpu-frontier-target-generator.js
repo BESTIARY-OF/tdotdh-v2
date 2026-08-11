@@ -208,13 +208,14 @@ async function runGpuBatch(device, normalized, grid, shaderSource) {
     metas: device.createBuffer({ size: metaBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
     origins: device.createBuffer({ size: originBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
     validity: device.createBuffer({ size: countBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
+    records: device.createBuffer({ size: Math.max(4, normalized.candidateCount * FRONTIER_TARGET_RECORD_STRIDE * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
     params: device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }),
     originsReadback: device.createBuffer({ size: originBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
     validityReadback: device.createBuffer({ size: countBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
   };
   try {
     device.queue.writeBuffer(buffers.targets, 0, layout.targetValues); device.queue.writeBuffer(buffers.pieces, 0, layout.pieceValues); device.queue.writeBuffer(buffers.masks, 0, layout.fieldMasks); device.queue.writeBuffer(buffers.metas, 0, layout.metaValues); device.queue.writeBuffer(buffers.params, 0, new Int32Array([layout.itemCount, layout.candidateCount, grid.width, grid.height, grid.originX, grid.originY, 0, 0]));
-    const module = device.createShaderModule({ code: shaderSource }), pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } }), bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [0, 1, 2, 3, 4, 5, 6].map((binding, index) => ({ binding, resource: { buffer: [buffers.targets, buffers.pieces, buffers.masks, buffers.metas, buffers.origins, buffers.validity, buffers.params][index] } })) });
+    const module = device.createShaderModule({ code: shaderSource }), pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } }), bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [0, 1, 2, 3, 4, 5, 6, 7].map((binding, index) => ({ binding, resource: { buffer: [buffers.targets, buffers.pieces, buffers.masks, buffers.metas, buffers.origins, buffers.validity, buffers.params, buffers.records][index] } })) });
     const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(normalized.candidateCount / 64)); pass.end(); encoder.copyBufferToBuffer(buffers.origins, 0, buffers.originsReadback, 0, originBytes); encoder.copyBufferToBuffer(buffers.validity, 0, buffers.validityReadback, 0, countBytes); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
     await buffers.originsReadback.mapAsync(GPUMapMode.READ); const rawOrigins = Array.from(new Int32Array(buffers.originsReadback.getMappedRange().slice(0, normalized.candidateCount * 2 * 4))); buffers.originsReadback.unmap(); await buffers.validityReadback.mapAsync(GPUMapMode.READ); const validity = Array.from(new Uint32Array(buffers.validityReadback.getMappedRange().slice(0, normalized.candidateCount * 4))); buffers.validityReadback.unmap();
     return normalized.items.map(item => { const start = item.candidateOffset, origins = Array.from({ length: item.candidateCount }, (_, index) => ({ x: rawOrigins[(start + index) * 2], y: rawOrigins[(start + index) * 2 + 1] })), itemValidity = validity.slice(start, start + item.candidateCount); return { pieceId: item.pieceId, targetCount: item.targetCells.length, pieceCount: item.pieceCells.length, origins, validity: itemValidity, candidateCount: item.candidateCount }; });
@@ -229,11 +230,13 @@ function nextCapacity(required) {
 
 function createPersistentGpuTargetRunner(device, grid, shaderSource) {
   const usage = globalThis.GPUBufferUsage, mapMode = globalThis.GPUMapMode;
-  let resources = null, dispatchCount = 0;
+  let resources = null, retiredResources = [], dispatchCount = 0;
+  const destroyResources = bundle => { if (bundle) for (const buffer of Object.values(bundle.buffers)) buffer.destroy(); };
   const destroy = () => {
-    if (!resources) return;
-    for (const buffer of Object.values(resources.buffers)) buffer.destroy();
+    destroyResources(resources);
+    retiredResources.forEach(destroyResources);
     resources = null;
+    retiredResources = [];
   };
   const ensure = (normalized) => {
     const layout = createWebGpuFrontierBatchLayout(normalized.items, grid);
@@ -244,7 +247,6 @@ function createPersistentGpuTargetRunner(device, grid, shaderSource) {
     const masks = nextCapacity(Math.max(1, layout.fieldMasks.length));
     const metas = nextCapacity(Math.max(1, layout.metaValues.length));
     if (resources && resources.rowCapacity >= rows && resources.itemCapacity >= items && resources.targetCapacity >= targets && resources.pieceCapacity >= pieces && resources.maskCapacity >= masks && resources.metaCapacity >= metas) return { resources, layout };
-    destroy();
     const originBytes = Math.max(4, rows * 2 * 4), countBytes = Math.max(4, rows * 4), recordBytes = Math.max(4, rows * FRONTIER_TARGET_RECORD_STRIDE * 4);
     const buffers = {
       targets: device.createBuffer({ size: Math.max(4, targets * 4), usage: usage.STORAGE | usage.COPY_DST }),
@@ -258,10 +260,17 @@ function createPersistentGpuTargetRunner(device, grid, shaderSource) {
       originsReadback: device.createBuffer({ size: originBytes, usage: usage.MAP_READ | usage.COPY_DST }),
       validityReadback: device.createBuffer({ size: countBytes, usage: usage.MAP_READ | usage.COPY_DST }),
     };
-    const module = device.createShaderModule({ code: shaderSource });
-    const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
-    const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [0, 1, 2, 3, 4, 5, 6, 7].map((binding, index) => ({ binding, resource: { buffer: [buffers.targets, buffers.pieces, buffers.masks, buffers.metas, buffers.origins, buffers.validity, buffers.params, buffers.records][index] } })) });
-    resources = { buffers, pipeline, bindGroup, rowCapacity: rows, itemCapacity: items, targetCapacity: targets, pieceCapacity: pieces, maskCapacity: masks, metaCapacity: metas };
+    try {
+      const module = device.createShaderModule({ code: shaderSource });
+      const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+      const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [0, 1, 2, 3, 4, 5, 6, 7].map((binding, index) => ({ binding, resource: { buffer: [buffers.targets, buffers.pieces, buffers.masks, buffers.metas, buffers.origins, buffers.validity, buffers.params, buffers.records][index] } })) });
+      const next = { buffers, pipeline, bindGroup, rowCapacity: rows, itemCapacity: items, targetCapacity: targets, pieceCapacity: pieces, maskCapacity: masks, metaCapacity: metas };
+      if (resources) retiredResources.push(resources);
+      resources = next;
+    } catch (error) {
+      destroyResources({ buffers });
+      throw error;
+    }
     return { resources, layout };
   };
   return Object.freeze({
@@ -273,7 +282,7 @@ function createPersistentGpuTargetRunner(device, grid, shaderSource) {
       const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(resources.pipeline); pass.setBindGroup(0, resources.bindGroup); pass.dispatchWorkgroups(Math.ceil(normalized.candidateCount / 64)); pass.end(); encoder.copyBufferToBuffer(buffers.origins, 0, buffers.originsReadback, 0, originBytes); encoder.copyBufferToBuffer(buffers.validity, 0, buffers.validityReadback, 0, countBytes); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
       await buffers.originsReadback.mapAsync(mapMode.READ); const rawOrigins = Array.from(new Int32Array(buffers.originsReadback.getMappedRange().slice(0, normalized.candidateCount * 2 * 4))); buffers.originsReadback.unmap(); await buffers.validityReadback.mapAsync(mapMode.READ); const validity = Array.from(new Uint32Array(buffers.validityReadback.getMappedRange().slice(0, normalized.candidateCount * 4))); buffers.validityReadback.unmap(); dispatchCount += 1;
       const items = normalized.items.map(item => { const start = item.candidateOffset, origins = Array.from({ length: item.candidateCount }, (_, index) => ({ x: rawOrigins[(start + index) * 2], y: rawOrigins[(start + index) * 2 + 1] })), itemValidity = validity.slice(start, start + item.candidateCount); return { pieceId: item.pieceId, targetCount: item.targetCells.length, pieceCount: item.pieceCells.length, origins, validity: itemValidity, candidateCount: item.candidateCount }; });
-      return { items, persistent: true, dispatch: 'webgpu-frontier-target-resident', dispatchCount, residentHandle: Object.freeze({ schema: 'tdotdh.webgpu-frontier-target-records.v0', device, recordsBuffer: buffers.records, validityBuffer: buffers.validity, recordCount: normalized.candidateCount, itemCount: normalized.items.length, itemMetadata: Object.freeze(normalized.items.map((item, index) => Object.freeze({ itemOrdinal: index, pieceId: item.pieceId, targetCount: item.targetCells.length, pieceCount: item.pieceCells.length, candidateOffset: item.candidateOffset }))), generation: dispatchCount }), bufferCapacity: { rows: resources.rowCapacity, items: resources.itemCapacity, targets: resources.targetCapacity, pieces: resources.pieceCapacity, masks: resources.maskCapacity, metas: resources.metaCapacity } };
+      return { items, persistent: true, dispatch: 'webgpu-frontier-target-resident', dispatchCount, residentHandle: Object.freeze({ schema: 'tdotdh.webgpu-frontier-target-records.v0', device, recordsBuffer: buffers.records, recordsOffsetBytes: 0, recordStrideBytes: FRONTIER_TARGET_RECORD_STRIDE * 4, validityBuffer: buffers.validity, validityOffsetBytes: 0, validityStrideBytes: 4, targetCellsBuffer: buffers.targets, targetCellsOffsetBytes: 0, targetCellsStrideBytes: 8, recordCount: normalized.candidateCount, itemCount: normalized.items.length, itemMetadata: Object.freeze(normalized.items.map((item, index) => Object.freeze({ itemOrdinal: index, pieceId: item.pieceId, targetCount: item.targetCells.length, targetOffset: layout.targetOffsets[index], pieceCount: item.pieceCells.length, candidateOffset: item.candidateOffset }))), generation: dispatchCount }), bufferCapacity: { rows: resources.rowCapacity, items: resources.itemCapacity, targets: resources.targetCapacity, pieces: resources.pieceCapacity, masks: resources.maskCapacity, metas: resources.metaCapacity } };
     },
   });
 }
