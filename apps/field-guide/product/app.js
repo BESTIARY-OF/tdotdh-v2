@@ -1037,7 +1037,8 @@ function launchSearchPass() {
       navigationPlan: result.navigationPlan,
       navigation: result.navigation,
     };
-    const gpuStages = Object.entries(stageReceipts).filter(([, receipt]) => receipt?.status === 'used' || receipt?.status === 'resident' && receipt?.backend === 'webgpu' || receipt?.status === 'completed' && receipt?.backend === 'webgpu').map(([name]) => name);
+    const isGpuReceipt = receipt => ['used', 'resident', 'completed'].includes(receipt?.status) && ['webgpu', 'compute-shader', 'resident-webgpu'].includes(receipt?.backend);
+    const gpuStages = Object.entries(stageReceipts).filter(([, receipt]) => isGpuReceipt(receipt)).map(([name]) => name);
     const cpuFallbackStages = Object.entries(stageReceipts).filter(([, receipt]) => receipt?.status === 'fallback' || receipt?.status === 'cpu-oracle' || receipt?.status === 'not-used').map(([name]) => name);
     const stageAvailability = result.gpuExecution?.stageAvailability || {};
     const cpuFallbackReasons = Object.fromEntries(Object.entries(stageReceipts).filter(([, receipt]) => receipt?.status === 'fallback' || receipt?.status === 'cpu-oracle' || receipt?.status === 'not-used').map(([name, receipt]) => [name, receipt?.reason || (receipt?.status === 'cpu-oracle' ? 'not-executed' : stageAvailability[name]?.reason || stageAvailability[name]?.status || receipt?.status || 'unknown')]));
