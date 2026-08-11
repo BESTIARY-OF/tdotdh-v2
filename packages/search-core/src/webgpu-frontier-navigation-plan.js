@@ -63,17 +63,17 @@ struct Params { recordCount: u32, handleCount: u32, planCount: u32, reserved0: u
 
 fn handleFor(recordIndex: u32) -> u32 {
   for (var handle: u32 = 0u; handle < params.handleCount; handle = handle + 1u) {
-    let meta = handle * ${FRONTIER_NAVIGATION_RESIDENT_META_STRIDE}u;
-    if (recordIndex >= handleMeta[meta] && recordIndex < handleMeta[meta] + handleMeta[meta + 1u]) { return handle; }
+    let handleBase = handle * ${FRONTIER_NAVIGATION_RESIDENT_META_STRIDE}u;
+    if (recordIndex >= handleMeta[handleBase] && recordIndex < handleMeta[handleBase] + handleMeta[handleBase + 1u]) { return handle; }
   }
   return 0xffffffffu;
 }
 
 fn planFor(handle: u32, recordIndex: u32) -> u32 {
-  let meta = handle * ${FRONTIER_NAVIGATION_RESIDENT_META_STRIDE}u;
+  let handleBase = handle * ${FRONTIER_NAVIGATION_RESIDENT_META_STRIDE}u;
   let pieceId = u32(records[recordIndex * 5u]);
-  if (pieceId >= handleMeta[meta + 3u]) { return 0xffffffffu; }
-  return piecePlans[handleMeta[meta + 2u] + pieceId];
+  if (pieceId >= handleMeta[handleBase + 3u]) { return 0xffffffffu; }
+  return piecePlans[handleMeta[handleBase + 2u] + pieceId];
 }
 
 @compute @workgroup_size(${FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE})
@@ -383,9 +383,21 @@ function createPersistentGpuResidentNavigationRunner(device, shaderSource) {
         selectedReadback: device.createBuffer({ size: recordCountBytes, usage: usage.MAP_READ | usage.COPY_DST }),
       };
       const module = device.createShaderModule({ code: shaderSource });
-      const countPipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'countResident' } });
-      const selectPipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'selectResident' } });
-      const bindGroup = device.createBindGroup({ layout: countPipeline.getBindGroupLayout(0), entries: [0, 1, 2, 3, 4, 5, 6].map((binding, index) => ({ binding, resource: { buffer: [buffers.records, buffers.handleMeta, buffers.piecePlans, buffers.selected, buffers.params, buffers.validity, buffers.targetCounts][index] } })) });
+      const shaderStageCompute = globalThis.GPUShaderStage?.COMPUTE || 4;
+      const explicitLayout = typeof device.createBindGroupLayout === 'function' && typeof device.createPipelineLayout === 'function';
+      const residentBindGroupLayout = explicitLayout ? device.createBindGroupLayout({ entries: [
+        { binding: 0, visibility: shaderStageCompute, buffer: { type: 'read-only-storage' } },
+        { binding: 1, visibility: shaderStageCompute, buffer: { type: 'read-only-storage' } },
+        { binding: 2, visibility: shaderStageCompute, buffer: { type: 'read-only-storage' } },
+        { binding: 3, visibility: shaderStageCompute, buffer: { type: 'storage' } },
+        { binding: 4, visibility: shaderStageCompute, buffer: { type: 'uniform' } },
+        { binding: 5, visibility: shaderStageCompute, buffer: { type: 'read-only-storage' } },
+        { binding: 6, visibility: shaderStageCompute, buffer: { type: 'storage' } },
+      ] }) : null;
+      const pipelineLayout = explicitLayout ? device.createPipelineLayout({ bindGroupLayouts: [residentBindGroupLayout] }) : 'auto';
+      const countPipeline = device.createComputePipeline({ layout: pipelineLayout, compute: { module, entryPoint: 'countResident' } });
+      const selectPipeline = device.createComputePipeline({ layout: pipelineLayout, compute: { module, entryPoint: 'selectResident' } });
+      const bindGroup = device.createBindGroup({ layout: residentBindGroupLayout || countPipeline.getBindGroupLayout(0), entries: [0, 1, 2, 3, 4, 5, 6].map((binding, index) => ({ binding, resource: { buffer: [buffers.records, buffers.handleMeta, buffers.piecePlans, buffers.selected, buffers.params, buffers.validity, buffers.targetCounts][index] } })) });
       const previous = resources;
       resources = { buffers, countPipeline, selectPipeline, bindGroup, recordCapacity, handleCapacity, piecePlanCapacity, planTargetCapacity };
       dispose(previous);
@@ -486,7 +498,7 @@ export function createWebGpuFrontierNavigationScheduler({ gpu = globalThis.navig
           result = residentRunner ? await residentRunner.run(normalized, { signal, planCount }) : null;
         }
         const selected = result?.selectedRows instanceof Uint32Array ? result.selectedRows : Uint32Array.from(result?.selectedRows || []);
-        if (expected && (selected.length !== expectedResidentRows.length || JSON.stringify(Array.from(selected)) !== JSON.stringify(Array.from(expectedResidentRows)))) return Object.freeze({ ...expected, status: 'rejected', backend: 'cpu-oracle', selectedRows: expectedResidentRows, selectedCount: expectedResidentRows.length, reason: 'resident-navigation-oracle-parity-mismatch', rowCount, inputDigest });
+        if (expected && (selected.length !== expectedResidentRows.length || JSON.stringify(Array.from(selected)) !== JSON.stringify(Array.from(expectedResidentRows)))) return Object.freeze({ ...expected, status: 'rejected', backend: 'cpu-oracle', selectedRows: expectedResidentRows, selectedCount: expectedResidentRows.length, observedSelectedRows: Object.freeze(Array.from(selected).slice(0, 128)), reason: 'resident-navigation-oracle-parity-mismatch', rowCount, inputDigest });
         return Object.freeze({ ...(expected || { schema: WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA, rowCount, planCount: planCount || 0 }), status: 'completed', backend: 'webgpu', parity: expected ? 'verified' : 'deferred', rowCount, selectedCount: selected.length, selectedRows: selected, inputDigest, dispatch: result?.dispatch || 'webgpu-navigation-resident-records', ...(result?.persistent ? { persistent: true, dispatchCount: result.dispatchCount, bufferCapacity: result.bufferCapacity } : {}) });
       } catch (error) { residentRunner?.reset(); residentRunner = null; deviceCache.reset(); return Object.freeze({ ...(expected || { schema: WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA, rowCount, planCount: planCount || 0, selectedRows: new Uint32Array() }), status: error?.name === 'AbortError' ? 'cancelled' : 'fallback', backend: 'cpu-oracle', parity: expected ? 'oracle' : 'deferred', rowCount, inputDigest, selectedRows: expectedResidentRows || new Uint32Array(), selectedCount: expectedResidentRows?.length || 0, reason: error?.name === 'AbortError' ? 'navigation-cancelled' : `resident-navigation-failed:${error?.message || String(error)}` }); }
     },

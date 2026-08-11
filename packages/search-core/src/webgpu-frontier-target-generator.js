@@ -55,6 +55,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   var targetCount: u32 = 0u;
   var pieceCount: u32 = 0u;
   var candidateOffset: u32 = 0u;
+  var selectedBatchIndex: u32 = 0u;
   var minX: i32 = 0;
   var maxX: i32 = 0;
   var minY: i32 = 0;
@@ -66,6 +67,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let metadata = metas[batchIndex];
     if (!selected && id.x >= metadata.candidateOffset && id.x < metadata.candidateOffset + metadata.targetCount * metadata.pieceCount) {
       selected = true;
+      selectedBatchIndex = batchIndex;
       targetOffset = metadata.targetOffset;
       pieceOffset = metadata.pieceOffset;
       fieldMaskOffset = metadata.fieldMaskOffset;
@@ -109,7 +111,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   origins[id.x * 2u + 1u] = originY;
   validity[id.x] = select(0u, 1u, valid);
   let recordBase = id.x * ${FRONTIER_TARGET_RECORD_STRIDE}u;
-  records[recordBase] = i32(batchIndex);
+  records[recordBase] = i32(selectedBatchIndex);
   records[recordBase + 1u] = i32(targetIndex);
   records[recordBase + 2u] = originX;
   records[recordBase + 3u] = originY;
