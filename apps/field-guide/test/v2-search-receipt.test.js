@@ -137,6 +137,22 @@ const result = await search(pieces, [], { ...sharedOptions, frontierGenerator })
 const targetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator, frontierCandidateRecords });
 const flatTargetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator, frontierCandidateRecords, navigationScheduler: flatNavigationScheduler });
 const fallbackTargetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator: fallbackTargetGenerator, navigationScheduler: fallbackFlatNavigationScheduler });
+let targetFallbackGeneratorCalls = 0;
+const targetFallbackGenerator = {
+  ...frontierGenerator,
+  generateBatch: async inputs => {
+    targetFallbackGeneratorCalls += inputs.length;
+    return frontierGenerator.generateBatch(inputs);
+  },
+};
+const targetFallbackResult = await search(pieces, [], {
+  ...sharedOptions,
+  searchStrategy: 'depth',
+  targetFamily: 'F-NONEXISTENT',
+  targetSeed: '#99[0,0>0,0]',
+  frontierGenerator: targetFallbackGenerator,
+  frontierCompactor,
+});
 const targetPoolResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator, frontierTargetPool });
 const depthResult = await search(pieces, [], { ...sharedOptions, searchStrategy: 'depth', frontierCompactor });
 const breadthResult = await search(pieces, [], { ...sharedOptions, searchStrategy: 'breadth', frontierCompactor });
@@ -202,6 +218,9 @@ assert.deepEqual(flatTargetResult.metrics, result.metrics);
 assert.ok(fallbackFlatRecordCount > 0, 'target-generator fallback must preserve flat records for GPU navigation');
 assert.equal(fallbackTargetResult.frontierTargetGeneration.status, 'fallback');
 assert.equal(fallbackTargetResult.navigationPlan.status, 'used');
+assert.ok(targetFallbackGeneratorCalls > 0, 'failed family target must resume open GPU frontier generation');
+assert.equal(targetFallbackResult.frontierGeneration.status, 'used');
+assert.equal(targetFallbackResult.frontierGeneration.backend, 'test-frontier-generator');
 assert.equal(targetPoolResult.frontierTargetPool.status, 'used');
 assert.equal(targetPoolResult.frontierTargetPool.backend, 'test-frontier-target-pool');
 assert.equal(targetPoolResult.frontierTargetPool.batch, 'beam');

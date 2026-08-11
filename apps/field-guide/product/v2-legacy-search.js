@@ -967,7 +967,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   }
   const searchHints = Boolean(options.searchHints);
   const searchStrategy = options.searchStrategy || 'balanced';
-  const targetFamily = options.targetFamily || null;
+  let targetFamily = options.targetFamily || null;
   const targetSeed = options.targetSeed || null;
   const targetNeighborCount = options.targetNeighborCount == null || options.targetNeighborCount === '' ? null : (Number.isFinite(Number(options.targetNeighborCount)) ? Number(options.targetNeighborCount) : null);
   const quality = { coastBias: options.coastBias, gravityBias: options.gravityBias, inletBias: options.inletBias };
@@ -1010,16 +1010,21 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   };
   const restored = restoreCheckpoint(options.resumeCheckpoint);
   const seed = { placements: [seedPlacement], field: new Set(seedCells.map(c => key(c.x, c.y))), remaining: pieces.filter(p => p.id !== centroidId), bounds: fieldMetrics([seedPlacement], centroidId), hintMatches: 0 }, seedBranches = restored ? [] : searchStrategy === 'breadth' ? await lockedSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, centroidRing, positionLocks, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; }) : targetFamily ? await targetSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, targetSeed, positionLocks, random, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; }) : [];
+  if (!restored && targetFamily && (!targetSeed || !seedBranches.length)) targetFamily = null;
   let navigationPlanReceipt = { status: 'cpu-oracle', backend: 'cpu-oracle', parity: 'oracle', rowCount: 0, selectedCount: 0, planCount: 0 };
+  let lockedSearchNodes = 0;
   if (seedBranches.length) {
     const lockedResult = await searchLockedSeedBranches(pieces, seedBranches, knownFamilies, centroidId, targetNeighborCount, Boolean(targetFamily), knownSignatures, searchHints, positionPreferences, random, quality, candidatePrefilter, receipt => { prefilterReceipt = receipt; }, options.frontierValidator, frontierEvaluator, frontierGenerator, frontierGeneratorStatus, receipt => { frontierReceipt = receipt; }, receipt => { frontierGenerationReceipt = receipt; }, isCancelled, options.frontierMetrics, receipt => { frontierMetricsReceipt = receipt; }, options.frontierState, receipt => { frontierStateReceipt = receipt; }, frontierTopology, receipt => { frontierTopologyReceipt = receipt; }, fieldMetricsAdapter, frontierTargetPool, frontierTargetPoolStatus, receipt => { frontierTargetPoolReceipt = receipt; }, frontierNavigator, frontierCandidateRecords, navigationScheduler, receipt => { navigationPlanReceipt = receipt; }, navigationBatch);
-    return { ...lockedResult, prefilter: prefilterReceipt, frontier: frontierReceipt, navigationPlan: navigationPlanReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierRanker: frontierRankerReceipt, frontierScore: frontierScoreReceipt, frontierCompactor: frontierCompactorReceipt, frontierDedup: frontierDedupReceipt };
+    if (lockedResult?.placements || !targetFamily) return { ...lockedResult, prefilter: prefilterReceipt, frontier: frontierReceipt, navigationPlan: navigationPlanReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierRanker: frontierRankerReceipt, frontierScore: frontierScoreReceipt, frontierCompactor: frontierCompactorReceipt, frontierDedup: frontierDedupReceipt };
+    lockedSearchNodes = Number(lockedResult?.nodes) || 0;
+    targetFamily = null;
   }
   const beam = restored?.beam || [seed];
   const restoredNodeOffset = restored?.nodeOffset || 0;
-  let nodes = 0, fallback = null, bestHintResult = null, lastDepth = restored?.depth || 0;
+  const mainNodeStart = lockedSearchNodes;
+  let nodes = mainNodeStart, fallback = null, bestHintResult = null, lastDepth = restored?.depth || 0;
   const pieceCount = pieces.length;
-  for (let depth = restored?.depth || 0; depth < pieceCount - 1 && beam.length && nodes < NODE_LIMIT; depth++) {
+  for (let depth = restored?.depth || 0; depth < pieceCount - 1 && beam.length && nodes - mainNodeStart < NODE_LIMIT; depth++) {
     const cancelled = isCancelled();
     if (navigationCancellation) navigationCancellation(cancelled);
     if (cancelled) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierDedup: frontierDedupReceipt };
@@ -1031,7 +1036,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     const beamPlans = [];
     for (const state of beam) {
       if (isCancelled()) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierDedup: frontierDedupReceipt };
-      if (nodes >= NODE_LIMIT) break;
+      if (nodes - mainNodeStart >= NODE_LIMIT) break;
       beamPlans.push({ state });
     }
     const gpuTargetPools = await generateFrontierTargetPoolsAcrossBeam(beamPlans, frontierTargetPool, centroidId, receipt => { frontierTargetPoolReceipt = receipt; }, frontierTargetPoolStatus);
