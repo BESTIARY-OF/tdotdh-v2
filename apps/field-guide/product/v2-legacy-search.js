@@ -257,7 +257,9 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
   const residentNavigationEntries = [];
   let totalCandidateCount = 0, batches = 0, backend = 'compute-shader', fallbackReason = null, recordBackend = 'cpu-oracle', recordParity = 'oracle', recordInputCount = 0, recordOutputCount = 0, persistent = false, persistentDispatchCount = 0, persistentBufferCapacity = null, recordPersistent = false, recordDispatchCount = 0, recordBufferCapacity = null;
   for (const chunk of chunks) {
-    const result = await frontierTargetGenerator.generateBatch(chunk.inputs);
+    const result = !materializeCandidates && typeof frontierTargetGenerator.generateBatchResident === 'function'
+      ? await frontierTargetGenerator.generateBatchResident(chunk.inputs)
+      : await frontierTargetGenerator.generateBatch(chunk.inputs);
     if (result?.backend) backend = result.backend;
     if (result?.reason) fallbackReason = result.reason;
     if (result?.persistent) { persistent = true; persistentDispatchCount = result.dispatchCount; persistentBufferCapacity = result.bufferCapacity; }

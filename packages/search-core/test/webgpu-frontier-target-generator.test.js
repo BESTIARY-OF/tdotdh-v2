@@ -31,12 +31,12 @@ assert.deepEqual(batchReceipt.items[0].validity, single.validity);
   const previousBufferUsage = globalThis.GPUBufferUsage, previousMapMode = globalThis.GPUMapMode;
   globalThis.GPUBufferUsage = { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, MAP_READ: 16 };
   globalThis.GPUMapMode = { READ: 1 };
-  let createdBuffers = 0;
+  let createdBuffers = 0, mappedReads = 0;
   const fakeDevice = {
     queue: { writeBuffer() {}, submit() {}, async onSubmittedWorkDone() {} },
     createBuffer() {
       const index = ++createdBuffers;
-      return { destroy() {}, async mapAsync() {}, getMappedRange() {
+      return { destroy() {}, async mapAsync() { mappedReads += 1; }, getMappedRange() {
         if (index === 9) return Int32Array.from([1, 0, 0, 0, 0, 1, -1, 1]).buffer;
         if (index === 10) return Uint32Array.from([1, 0, 1, 1]).buffer;
         return Uint32Array.from([1, 0, 1, 1]).buffer;
@@ -61,6 +61,15 @@ assert.deepEqual(batchReceipt.items[0].validity, single.validity);
   assert.equal(firstPersistent.residentHandle.targetCellsBuffer != null, true);
   assert.equal(firstPersistent.residentHandle.itemMetadata[0].targetOffset, 0);
   assert.equal(secondPersistent.dispatchCount, 2);
+  const mappedBeforeResident = mappedReads;
+  const residentBatch = await persistentGenerator.generateBatchResident([{ pieceId: 'a', ...input }]);
+  assert.equal(residentBatch.backend, 'webgpu');
+  assert.equal(residentBatch.parity, 'deferred');
+  assert.equal(residentBatch.readback, 'deferred');
+  assert.equal(residentBatch.dispatchCount, 3);
+  assert.equal(residentBatch.residentHandle.recordCount, 4);
+  assert.deepEqual(residentBatch.items[0].validity, single.validity, 'resident mode retains the CPU oracle without GPU row readback');
+  assert.equal(mappedReads, mappedBeforeResident, 'resident target generation does not map intermediate GPU rows');
   assert.equal(createdBuffers, 10, 'persistent target generation reuses its ten GPU buffers');
   if (previousBufferUsage === undefined) delete globalThis.GPUBufferUsage; else globalThis.GPUBufferUsage = previousBufferUsage;
   if (previousMapMode === undefined) delete globalThis.GPUMapMode; else globalThis.GPUMapMode = previousMapMode;
