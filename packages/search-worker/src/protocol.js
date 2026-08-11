@@ -237,7 +237,7 @@ function protocolError(error, fallbackCode = "WORKER_EXECUTION_FAILED") {
 
 function compactReceipt(value) {
   if (!value || typeof value !== 'object') return null;
-  const keys = ['status', 'backend', 'parity', 'batch', 'persistent', 'resident', 'candidateCount', 'rowCount', 'selectedCount', 'finalCanonicalParity', 'canonicalSignature'];
+  const keys = ['status', 'backend', 'parity', 'reason', 'batch', 'persistent', 'resident', 'candidateCount', 'rowCount', 'selectedCount', 'finalCanonicalParity', 'canonicalSignature'];
   return Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]]));
 }
 
