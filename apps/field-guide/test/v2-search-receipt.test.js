@@ -136,6 +136,25 @@ const singleResult = await search(pieces, [], { ...sharedOptions, frontierGenera
 const result = await search(pieces, [], { ...sharedOptions, frontierGenerator });
 const targetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator, frontierCandidateRecords });
 const flatTargetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator, frontierCandidateRecords, navigationScheduler: flatNavigationScheduler });
+let residentNavigationSelectCalls = 0;
+const residentTargetGenerator = {
+  availability: async () => ({ status: 'available', backend: 'webgpu' }),
+  generateBatch: async inputs => {
+    const result = cpuGenerateFrontierTargetBatch(inputs);
+    return { ...result, status: 'completed', backend: 'test-frontier-target-generator', parity: 'verified', residentHandle: { schema: 'tdotdh.webgpu-frontier-target-records.v0', recordsBuffer: {}, validityBuffer: {}, recordCount: result.candidateCount, itemCount: inputs.length } };
+  },
+};
+const residentCandidateRecords = {
+  compact: async records => ({ ...cpuCompactFrontierCandidateRecords(records), status: 'completed', backend: 'test-frontier-candidate-records', parity: 'verified' }),
+  compactResident: async (_handle, { expectedRecords }) => ({ status: 'completed', backend: 'test-frontier-candidate-records', parity: 'verified', persistent: true, residentHandle: { schema: 'tdotdh.webgpu-frontier-candidate-records-resident.v0', recordsBuffer: {}, recordCount: expectedRecords.length }, records: expectedRecords, inputCount: expectedRecords.length, outputCount: expectedRecords.length }),
+};
+const residentNavigationScheduler = {
+  ...flatNavigationScheduler,
+  selectResidentCandidateRecords: async (entries, { expectedRows, planCount }) => { residentNavigationSelectCalls += 1; return { status: 'completed', backend: 'test-resident-navigation-webgpu', parity: 'verified', rowCount: expectedRows.length, selectedRows: expectedRows.map((_, index) => index), selectedCount: expectedRows.length, planCount, inputDigest: 'test-resident-navigation' }; },
+};
+const residentTargetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator: residentTargetGenerator, frontierCandidateRecords: residentCandidateRecords, navigationScheduler: residentNavigationScheduler });
+assert.ok(residentNavigationSelectCalls > 0);
+assert.equal(residentTargetResult.navigationPlan.inputRepresentation, 'gpu-resident-compacted-records');
 const fallbackTargetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator: fallbackTargetGenerator, navigationScheduler: fallbackFlatNavigationScheduler });
 let targetFallbackGeneratorCalls = 0;
 const targetFallbackGenerator = {

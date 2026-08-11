@@ -16,7 +16,7 @@ import { canonicalSignatureFromLabeledFrontierState } from '../../../packages/se
 import { DEFAULT_FRONTIER_GRID } from '../../../packages/search-core/src/webgpu-frontier-topology.js';
 import { MAX_FRONTIER_GENERATION_CANDIDATES } from '../../../packages/search-core/src/webgpu-frontier-generator.js';
 import { MAX_FRONTIER_TARGET_GENERATION_CANDIDATES } from '../../../packages/search-core/src/webgpu-frontier-target-generator.js?v=20260811-resident2';
-import { createWebGpuFrontierNavigationScheduler, decodeWebGpuFrontierNavigationRow } from '../../../packages/search-core/src/webgpu-frontier-navigation-plan.js?v=20260811-lifecycle1';
+import { createWebGpuFrontierNavigationScheduler, decodeWebGpuFrontierNavigationRow } from '../../../packages/search-core/src/webgpu-frontier-navigation-plan.js?v=20260811-resident1';
 
 function key(x, y) { return `${x},${y}`; }
 function adjacent(p) { return [{ x: p.x + 1, y: p.y }, { x: p.x - 1, y: p.y }, { x: p.x, y: p.y + 1 }, { x: p.x, y: p.y - 1 }]; }
@@ -254,6 +254,7 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
     else chunks.push({ inputs: [...group.inputs], refs: [...group.refs], candidateCount: group.candidateCount });
   }
   const items = [];
+  const residentNavigationEntries = [];
   let totalCandidateCount = 0, batches = 0, backend = 'compute-shader', fallbackReason = null, recordBackend = 'cpu-oracle', recordParity = 'oracle', recordInputCount = 0, recordOutputCount = 0, persistent = false, persistentDispatchCount = 0, persistentBufferCapacity = null, recordPersistent = false, recordDispatchCount = 0, recordBufferCapacity = null;
   for (const chunk of chunks) {
     const result = await frontierTargetGenerator.generateBatch(chunk.inputs);
@@ -270,6 +271,13 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
         const compacted = await frontierCandidateRecords.compactResident(result.residentHandle, { expectedRecords });
         if (compacted.status === 'completed' && compacted.parity === 'verified') {
           recordBackend = compacted.backend || recordBackend; recordParity = compacted.parity || recordParity; recordPersistent = Boolean(compacted.persistent); recordDispatchCount = compacted.dispatchCount; recordBufferCapacity = compacted.bufferCapacity;
+          if (compacted.residentHandle) {
+            const expectedRows = (compacted.records || []).flatMap(record => {
+              const ref = chunk.refs[record.pieceId], target = ref?.plan.targetPool[record.targetOrdinal];
+              return ref && target ? [{ planIndex: ref.planIndex, targetOrdinal: record.targetOrdinal, pieceId: ref.piece.id, candidateIndex: record.inputOrdinal, originX: record.originX, originY: record.originY, targetX: target.x, targetY: target.y }] : [];
+            });
+            residentNavigationEntries.push({ residentHandle: compacted.residentHandle, piecePlans: chunk.refs.map(ref => ref.planIndex), expectedRows });
+          }
           residentRecordsByItem = new Map();
           for (const record of compacted.records || []) { const records = residentRecordsByItem.get(record.pieceId) || []; records.push(record); residentRecordsByItem.set(record.pieceId, records); }
         } else fallbackReason = compacted.reason || 'resident-record-compaction-fallback';
@@ -312,6 +320,7 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
   }
   const inputCount = planGroups.reduce((sum, group) => sum + group.inputs.length, 0);
   onGeneration({ status: items.length === inputCount ? 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? 'verified' : 'oracle', reason: items.length === inputCount ? undefined : (fallbackReason || 'frontier-generator-batch-fallback'), candidateCount: totalCandidateCount, batches, batch: 'beam', ...(persistent ? { persistent: true, dispatch: 'webgpu-frontier-target-resident', dispatchCount: persistentDispatchCount, bufferCapacity: persistentBufferCapacity } : {}), candidateRecords: { backend: recordBackend, parity: recordParity, inputCount: recordInputCount, outputCount: recordOutputCount, ...(recordPersistent ? { persistent: true, dispatch: 'webgpu-frontier-record-compaction-resident', dispatchCount: recordDispatchCount, bufferCapacity: recordBufferCapacity } : {}) } });
+  generated.residentNavigation = residentNavigationEntries;
   return generated;
 }
 async function generateFrontierTargetPoolsAcrossBeam(plans, frontierTargetPool, centroidId, onTargetPool = () => {}, availabilityStatus = null) {
@@ -1106,9 +1115,12 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       }
     } else {
       const navigationRows = [], navigationRefs = [], targetPlanEntries = [], targetPieces = new Map();
+      const residentNavigationEntries = generatedByTargetBeam?.residentNavigation || [], residentNavigationExpectedRows = residentNavigationEntries.flatMap(entry => entry.expectedRows || []);
       const useFlatTargetPlan = useTargetGeneratedFrontier && typeof navigationScheduler.selectCandidateRecords === 'function';
+      const useResidentNavigation = useTargetGeneratedFrontier && typeof navigationScheduler.selectResidentCandidateRecords === 'function' && residentNavigationEntries.length > 0 && residentNavigationExpectedRows.length > 0;
       for (const [planIndex, plan] of beamPlans.entries()) {
         const state = plan.state, generatedByPiece = generatedByBeam?.[planIndex] || null, generatedByTarget = generatedByTargetBeam?.[planIndex] || null;
+        if (useResidentNavigation) continue;
         if (useFlatTargetPlan) {
           targetPlanEntries.push({ planIndex, records: generatedByTarget?.records || [], targetPool: plan.targetPool });
           targetPieces.set(planIndex, new Map(state.remaining.map(piece => [piece.id, piece])));
@@ -1140,12 +1152,22 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
           }
         }
       }
-      const navigationPlan = useFlatTargetPlan
+      const navigationPlan = useResidentNavigation
+        ? await navigationScheduler.selectResidentCandidateRecords(residentNavigationEntries, { planCount: beamPlans.length, expectedRows: residentNavigationExpectedRows })
+        : useFlatTargetPlan
         ? await navigationScheduler.selectCandidateRecords(targetPlanEntries, { planCount: beamPlans.length })
         : await navigationScheduler.select(navigationRows, { planCount: beamPlans.length });
-      navigationPlanReceipt = { status: navigationPlan.rowCount === 0 ? 'not-used' : navigationPlan.status === 'completed' && navigationPlan.backend === 'webgpu' && navigationPlan.parity === 'verified' ? 'used' : navigationPlan.status, backend: navigationPlan.backend, parity: navigationPlan.parity, rowCount: navigationPlan.rowCount, selectedCount: navigationPlan.selectedCount, planCount: navigationPlan.planCount, inputDigest: navigationPlan.inputDigest, inputRepresentation: useFlatTargetPlan ? 'gpu-flat-target-records' : useTargetGeneratedFrontier ? 'flat-target-records' : 'materialized-candidates', ...(navigationPlan.rowCount === 0 ? { reason: 'no-navigation-candidates' } : navigationPlan.reason ? { reason: navigationPlan.reason } : {}), ...(navigationPlan.dispatch ? { dispatch: navigationPlan.dispatch } : {}), ...(navigationPlan.persistent ? { persistent: true, bufferCapacity: navigationPlan.bufferCapacity, dispatchCount: navigationPlan.dispatchCount } : {}) };
+      navigationPlanReceipt = { status: navigationPlan.rowCount === 0 ? 'not-used' : navigationPlan.status === 'completed' && navigationPlan.backend === 'webgpu' && navigationPlan.parity === 'verified' ? 'used' : navigationPlan.status, backend: navigationPlan.backend, parity: navigationPlan.parity, rowCount: navigationPlan.rowCount, selectedCount: navigationPlan.selectedCount, planCount: navigationPlan.planCount, inputDigest: navigationPlan.inputDigest, inputRepresentation: useResidentNavigation ? 'gpu-resident-compacted-records' : useFlatTargetPlan ? 'gpu-flat-target-records' : useTargetGeneratedFrontier ? 'flat-target-records' : 'materialized-candidates', ...(useResidentNavigation ? { resident: true } : {}), ...(navigationPlan.rowCount === 0 ? { reason: 'no-navigation-candidates' } : navigationPlan.reason ? { reason: navigationPlan.reason } : {}), ...(navigationPlan.dispatch ? { dispatch: navigationPlan.dispatch } : {}), ...(navigationPlan.persistent ? { persistent: true, bufferCapacity: navigationPlan.bufferCapacity, dispatchCount: navigationPlan.dispatchCount } : {}) };
       const selectedByPlan = new Map();
       for (const rowIndex of navigationPlan.selectedRows || []) {
+        if (useResidentNavigation) {
+          const row = residentNavigationExpectedRows[rowIndex], piece = beamPlans[row?.planIndex]?.state.remaining.find(candidate => candidate.id === row.pieceId);
+          if (!row || !piece) continue;
+          const entries = selectedByPlan.get(row.planIndex) || [];
+          entries.push({ piece, candidate: { id: piece.id, origin: { x: row.originX, y: row.originY }, cells: placedCells(piece, { x: row.originX, y: row.originY }) } });
+          selectedByPlan.set(row.planIndex, entries);
+          continue;
+        }
         if (useFlatTargetPlan) {
           const row = decodeWebGpuFrontierNavigationRow(navigationPlan.plan, rowIndex), piece = targetPieces.get(row.planIndex)?.get(row.pieceId);
           if (!piece) continue;

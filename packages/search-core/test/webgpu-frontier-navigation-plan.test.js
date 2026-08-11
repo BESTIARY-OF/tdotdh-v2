@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createWebGpuFrontierNavigationPlan, createWebGpuFrontierNavigationPlanFromCandidateRecords, createWebGpuFrontierNavigationScheduler, cpuSelectFrontierNavigationRows, decodeWebGpuFrontierNavigationRow, FRONTIER_NAVIGATION_GROUP_STRIDE, FRONTIER_NAVIGATION_PLAN_SHADER, WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA } from '../src/webgpu-frontier-navigation-plan.js';
+import { createWebGpuFrontierNavigationPlan, createWebGpuFrontierNavigationPlanFromCandidateRecords, createWebGpuFrontierNavigationScheduler, cpuSelectFrontierNavigationRows, decodeWebGpuFrontierNavigationRow, FRONTIER_NAVIGATION_GROUP_STRIDE, FRONTIER_NAVIGATION_PLAN_SHADER, FRONTIER_NAVIGATION_RESIDENT_SHADER, WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA } from '../src/webgpu-frontier-navigation-plan.js';
 
 const rows = [
   { planIndex: 0, targetOrdinal: 1, pieceId: 4, candidateIndex: 0, originX: 2, originY: 3, targetX: 2, targetY: 4 },
@@ -17,6 +17,7 @@ assert.ok(plan.groupIndices instanceof Uint32Array);
 assert.ok(plan.groupValues instanceof Uint32Array);
 assert.match(FRONTIER_NAVIGATION_PLAN_SHADER, /fn choose/);
 assert.match(FRONTIER_NAVIGATION_PLAN_SHADER, /fn select/);
+assert.match(FRONTIER_NAVIGATION_RESIDENT_SHADER, /fn selectResident/);
 assert.ok(plan.values instanceof Int32Array);
 assert.deepEqual(decodeWebGpuFrontierNavigationRow(plan, 2), rows[2]);
 const oracle = cpuSelectFrontierNavigationRows(plan, { planCount: 2 });
@@ -52,6 +53,14 @@ assert.equal(flatReceipt.backend, 'webgpu');
 assert.equal(flatReceipt.parity, 'verified');
 assert.equal(flatReceipt.dispatch, 'fake-flat-record-dispatch');
 assert.equal(flatReceipt.plan.rowCount, 2);
+const residentScheduler = createWebGpuFrontierNavigationScheduler({ accelerator: async ({ oracle: expected }) => ({ status: 'completed', selectedRows: expected.selectedRows, dispatch: 'fake-resident-record-dispatch' }) });
+const residentReceipt = await residentScheduler.selectResidentCandidateRecords([
+  { residentHandle: { schema: 'tdotdh.webgpu-frontier-candidate-records-resident.v0', recordCount: rows.length, recordsBuffer: {} }, piecePlans: [0, 0, 0, 0, 0, 0, 0, 1] },
+], { planCount: 2, expectedRows: rows });
+assert.equal(residentReceipt.backend, 'webgpu');
+assert.equal(residentReceipt.parity, 'verified');
+assert.equal(residentReceipt.dispatch, 'fake-resident-record-dispatch');
+assert.deepEqual(Array.from(residentReceipt.selectedRows), [2, 3]);
 
 {
   const previousBufferUsage = globalThis.GPUBufferUsage, previousMapMode = globalThis.GPUMapMode;
