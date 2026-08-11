@@ -21,6 +21,8 @@ assert.ok(plan.values instanceof Int32Array);
 assert.deepEqual(decodeWebGpuFrontierNavigationRow(plan, 2), rows[2]);
 const oracle = cpuSelectFrontierNavigationRows(plan, { planCount: 2 });
 assert.deepEqual(Array.from(oracle.selectedRows), [2, 3]);
+assert.equal(oracle.recordProtocol, 'tdotdh.webgpu-frontier-record-navigation.v0');
+assert.match(oracle.recordInputDigest, /^fnv1a32-[0-9a-f]{8}$/);
 const scheduler = createWebGpuFrontierNavigationScheduler({ accelerator: async ({ oracle: expected }) => ({ status: 'completed', selectedRows: expected.selectedRows, dispatch: 'fake-navigation-dispatch' }) });
 const verified = await scheduler.select(rows, { planCount: 2 });
 assert.equal(verified.backend, 'webgpu');
@@ -40,6 +42,7 @@ const flat = createWebGpuFrontierNavigationPlanFromCandidateRecords([
 assert.equal(flat.rowCount, 4);
 assert.deepEqual(decodeWebGpuFrontierNavigationRow(flat, 0), { planIndex: 0, targetOrdinal: 1, pieceId: 4, candidateIndex: 0, originX: 2, originY: 3, targetX: 2, targetY: 4 });
 assert.deepEqual(Array.from(cpuSelectFrontierNavigationRows(flat, { planCount: 2 }).selectedRows), [2, 3]);
+assert.equal(cpuSelectFrontierNavigationRows(flat, { planCount: 2 }).recordProtocol, 'tdotdh.webgpu-frontier-record-navigation.v0');
 const flatScheduler = createWebGpuFrontierNavigationScheduler({ accelerator: async ({ oracle: expected }) => ({ status: 'completed', selectedRows: expected.selectedRows, dispatch: 'fake-flat-record-dispatch' }) });
 const flatReceipt = await flatScheduler.selectCandidateRecords([
   { planIndex: 0, records: [{ pieceId: 4, targetOrdinal: 0, originX: 1, originY: 3, inputOrdinal: 2 }], targetPool: [{ x: 1, y: 4 }] },

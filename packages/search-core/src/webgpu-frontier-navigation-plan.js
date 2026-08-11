@@ -1,5 +1,6 @@
 import { probeWebGpuCapabilities } from './webgpu-capability-probe.js';
 import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
+import { cpuSelectFrontierRecords } from './webgpu-frontier-record-navigation.js';
 
 export const WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA = 'tdotdh.webgpu-frontier-navigation-plan.v0';
 export const FRONTIER_NAVIGATION_PLAN_STRIDE = 8;
@@ -162,21 +163,16 @@ export function cpuSelectFrontierNavigationRows(plan, { planCount = null } = {})
   let inferredPlanCount = 0;
   for (let index = 0; index < plan.rowCount; index += 1) inferredPlanCount = Math.max(inferredPlanCount, rowAt(plan, index).planIndex + 1);
   const count = planCount == null ? inferredPlanCount : uint(planCount, 'planCount', 0);
-  const groups = new Map();
+  const records = [];
   for (let index = 0; index < plan.rowCount; index += 1) {
     const row = rowAt(plan, index);
     if (row.planIndex >= count) throw new RangeError(`navigation row ${index} exceeds planCount`);
-    const groupKey = `${row.planIndex}:${row.targetOrdinal}`, group = groups.get(groupKey) || { planIndex: row.planIndex, targetOrdinal: row.targetOrdinal, rows: [] };
-    group.rows.push(index); groups.set(groupKey, group);
+    records.push({ planIndex: row.planIndex, targetOrdinal: row.targetOrdinal, pieceId: row.pieceId, originX: row.originX, originY: row.originY, inputOrdinal: index });
   }
-  const winners = new Map();
-  for (const group of groups.values()) {
-    const current = winners.get(group.planIndex);
-    if (!current || group.rows.length < current.rows.length || (group.rows.length === current.rows.length && group.targetOrdinal < current.targetOrdinal)) winners.set(group.planIndex, group);
-  }
-  const selectedRows = [];
-  for (let planIndex = 0; planIndex < count; planIndex += 1) selectedRows.push(...(winners.get(planIndex)?.rows || []));
-  return Object.freeze({ schema: WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA, status: 'completed', backend: 'cpu-oracle', parity: 'oracle', rowCount: plan.rowCount, selectedCount: selectedRows.length, selectedRows: Uint32Array.from(selectedRows), planCount: count, groupCount: groups.size, inputDigest: plan.inputDigest });
+  const recordOracle = cpuSelectFrontierRecords(records);
+  const selectedRows = recordOracle.selectedInputIndices;
+  const groupCount = new Set(records.map(record => `${record.planIndex}:${record.targetOrdinal}`)).size;
+  return Object.freeze({ schema: WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA, status: 'completed', backend: 'cpu-oracle', parity: 'oracle', rowCount: plan.rowCount, selectedCount: selectedRows.length, selectedRows: Uint32Array.from(selectedRows), planCount: count, groupCount, inputDigest: plan.inputDigest, recordInputDigest: recordOracle.inputDigest, recordProtocol: recordOracle.protocol });
 }
 
 async function runGpu(device, plan, planCount, shaderSource) {
