@@ -76,6 +76,11 @@ assert.equal(flatReceipt.plan.rowCount, 2);
   assert.equal(firstPersistent.dispatchCount, 1);
   assert.equal(secondPersistent.dispatchCount, 2);
   assert.equal(createdBuffers, 7, 'persistent navigation reuses its seven GPU buffers');
+  const cancelledController = new AbortController();
+  cancelledController.abort();
+  const cancelled = await persistentScheduler.select(rows, { planCount: 2, signal: cancelledController.signal });
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(cancelled.reason, 'navigation-cancelled');
   if (previousBufferUsage === undefined) delete globalThis.GPUBufferUsage; else globalThis.GPUBufferUsage = previousBufferUsage;
   if (previousMapMode === undefined) delete globalThis.GPUMapMode; else globalThis.GPUMapMode = previousMapMode;
 }

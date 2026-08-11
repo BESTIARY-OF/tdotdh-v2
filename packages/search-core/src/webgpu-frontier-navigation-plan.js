@@ -210,48 +210,65 @@ function nextCapacity(required) {
   return capacity;
 }
 
+function abortError() {
+  const error = new Error('webgpu-navigation-cancelled');
+  error.name = 'AbortError';
+  return error;
+}
+
+function assertNotAborted(signal) {
+  if (signal?.aborted) throw abortError();
+}
+
 function createPersistentGpuNavigationRunner(device, shaderSource) {
   const usage = globalThis.GPUBufferUsage, mapMode = globalThis.GPUMapMode;
-  let resources = null, dispatchCount = 0;
-  const destroy = () => {
-    if (!resources) return;
-    for (const buffer of Object.values(resources.buffers)) buffer.destroy();
-    resources = null;
-  };
+  let resources = null, dispatchCount = 0, generation = 0, lost = false, queue = Promise.resolve();
+  const dispose = bundle => { if (bundle) for (const buffer of Object.values(bundle.buffers)) buffer.destroy(); };
+  const destroy = () => { dispose(resources); resources = null; };
+  if (device?.lost && typeof device.lost.then === 'function') device.lost.then(() => { lost = true; destroy(); }).catch(() => { lost = true; destroy(); });
   const ensure = (rowCount, planCount, groupCount) => {
     const rowCapacity = nextCapacity(Math.max(1, rowCount)), planCapacity = nextCapacity(Math.max(1, planCount)), groupCapacity = nextCapacity(Math.max(1, groupCount));
     if (resources && resources.rowCapacity >= rowCapacity && resources.planCapacity >= planCapacity && resources.groupCapacity >= groupCapacity) return resources;
-    destroy();
     const rowBytes = rowCapacity * FRONTIER_NAVIGATION_PLAN_STRIDE * 4, rowCountBytes = rowCapacity * 4, groupBytes = groupCapacity * FRONTIER_NAVIGATION_GROUP_STRIDE * 4, planCountBytes = planCapacity * 4;
-    const buffers = {
-      rows: device.createBuffer({ size: rowBytes, usage: usage.STORAGE | usage.COPY_DST }),
-      rowGroups: device.createBuffer({ size: rowCountBytes, usage: usage.STORAGE | usage.COPY_DST }),
-      groups: device.createBuffer({ size: groupBytes, usage: usage.STORAGE | usage.COPY_DST }),
-      bestGroups: device.createBuffer({ size: planCountBytes, usage: usage.STORAGE }),
-      selected: device.createBuffer({ size: rowCountBytes, usage: usage.STORAGE | usage.COPY_SRC }),
-      params: device.createBuffer({ size: 16, usage: usage.UNIFORM | usage.COPY_DST }),
-      selectedReadback: device.createBuffer({ size: rowCountBytes, usage: usage.MAP_READ | usage.COPY_DST }),
-    };
-    const module = device.createShaderModule({ code: shaderSource });
-    const choosePipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'choose' } });
-    const chooseGroup = device.createBindGroup({ layout: choosePipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.rows } }, { binding: 1, resource: { buffer: buffers.rowGroups } }, { binding: 2, resource: { buffer: buffers.groups } }, { binding: 3, resource: { buffer: buffers.bestGroups } }, { binding: 4, resource: { buffer: buffers.params } }] });
-    const selectPipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'select' } });
-    const selectGroup = device.createBindGroup({ layout: selectPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.rows } }, { binding: 1, resource: { buffer: buffers.rowGroups } }, { binding: 2, resource: { buffer: buffers.bestGroups } }, { binding: 3, resource: { buffer: buffers.selected } }, { binding: 4, resource: { buffer: buffers.params } }] });
-    resources = { buffers, choosePipeline, chooseGroup, selectPipeline, selectGroup, rowCapacity, planCapacity, groupCapacity };
+    let buffers = null;
+    try {
+      buffers = {
+        rows: device.createBuffer({ size: rowBytes, usage: usage.STORAGE | usage.COPY_DST }),
+        rowGroups: device.createBuffer({ size: rowCountBytes, usage: usage.STORAGE | usage.COPY_DST }),
+        groups: device.createBuffer({ size: groupBytes, usage: usage.STORAGE | usage.COPY_DST }),
+        bestGroups: device.createBuffer({ size: planCountBytes, usage: usage.STORAGE }),
+        selected: device.createBuffer({ size: rowCountBytes, usage: usage.STORAGE | usage.COPY_SRC }),
+        params: device.createBuffer({ size: 16, usage: usage.UNIFORM | usage.COPY_DST }),
+        selectedReadback: device.createBuffer({ size: rowCountBytes, usage: usage.MAP_READ | usage.COPY_DST }),
+      };
+      const module = device.createShaderModule({ code: shaderSource });
+      const choosePipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'choose' } });
+      const chooseGroup = device.createBindGroup({ layout: choosePipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.rows } }, { binding: 1, resource: { buffer: buffers.rowGroups } }, { binding: 2, resource: { buffer: buffers.groups } }, { binding: 3, resource: { buffer: buffers.bestGroups } }, { binding: 4, resource: { buffer: buffers.params } }] });
+      const selectPipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'select' } });
+      const selectGroup = device.createBindGroup({ layout: selectPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.rows } }, { binding: 1, resource: { buffer: buffers.rowGroups } }, { binding: 2, resource: { buffer: buffers.bestGroups } }, { binding: 3, resource: { buffer: buffers.selected } }, { binding: 4, resource: { buffer: buffers.params } }] });
+      const previous = resources;
+      resources = { buffers, choosePipeline, chooseGroup, selectPipeline, selectGroup, rowCapacity, planCapacity, groupCapacity };
+      dispose(previous);
+    } catch (error) { dispose({ buffers }); throw error; }
     return resources;
   };
+  async function runExclusive(plan, planCount, signal) {
+    assertNotAborted(signal);
+    if (lost) throw new Error('webgpu-device-lost');
+    const current = ensure(plan.rowCount, planCount, plan.groupCount), { buffers } = current, rowCountBytes = Math.max(4, plan.rowCount * 4), runGeneration = ++generation;
+    device.queue.writeBuffer(buffers.rows, 0, plan.values); device.queue.writeBuffer(buffers.rowGroups, 0, plan.groupIndices); device.queue.writeBuffer(buffers.groups, 0, plan.groupValues); device.queue.writeBuffer(buffers.params, 0, new Uint32Array([plan.rowCount, planCount, plan.groupCount, 0]));
+    assertNotAborted(signal);
+    const encoder = device.createCommandEncoder(), choosePass = encoder.beginComputePass();
+    choosePass.setPipeline(current.choosePipeline); choosePass.setBindGroup(0, current.chooseGroup); choosePass.dispatchWorkgroups(Math.ceil(planCount / FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE)); choosePass.end();
+    const selectPass = encoder.beginComputePass(); selectPass.setPipeline(current.selectPipeline); selectPass.setBindGroup(0, current.selectGroup); selectPass.dispatchWorkgroups(Math.ceil(plan.rowCount / FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE)); selectPass.end();
+    encoder.copyBufferToBuffer(buffers.selected, 0, buffers.selectedReadback, 0, rowCountBytes); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone(); assertNotAborted(signal); if (lost) throw new Error('webgpu-device-lost');
+    await buffers.selectedReadback.mapAsync(mapMode.READ); assertNotAborted(signal); const selectedValues = new Uint32Array(buffers.selectedReadback.getMappedRange().slice(0, rowCountBytes)); buffers.selectedReadback.unmap(); if (runGeneration !== generation) throw new Error('webgpu-navigation-generation-mismatch');
+    dispatchCount += 1;
+    return { selectedRows: Array.from(selectedValues).flatMap((value, index) => value ? [index] : []), inputDigest: plan.inputDigest, generation: runGeneration, dispatch: 'webgpu-navigation-plan-resident', persistent: true, dispatchCount, bufferCapacity: { rows: current.rowCapacity, plans: current.planCapacity, groups: current.groupCapacity } };
+  }
   return Object.freeze({
     reset: destroy,
-    async run(plan, planCount) {
-      const current = ensure(plan.rowCount, planCount, plan.groupCount), { buffers } = current, rowCountBytes = Math.max(4, plan.rowCount * 4);
-      device.queue.writeBuffer(buffers.rows, 0, plan.values); device.queue.writeBuffer(buffers.rowGroups, 0, plan.groupIndices); device.queue.writeBuffer(buffers.groups, 0, plan.groupValues); device.queue.writeBuffer(buffers.params, 0, new Uint32Array([plan.rowCount, planCount, plan.groupCount, 0]));
-      const encoder = device.createCommandEncoder(), choosePass = encoder.beginComputePass();
-      choosePass.setPipeline(current.choosePipeline); choosePass.setBindGroup(0, current.chooseGroup); choosePass.dispatchWorkgroups(Math.ceil(planCount / FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE)); choosePass.end();
-      const selectPass = encoder.beginComputePass(); selectPass.setPipeline(current.selectPipeline); selectPass.setBindGroup(0, current.selectGroup); selectPass.dispatchWorkgroups(Math.ceil(plan.rowCount / FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE)); selectPass.end();
-      encoder.copyBufferToBuffer(buffers.selected, 0, buffers.selectedReadback, 0, rowCountBytes); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
-      await buffers.selectedReadback.mapAsync(mapMode.READ); const selectedValues = new Uint32Array(buffers.selectedReadback.getMappedRange().slice(0, rowCountBytes)); buffers.selectedReadback.unmap(); dispatchCount += 1;
-      return { selectedRows: Array.from(selectedValues).flatMap((value, index) => value ? [index] : []), dispatch: 'webgpu-navigation-plan-resident', persistent: true, dispatchCount, bufferCapacity: { rows: current.rowCapacity, plans: current.planCapacity, groups: current.groupCapacity } };
-    },
+    run(plan, planCount, { signal } = {}) { const task = queue.then(() => runExclusive(plan, planCount, signal)); queue = task.catch(() => {}); return task; },
   });
 }
 
@@ -270,20 +287,22 @@ export function createWebGpuFrontierNavigationScheduler({ gpu = globalThis.navig
         if (status.status !== 'available') return Object.freeze({ ...oracle, status: 'fallback', backend: 'cpu-oracle', reason: status.reason });
       }
       try {
+        assertNotAborted(options.signal);
         let result;
         if (typeof accelerator === 'function') result = await accelerator({ plan, oracle });
         else {
           const device = await deviceCache.getDevice();
           if (persistent && !persistentRunner) persistentRunner = createPersistentGpuNavigationRunner(device, shaderSource);
-          result = persistentRunner ? { status: 'completed', ...await persistentRunner.run(plan, oracle.planCount) } : { status: 'completed', selectedRows: await runGpu(device, plan, oracle.planCount, shaderSource), dispatch: 'webgpu-navigation-plan' };
+          result = persistentRunner ? { status: 'completed', ...await persistentRunner.run(plan, oracle.planCount, options) } : { status: 'completed', selectedRows: await runGpu(device, plan, oracle.planCount, shaderSource), inputDigest: plan.inputDigest, dispatch: 'webgpu-navigation-plan' };
         }
         const selected = result?.selectedRows instanceof Uint32Array ? result.selectedRows : Uint32Array.from(result?.selectedRows || []);
+        if (result?.inputDigest && result.inputDigest !== plan.inputDigest) return Object.freeze({ ...oracle, status: 'rejected', backend: 'cpu-oracle', reason: 'navigation-input-digest-mismatch' });
         if (result?.status !== 'completed' || selected.length !== oracle.selectedRows.length || JSON.stringify(Array.from(selected)) !== JSON.stringify(Array.from(oracle.selectedRows))) return Object.freeze({ ...oracle, status: 'rejected', backend: 'cpu-oracle', reason: 'navigation-oracle-parity-mismatch' });
         return Object.freeze({ ...oracle, status: 'completed', backend: 'webgpu', parity: 'verified', selectedRows: selected, dispatch: result.dispatch || 'navigation-plan', ...(result.persistent ? { persistent: true, bufferCapacity: result.bufferCapacity, dispatchCount: result.dispatchCount } : {}) });
       } catch (error) {
         persistentRunner?.reset(); persistentRunner = null;
         deviceCache.reset();
-        return Object.freeze({ ...oracle, status: 'fallback', backend: 'cpu-oracle', reason: `navigation-accelerator-failed:${error?.message || String(error)}` });
+        return Object.freeze({ ...oracle, status: error?.name === 'AbortError' ? 'cancelled' : 'fallback', backend: 'cpu-oracle', reason: error?.name === 'AbortError' ? 'navigation-cancelled' : `navigation-accelerator-failed:${error?.message || String(error)}` });
       }
   }
   return Object.freeze({

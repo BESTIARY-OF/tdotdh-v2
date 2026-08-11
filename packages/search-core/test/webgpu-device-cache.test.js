@@ -21,4 +21,14 @@ assert.equal(deviceRequests, 2);
 const limitedGpu = { requestAdapter: async () => ({ requestDevice: async options => ({ options }) }) };
 const limited = createWebGpuDeviceCache({ gpu: limitedGpu, requiredLimits: { maxStorageBuffersPerShaderStage: 14 } });
 assert.deepEqual((await limited.getDevice()).options, { requiredLimits: { maxStorageBuffersPerShaderStage: 14 } });
+
+let loseDevice;
+let lostRequests = 0;
+const lossAware = createWebGpuDeviceCache({ gpu: { requestAdapter: async () => ({ requestDevice: async () => { lostRequests += 1; if (lostRequests === 1) return { id: 'lossy', lost: new Promise(resolve => { loseDevice = resolve; }) }; return { id: 'replacement' }; } }) } });
+const lossy = await lossAware.getDevice();
+assert.equal(lossy.id, 'lossy');
+loseDevice();
+await Promise.resolve();
+await Promise.resolve();
+assert.equal((await lossAware.getDevice()).id, 'replacement', 'device loss invalidates the cached device');
 console.log('WebGPU device cache tests passed');
