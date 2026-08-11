@@ -26,6 +26,10 @@ assert.deepEqual(receipt.validity, single.validity);
 const batchReceipt = await adapter.generateBatch([{ pieceId: 'a', ...input }]);
 assert.equal(batchReceipt.status, 'unavailable');
 assert.deepEqual(batchReceipt.items[0].validity, single.validity);
+const residentFallback = await adapter.generateBatchResident([{ pieceId: 'a', ...input }]);
+assert.equal(residentFallback.status, 'unavailable');
+assert.equal(residentFallback.readback, 'cpu-fallback');
+assert.deepEqual(residentFallback.items[0].validity, single.validity);
 
 {
   const previousBufferUsage = globalThis.GPUBufferUsage, previousMapMode = globalThis.GPUMapMode;
