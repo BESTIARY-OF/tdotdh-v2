@@ -13,13 +13,14 @@ const previousBufferUsage = globalThis.GPUBufferUsage, previousMapMode = globalT
 globalThis.GPUBufferUsage = { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, MAP_READ: 16 };
 globalThis.GPUMapMode = { READ: 1 };
 let createdBuffers = 0;
+const digestReadback = cpu.absoluteHashes.flatMap((value, index) => [value, cpu.canonicalHashes[index]]);
 const seedParentWrites = [];
 const fakeAdapter = { limits: { maxStorageBufferBindingSize: 64 * 1024 * 1024, maxStorageBuffersPerShaderStage: 16 }, async requestDevice() { return {
   limits: { maxStorageBufferBindingSize: 64 * 1024 * 1024, maxStorageBuffersPerShaderStage: 16 },
   queue: { writeBuffer(buffer, offset, data) { if (buffer?.kind === 'seedParents') seedParentWrites.push({ offset, bytes: data.byteLength }); }, submit() {}, async onSubmittedWorkDone() {} },
   createBuffer() {
     createdBuffers += 1;
-    const readbackKind = { 15: cpu.nextLabels, 16: cpu.canonicalLabels, 17: cpu.absoluteHashes, 18: cpu.canonicalHashes }[createdBuffers] || [];
+    const readbackKind = { 14: cpu.nextLabels, 15: cpu.canonicalLabels, 16: digestReadback }[createdBuffers] || [];
     return { kind: createdBuffers === 1 ? 'seedParents' : undefined, destroy() {}, async mapAsync() {}, getMappedRange() { return Uint32Array.from(readbackKind).buffer; }, unmap() {} };
   },
   createShaderModule() { return {}; },
@@ -63,7 +64,7 @@ try {
     parentStateIndices: [0],
   });
   assert.equal(seedParentWrites.length, 1, 'resident child must not re-upload its CPU parent labels');
-  assert.equal(createdBuffers, 18, 'resident pool must reuse its double-buffered allocation');
+  assert.equal(createdBuffers, 16, 'resident pool must reuse its double-buffered allocation');
   resident.commitLayer();
   resident.reset();
 } finally {

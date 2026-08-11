@@ -22,14 +22,13 @@ struct Params { candidateCount: u32, wordCount: u32, pieceCount: u32, width: u32
 @group(0) @binding(3) var<storage, read> remainingMasks: array<u32>;
 @group(0) @binding(4) var<storage, read_write> nextLabels: array<u32>;
 @group(0) @binding(5) var<storage, read_write> canonicalLabels: array<u32>;
-@group(0) @binding(6) var<storage, read_write> absoluteHashes: array<u32>;
-@group(0) @binding(7) var<storage, read_write> canonicalHashes: array<u32>;
-@group(0) @binding(8) var<storage, read> params: Params;
-@group(0) @binding(9) var<storage, read> residentParents: array<u32>;
-@group(0) @binding(10) var<storage, read_write> residentNext: array<u32>;
-@group(0) @binding(11) var<storage, read_write> residentCanonical: array<u32>;
-@group(0) @binding(12) var<storage, read> parentStateIndices: array<u32>;
-@group(0) @binding(13) var<storage, read> outputStateIndices: array<u32>;
+@group(0) @binding(6) var<storage, read_write> digests: array<u32>;
+@group(0) @binding(7) var<storage, read> params: Params;
+@group(0) @binding(8) var<storage, read> residentParents: array<u32>;
+@group(0) @binding(9) var<storage, read_write> residentNext: array<u32>;
+@group(0) @binding(10) var<storage, read_write> residentCanonical: array<u32>;
+@group(0) @binding(11) var<storage, read> parentStateIndices: array<u32>;
+@group(0) @binding(12) var<storage, read> outputStateIndices: array<u32>;
 
 fn labelBit(base: u32, offset: u32) -> u32 { return (nextLabels[base + offset / 32u] >> (offset % 32u)) & 1u; }
 
@@ -97,7 +96,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   }
   let remainingBase = id.x * ${REMAINING_MASK_WORD_COUNT}u;
   for (var word: u32 = 0u; word < ${REMAINING_MASK_WORD_COUNT}u; word++) { absoluteHash = (absoluteHash ^ remainingMasks[remainingBase + word]) * 16777619u; canonicalHash = (canonicalHash ^ remainingMasks[remainingBase + word]) * 16777619u; }
-  absoluteHashes[id.x] = absoluteHash; canonicalHashes[id.x] = canonicalHash;
+  digests[id.x * 2u] = absoluteHash; digests[id.x * 2u + 1u] = canonicalHash;
 }`;
 
 function normalizeGrid(grid = DEFAULT_FRONTIER_GRID) {
@@ -171,8 +170,7 @@ function makeResources(device, capacity, batchCapacity, pieceCount, grid, shader
     remainingMasks: device.createBuffer({ size: remainingBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
     nextLabels: device.createBuffer({ size: batchLabelsBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
     canonicalLabels: device.createBuffer({ size: batchLabelsBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
-    absoluteHashes: device.createBuffer({ size: hashBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
-    canonicalHashes: device.createBuffer({ size: hashBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
+    digests: device.createBuffer({ size: hashBytes * 2, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
     params: device.createBuffer({ size: 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
     residentParents: device.createBuffer({ size: residentBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
     residentNext: device.createBuffer({ size: residentBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
@@ -181,8 +179,7 @@ function makeResources(device, capacity, batchCapacity, pieceCount, grid, shader
     outputStateIndices: device.createBuffer({ size: batchCapacity * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
     nextReadback: device.createBuffer({ size: batchLabelsBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
     canonicalReadback: device.createBuffer({ size: batchLabelsBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
-    absoluteHashReadback: device.createBuffer({ size: hashBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
-    canonicalHashReadback: device.createBuffer({ size: hashBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
+    digestReadback: device.createBuffer({ size: hashBytes * 2, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
   };
   const specializedShader = shaderSource
     .replaceAll('params.wordCount', `${grid.wordCount}u`)
@@ -190,7 +187,7 @@ function makeResources(device, capacity, batchCapacity, pieceCount, grid, shader
     .replaceAll('params.width', `${grid.width}u`)
     .replaceAll('params.height', `${grid.height}u`);
   const module = device.createShaderModule({ code: specializedShader }), pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
-  const bindingBuffers = [buffers.seedParents, buffers.candidateMasks, buffers.candidatePieceIndices, buffers.remainingMasks, buffers.nextLabels, buffers.canonicalLabels, buffers.absoluteHashes, buffers.canonicalHashes, buffers.params, buffers.residentParents, buffers.residentNext, buffers.residentCanonical, buffers.parentStateIndices, buffers.outputStateIndices];
+  const bindingBuffers = [buffers.seedParents, buffers.candidateMasks, buffers.candidatePieceIndices, buffers.remainingMasks, buffers.nextLabels, buffers.canonicalLabels, buffers.digests, buffers.params, buffers.residentParents, buffers.residentNext, buffers.residentCanonical, buffers.parentStateIndices, buffers.outputStateIndices];
   const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: bindingBuffers.map((buffer, binding) => ({ binding, resource: { buffer } })) });
   return { capacity, batchCapacity, pieceCount, grid, labelsPerState, buffers, pipeline, bindGroup };
 }
@@ -200,7 +197,7 @@ function destroyResources(resources) { if (resources) Object.values(resources.bu
 async function readback(buffer, bytes) { await buffer.mapAsync(GPUMapMode.READ); const values = Array.from(new Uint32Array(buffer.getMappedRange().slice(0, bytes))); buffer.unmap(); return values; }
 
 async function dispatch(device, resources, candidates, pieceIds, outputIndices, grid, { readLabels = true } = {}) {
-  const { buffers, pipeline, bindGroup, labelsPerState } = resources, count = candidates.length, labelBytes = count * labelsPerState * 4, maskBytes = count * grid.wordCount * 4, hashBytes = count * 4;
+  const { buffers, pipeline, bindGroup, labelsPerState } = resources, count = candidates.length, labelBytes = count * labelsPerState * 4, maskBytes = count * grid.wordCount * 4, hashBytes = count * 4, digestBytes = hashBytes * 2;
   // Resident children read their parent labels from residentParents. Roots
   // read the explicit seed buffer; do not write and read residentParents in
   // the same dispatch. Avoiding the full seed transfer is the fast path once
@@ -222,9 +219,11 @@ async function dispatch(device, resources, candidates, pieceIds, outputIndices, 
     encoder.copyBufferToBuffer(buffers.nextLabels, 0, buffers.nextReadback, 0, labelBytes);
     encoder.copyBufferToBuffer(buffers.canonicalLabels, 0, buffers.canonicalReadback, 0, labelBytes);
   }
-  encoder.copyBufferToBuffer(buffers.absoluteHashes, 0, buffers.absoluteHashReadback, 0, hashBytes); encoder.copyBufferToBuffer(buffers.canonicalHashes, 0, buffers.canonicalHashReadback, 0, hashBytes);
+  encoder.copyBufferToBuffer(buffers.digests, 0, buffers.digestReadback, 0, digestBytes);
   device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
-  return { nextLabels: readLabels ? await readback(buffers.nextReadback, labelBytes) : [], canonicalLabels: readLabels ? await readback(buffers.canonicalReadback, labelBytes) : [], absoluteHashes: await readback(buffers.absoluteHashReadback, hashBytes), canonicalHashes: await readback(buffers.canonicalHashReadback, hashBytes), readback: readLabels ? 'full-labels-and-digests' : 'state-digests-only' };
+  const nextLabels = readLabels ? await readback(buffers.nextReadback, labelBytes) : [], canonicalLabels = readLabels ? await readback(buffers.canonicalReadback, labelBytes) : [], digestValues = await readback(buffers.digestReadback, digestBytes), absoluteHashes = [], canonicalHashes = [];
+  for (let index = 0; index < count; index++) { absoluteHashes.push(digestValues[index * 2]); canonicalHashes.push(digestValues[index * 2 + 1]); }
+  return { nextLabels, canonicalLabels, absoluteHashes, canonicalHashes, readback: readLabels ? 'full-labels-and-digests' : 'state-digests-only' };
 }
 
 /**
@@ -241,7 +240,7 @@ export function createWebGpuResidentFrontierState({ gpu = globalThis.navigator?.
   const reset = () => { destroyResources(resources); resources = null; pieceIds = null; epoch = 0; residentCount = 0; layer = null; residentDeviceCache.reset(); };
   const availability = async () => { const probe = await probeWebGpuCapabilities({ gpu, requiredLimits: limits }); return probe.adapterAvailable && probe.requiredLimitsSatisfied ? Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'available', backend: 'webgpu', capacity, batchCapacity, grid: normalizedGrid }) : Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: probe.adapterAvailable ? 'webgpu-required-limits-unsatisfied' : 'webgpu-adapter-unavailable', capacity, batchCapacity, grid: normalizedGrid }); };
   const beginLayer = () => { if (layer) throw new Error('resident frontier layer is already active'); layer = { nextSlot: 0, pieceIds: null, pendingEpoch: epoch + 1 }; return Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'layer-open', epoch, nextEpoch: layer.pendingEpoch }); };
-  const commitLayer = () => { if (!layer) return Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'idle', epoch }); const committed = Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'layer-committed', epoch: layer.pendingEpoch, outputCount: layer.nextSlot }); epoch = layer.pendingEpoch; residentCount = layer.nextSlot; layer = null; if (resources) { const old = resources.buffers.residentParents; resources.buffers.residentParents = resources.buffers.residentNext; resources.buffers.residentNext = old; const bindingBuffers = [resources.buffers.seedParents, resources.buffers.candidateMasks, resources.buffers.candidatePieceIndices, resources.buffers.remainingMasks, resources.buffers.nextLabels, resources.buffers.canonicalLabels, resources.buffers.absoluteHashes, resources.buffers.canonicalHashes, resources.buffers.params, resources.buffers.residentParents, resources.buffers.residentNext, resources.buffers.residentCanonical, resources.buffers.parentStateIndices, resources.buffers.outputStateIndices]; resources.bindGroup = resources.device.createBindGroup({ layout: resources.pipeline.getBindGroupLayout(0), entries: bindingBuffers.map((buffer, binding) => ({ binding, resource: { buffer } })) }); } return committed; };
+  const commitLayer = () => { if (!layer) return Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'idle', epoch }); const committed = Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'layer-committed', epoch: layer.pendingEpoch, outputCount: layer.nextSlot }); epoch = layer.pendingEpoch; residentCount = layer.nextSlot; layer = null; if (resources) { const old = resources.buffers.residentParents; resources.buffers.residentParents = resources.buffers.residentNext; resources.buffers.residentNext = old; const bindingBuffers = [resources.buffers.seedParents, resources.buffers.candidateMasks, resources.buffers.candidatePieceIndices, resources.buffers.remainingMasks, resources.buffers.nextLabels, resources.buffers.canonicalLabels, resources.buffers.digests, resources.buffers.params, resources.buffers.residentParents, resources.buffers.residentNext, resources.buffers.residentCanonical, resources.buffers.parentStateIndices, resources.buffers.outputStateIndices]; resources.bindGroup = resources.device.createBindGroup({ layout: resources.pipeline.getBindGroupLayout(0), entries: bindingBuffers.map((buffer, binding) => ({ binding, resource: { buffer } })) }); } return committed; };
   return Object.freeze({
     schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA,
     availability,
