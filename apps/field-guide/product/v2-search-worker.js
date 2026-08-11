@@ -106,6 +106,10 @@ async function runProductSearch(request, context) {
   const stage = (name, adapter = gpuStageAdapters[name]) => forceCpuBenchmark ? null : timedStage(name, adapter);
   const result = await search(request.pieces, steering.knownCentroidFamilies || [], {
     ...steering,
+    // Keep resident candidate data on-device during production search. The final
+    // canonical replay remains the CPU correctness boundary; the diagnostic
+    // verify-resident-navigation mode opts back into per-depth readback.
+    verifyGpuResidentNavigation: steering.verifyGpuResidentNavigation === true,
     gpuExecution: { ...gpuExecution, stageAvailability },
     knownSignatures: request.knownSignatureHints,
     searchSalt: request.seed,
