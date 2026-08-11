@@ -58,10 +58,14 @@ function summarizeStages(result) {
   for (const stage of NAVIGATION_STAGE_KEYS) {
     const receipt = result?.[stage];
     if (!receipt || receipt.status === 'cpu-oracle') continue;
-    if (['used', 'resident'].includes(receipt.status) && ['verified', 'labels-verified', 'deferred'].includes(receipt.parity) && ['webgpu', 'compute-shader', 'resident-webgpu'].includes(receipt.backend)) gpuStages.push(stage);
+    if (['completed', 'used', 'resident'].includes(receipt.status) && ['verified', 'labels-verified', 'deferred'].includes(receipt.parity) && ['webgpu', 'compute-shader', 'resident-webgpu'].includes(receipt.backend)) gpuStages.push(stage);
     else cpuFallbackStages.push(stage);
   }
   return { gpuStages: Object.freeze(gpuStages), cpuFallbackStages: Object.freeze(cpuFallbackStages) };
+}
+
+function isGpuExpansionReceipt(receipt) {
+  return receipt && ['completed', 'used', 'resident'].includes(receipt.status) && ['verified', 'labels-verified', 'deferred'].includes(receipt.parity) && ['webgpu', 'compute-shader', 'resident-webgpu'].includes(receipt.backend);
 }
 
 /** Owns the product-search lifecycle receipt without owning search topology. */
@@ -99,8 +103,8 @@ export function createNavigationCoordinator({ ticket, cursor = {} } = {}) {
     const resultCursor = result?.cursor ? observeProgress(result.cursor) : latestCursor;
     const placements = Array.isArray(result?.placements) && result.placements.length ? result.placements : null;
     const canonicalSignature = placements ? canonicalPlacementSignature(placements) : null;
-    const expansion = ['used', 'resident'].includes(result?.frontierTargetGeneration?.status) ? result.frontierTargetGeneration : result?.frontierGeneration?.status === 'used' ? result.frontierGeneration : null;
-    const expansionStage = ['used', 'resident'].includes(result?.frontierTargetGeneration?.status) ? 'frontierTargetGeneration' : result?.frontierGeneration?.status === 'used' ? 'frontierGeneration' : null;
+    const expansion = isGpuExpansionReceipt(result?.frontierTargetGeneration) ? result.frontierTargetGeneration : isGpuExpansionReceipt(result?.frontierGeneration) ? result.frontierGeneration : null;
+    const expansionStage = isGpuExpansionReceipt(result?.frontierTargetGeneration) ? 'frontierTargetGeneration' : isGpuExpansionReceipt(result?.frontierGeneration) ? 'frontierGeneration' : null;
     const expansionBackend = expansion?.backend || 'cpu-oracle';
     const expansionParity = expansion?.parity || 'oracle';
     const stageSummary = summarizeStages(result);

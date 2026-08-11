@@ -42,6 +42,16 @@ assert.equal(topologyReceipt.expansionOwnership, 'gpu-owned');
 assert.equal(topologyReceipt.gpuExpansionComplete, true);
 assert.ok(topologyReceipt.gpuStages.includes('frontierTopology'));
 assert.deepEqual(topologyReceipt.cpuFallbackStages, []);
+const boundaryReceipt = coordinator.complete({
+  placements: [{ id: 3, cells: [{ x: 4, y: 6 }] }],
+  gpuExecution: { deviceAvailable: true },
+  frontierTargetGeneration: { status: 'completed', backend: 'webgpu', parity: 'verified' },
+  frontierState: { status: 'completed', backend: 'webgpu', parity: 'verified' },
+});
+assert.equal(boundaryReceipt.expansionOwnership, 'gpu-owned');
+assert.equal(boundaryReceipt.gpuExpansionComplete, true);
+assert.deepEqual(boundaryReceipt.gpuStages, ['frontierTargetGeneration', 'frontierState']);
+assert.deepEqual(boundaryReceipt.cpuFallbackStages, []);
 const gatedFallback = coordinator.complete({
   placements: [{ id: 3, cells: [{ x: 4, y: 6 }] }],
   gpuExecution: { deviceAvailable: false, reason: 'webgpu-adapter-unavailable' },
