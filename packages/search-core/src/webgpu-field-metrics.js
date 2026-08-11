@@ -128,7 +128,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let y = cell / params.width;
   let occupied = (occupiedMasks[candidate * ((params.cellCount + 31u) / 32u) + cell / 32u] >> (cell % 32u)) & 1u;
   let boundary = x == 0u || y == 0u || x + 1u == params.width || y + 1u == params.height;
-  labels[id.x] = select(0u, cell + 1u, occupied == 0u && boundary);
+  // Keep occupied cells distinguishable from unvisited empty cells. The
+  // propagation pass must be able to fill empty cells from their neighbours
+  // without allowing a label to cross through occupied land.
+  labels[id.x] = select(0xffffffffu, select(0u, cell + 1u, boundary), occupied == 0u);
 }`;
 
 const OUTSIDE_LABEL_PROPAGATE_SHADER = `
@@ -151,11 +154,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let x = i32(cell % params.width);
   let y = i32(cell / params.width);
   var label = currentLabels[id.x];
-  if (label == 0u) { nextLabels[id.x] = 0u; return; }
-  let right = labelAt(candidate, x + 1, y); if (right != 0u) { label = min(label, right); }
-  let left = labelAt(candidate, x - 1, y); if (left != 0u) { label = min(label, left); }
-  let down = labelAt(candidate, x, y + 1); if (down != 0u) { label = min(label, down); }
-  let up = labelAt(candidate, x, y - 1); if (up != 0u) { label = min(label, up); }
+  if (label == 0xffffffffu) { nextLabels[id.x] = 0xffffffffu; return; }
+  let right = labelAt(candidate, x + 1, y); if (right != 0u && right != 0xffffffffu) { label = select(right, min(label, right), label != 0u); }
+  let left = labelAt(candidate, x - 1, y); if (left != 0u && left != 0xffffffffu) { label = select(left, min(label, left), label != 0u); }
+  let down = labelAt(candidate, x, y + 1); if (down != 0u && down != 0xffffffffu) { label = select(down, min(label, down), label != 0u); }
+  let up = labelAt(candidate, x, y - 1); if (up != 0u && up != 0xffffffffu) { label = select(up, min(label, up), label != 0u); }
   nextLabels[id.x] = label;
 }`;
 
