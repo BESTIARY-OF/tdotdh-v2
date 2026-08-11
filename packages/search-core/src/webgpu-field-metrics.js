@@ -16,7 +16,7 @@ const SHADER = `
 struct Params { candidateCount: u32, wordCount: u32, width: u32, height: u32, originX: i32, originY: i32, reserved0: u32, reserved1: u32 };
 @group(0) @binding(0) var<storage, read> occupiedMasks: array<u32>;
 @group(0) @binding(1) var<storage, read> centroidMasks: array<u32>;
-@group(0) @binding(2) var<storage, read> outsideMasks: array<u32>;
+@group(0) @binding(2) var<storage, read> outsideLabels: array<u32>;
 @group(0) @binding(3) var<storage, read_write> outputMetrics: array<i32>;
 @group(0) @binding(4) var<uniform> params: Params;
 
@@ -33,16 +33,17 @@ fn centroidBit(base: u32, x: i32, y: i32) -> u32 {
   let offset = bitOffset(x, y);
   return (centroidMasks[base + offset / 32u] >> (offset % 32u)) & 1u;
 }
-fn outsideBit(base: u32, x: i32, y: i32) -> u32 {
+fn outsideBit(candidate: u32, x: i32, y: i32) -> u32 {
   if (x < params.originX || y < params.originY || x >= params.originX + i32(params.width) || y >= params.originY + i32(params.height)) { return 0u; }
   let offset = bitOffset(x, y);
-  return (outsideMasks[base + offset / 32u] >> (offset % 32u)) & 1u;
+  return select(0u, 1u, outsideLabels[candidate * params.width * params.height + offset] != 0u);
 }
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= params.candidateCount) { return; }
-  let base = id.x * params.wordCount;
+  let candidate = id.x;
+  let base = candidate * params.wordCount;
   var area: i32 = 0;
   var perimeter: i32 = 0;
   var minX: i32 = 2147483647;
@@ -84,7 +85,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (area == 0) { minX = 0; maxX = 0; minY = 0; maxY = 0; }
   for (var y: i32 = minY; y <= maxY; y++) {
     for (var x: i32 = minX; x <= maxX; x++) {
-      if (occupiedBit(base, x, y) == 0u && outsideBit(base, x, y) == 0u) {
+      if (occupiedBit(base, x, y) == 0u && outsideBit(candidate, x, y) == 0u) {
         holes += 1;
         var landNeighbors: i32 = 0;
         landNeighbors += i32(occupiedBit(base, x + 1, y)); landNeighbors += i32(occupiedBit(base, x - 1, y)); landNeighbors += i32(occupiedBit(base, x, y + 1)); landNeighbors += i32(occupiedBit(base, x, y - 1));
@@ -111,6 +112,53 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   outputMetrics[output + 15u] = holes;
 }`;
 
+const OUTSIDE_LABEL_SEED_SHADER = `
+struct Params { candidateCount: u32, cellCount: u32, width: u32, height: u32 };
+@group(0) @binding(0) var<storage, read> occupiedMasks: array<u32>;
+@group(0) @binding(1) var<storage, read_write> labels: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let totalCells = params.candidateCount * params.cellCount;
+  if (id.x >= totalCells) { return; }
+  let candidate = id.x / params.cellCount;
+  let cell = id.x % params.cellCount;
+  let x = cell % params.width;
+  let y = cell / params.width;
+  let occupied = (occupiedMasks[candidate * ((params.cellCount + 31u) / 32u) + cell / 32u] >> (cell % 32u)) & 1u;
+  let boundary = x == 0u || y == 0u || x + 1u == params.width || y + 1u == params.height;
+  labels[id.x] = select(0u, cell + 1u, occupied == 0u && boundary);
+}`;
+
+const OUTSIDE_LABEL_PROPAGATE_SHADER = `
+struct Params { candidateCount: u32, cellCount: u32, width: u32, height: u32 };
+@group(0) @binding(0) var<storage, read> currentLabels: array<u32>;
+@group(0) @binding(1) var<storage, read_write> nextLabels: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+fn labelAt(candidate: u32, x: i32, y: i32) -> u32 {
+  if (x < 0 || y < 0 || x >= i32(params.width) || y >= i32(params.height)) { return 0u; }
+  return currentLabels[candidate * params.cellCount + u32(y) * params.width + u32(x)];
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let totalCells = params.candidateCount * params.cellCount;
+  if (id.x >= totalCells) { return; }
+  let candidate = id.x / params.cellCount;
+  let cell = id.x % params.cellCount;
+  let x = i32(cell % params.width);
+  let y = i32(cell / params.width);
+  var label = currentLabels[id.x];
+  if (label == 0u) { nextLabels[id.x] = 0u; return; }
+  let right = labelAt(candidate, x + 1, y); if (right != 0u) { label = min(label, right); }
+  let left = labelAt(candidate, x - 1, y); if (left != 0u) { label = min(label, left); }
+  let down = labelAt(candidate, x, y + 1); if (down != 0u) { label = min(label, down); }
+  let up = labelAt(candidate, x, y - 1); if (up != 0u) { label = min(label, up); }
+  nextLabels[id.x] = label;
+}`;
+
 function normalizeGrid(grid = DEFAULT_FRONTIER_GRID) {
   const value = { ...DEFAULT_FRONTIER_GRID, ...grid };
   for (const key of ['width', 'height']) if (!Number.isSafeInteger(value[key]) || value[key] <= 0 || value[key] > 128) throw new TypeError(`grid.${key} must be a positive safe integer at most 128`);
@@ -125,13 +173,15 @@ function normalizeMask(mask, wordCount, label) {
   return mask instanceof Uint32Array ? mask : Uint32Array.from(mask);
 }
 
-function normalizeCandidate(candidate, grid, index) {
+function normalizeCandidate(candidate, grid, index, { deriveOutsideMask = true } = {}) {
   if (!candidate || typeof candidate !== 'object') throw new TypeError(`field metric candidate ${index} must be an object`);
   const occupiedMask = normalizeMask(candidate.occupiedMask, grid.wordCount, `field metric candidate ${index}.occupiedMask`);
   return Object.freeze({
     occupiedMask,
     centroidMask: normalizeMask(candidate.centroidMask, grid.wordCount, `field metric candidate ${index}.centroidMask`),
-    outsideMask: candidate.outsideMask == null ? outsideMaskFromOccupied(occupiedMask, grid) : normalizeMask(candidate.outsideMask, grid.wordCount, `field metric candidate ${index}.outsideMask`),
+    outsideMask: candidate.outsideMask == null
+      ? (deriveOutsideMask ? outsideMaskFromOccupied(occupiedMask, grid) : null)
+      : normalizeMask(candidate.outsideMask, grid.wordCount, `field metric candidate ${index}.outsideMask`),
   });
 }
 
@@ -196,18 +246,18 @@ function cpuMetric(candidate, grid) {
   return [area, perimeter, Number.isFinite(minX) ? minX : 0, Number.isFinite(maxX) ? maxX : 0, Number.isFinite(minY) ? minY : 0, Number.isFinite(maxY) ? maxY : 0, sumX, sumY, centroidCount, centroidSumX, centroidSumY, centroidEdgeCoast, centroidCornerCoast, inletCells, inletEdges, holes];
 }
 
-function normalizeCandidates(candidates, grid) {
+function normalizeCandidates(candidates, grid, options = {}) {
   if (!Array.isArray(candidates) || candidates.length === 0) throw new TypeError('field metric candidates must be a non-empty array');
-  return candidates.map((candidate, index) => normalizeCandidate(candidate, grid, index));
+  return candidates.map((candidate, index) => normalizeCandidate(candidate, grid, index, options));
 }
 
-export function createFieldMetricsCandidate({ occupiedCells = [], centroidCells = [], outsideCells = null, occupiedMask = null, centroidMask = null, outsideMask = null } = {}, grid = DEFAULT_FRONTIER_GRID) {
+export function createFieldMetricsCandidate({ occupiedCells = [], centroidCells = [], outsideCells = null, occupiedMask = null, centroidMask = null, outsideMask = null, deferOutsideMask = false } = {}, grid = DEFAULT_FRONTIER_GRID) {
   const normalizedGrid = normalizeGrid(grid);
   const takeMask = (mask, label) => mask instanceof Uint32Array && mask.length === normalizedGrid.wordCount ? mask : normalizeMask(mask, normalizedGrid.wordCount, label);
   const resolvedCentroidMask = centroidMask ? takeMask(centroidMask, 'centroidMask') : new Uint32Array(normalizedGrid.wordCount);
   if (!centroidMask && centroidCells?.length) resolvedCentroidMask.set(createFrontierMaskFromCells(centroidCells, normalizedGrid));
   const resolvedOccupiedMask = occupiedMask ? takeMask(occupiedMask, 'occupiedMask') : createFrontierMaskFromCells(occupiedCells, normalizedGrid);
-  const resolvedOutsideMask = outsideMask ? takeMask(outsideMask, 'outsideMask') : outsideCells ? createFrontierMaskFromCells(outsideCells, normalizedGrid) : outsideMaskFromOccupied(resolvedOccupiedMask, normalizedGrid);
+  const resolvedOutsideMask = outsideMask ? takeMask(outsideMask, 'outsideMask') : outsideCells ? createFrontierMaskFromCells(outsideCells, normalizedGrid) : deferOutsideMask ? null : outsideMaskFromOccupied(resolvedOccupiedMask, normalizedGrid);
   return Object.freeze({ occupiedMask: resolvedOccupiedMask, centroidMask: resolvedCentroidMask, outsideMask: resolvedOutsideMask });
 }
 
@@ -221,22 +271,38 @@ function flatten(candidates, property, wordCount) { const flat = new Uint32Array
 
 async function runGpuBatch(device, normalized, grid, shaderSource, pipelineCache) {
   const count = normalized.length, maskBytes = Math.max(4, count * grid.wordCount * 4), outputBytes = Math.max(4, count * FIELD_METRIC_COUNT * 4);
+  const cellCount = grid.width * grid.height, labelBytes = Math.max(4, count * cellCount * 4);
   const buffers = {
     occupied: device.createBuffer({ size: maskBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
     centroid: device.createBuffer({ size: maskBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
-    outside: device.createBuffer({ size: maskBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+    outsideLabels: [
+      device.createBuffer({ size: labelBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC }),
+      device.createBuffer({ size: labelBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC }),
+    ],
     output: device.createBuffer({ size: outputBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
     params: device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }),
     readback: device.createBuffer({ size: outputBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
+    labelParams: device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }),
   };
   try {
-    device.queue.writeBuffer(buffers.occupied, 0, flatten(normalized, 'occupiedMask', grid.wordCount)); device.queue.writeBuffer(buffers.centroid, 0, flatten(normalized, 'centroidMask', grid.wordCount)); device.queue.writeBuffer(buffers.outside, 0, flatten(normalized, 'outsideMask', grid.wordCount));
+    device.queue.writeBuffer(buffers.occupied, 0, flatten(normalized, 'occupiedMask', grid.wordCount)); device.queue.writeBuffer(buffers.centroid, 0, flatten(normalized, 'centroidMask', grid.wordCount));
     device.queue.writeBuffer(buffers.params, 0, new Int32Array([count, grid.wordCount, grid.width, grid.height, grid.originX, grid.originY, 0, 0]));
-    const pipeline = pipelineCache.get(device, shaderSource), bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.occupied } }, { binding: 1, resource: { buffer: buffers.centroid } }, { binding: 2, resource: { buffer: buffers.outside } }, { binding: 3, resource: { buffer: buffers.output } }, { binding: 4, resource: { buffer: buffers.params } }] });
-    const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end(); encoder.copyBufferToBuffer(buffers.output, 0, buffers.readback, 0, outputBytes); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone(); await buffers.readback.mapAsync(GPUMapMode.READ);
+    const pipeline = pipelineCache.get(device, shaderSource);
+    const seedPipeline = pipelineCache.get(device, OUTSIDE_LABEL_SEED_SHADER), propagatePipeline = pipelineCache.get(device, OUTSIDE_LABEL_PROPAGATE_SHADER);
+    device.queue.writeBuffer(buffers.labelParams, 0, new Uint32Array([count, cellCount, grid.width, grid.height]));
+    let current = 0;
+    const encoder = device.createCommandEncoder();
+    const seed = encoder.beginComputePass();
+    seed.setPipeline(seedPipeline); seed.setBindGroup(0, device.createBindGroup({ layout: seedPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.occupied } }, { binding: 1, resource: { buffer: buffers.outsideLabels[current] } }, { binding: 2, resource: { buffer: buffers.labelParams } }] })); seed.dispatchWorkgroups(Math.ceil(count * cellCount / 64)); seed.end();
+    for (let pass = 0; pass < grid.width + grid.height; pass += 1) {
+      const compute = encoder.beginComputePass();
+      compute.setPipeline(propagatePipeline); compute.setBindGroup(0, device.createBindGroup({ layout: propagatePipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.outsideLabels[current] } }, { binding: 1, resource: { buffer: buffers.outsideLabels[1 - current] } }, { binding: 2, resource: { buffer: buffers.labelParams } }] })); compute.dispatchWorkgroups(Math.ceil(count * cellCount / 64)); compute.end(); current = 1 - current;
+    }
+    const metricBindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.occupied } }, { binding: 1, resource: { buffer: buffers.centroid } }, { binding: 2, resource: { buffer: buffers.outsideLabels[current] } }, { binding: 3, resource: { buffer: buffers.output } }, { binding: 4, resource: { buffer: buffers.params } }] });
+    const pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, metricBindGroup); pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end(); encoder.copyBufferToBuffer(buffers.output, 0, buffers.readback, 0, outputBytes); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone(); await buffers.readback.mapAsync(GPUMapMode.READ);
     const values = Array.from(new Int32Array(buffers.readback.getMappedRange().slice(0, count * FIELD_METRIC_COUNT * 4))); buffers.readback.unmap();
     return Array.from({ length: count }, (_, index) => values.slice(index * FIELD_METRIC_COUNT, (index + 1) * FIELD_METRIC_COUNT));
-  } finally { Object.values(buffers).forEach(buffer => buffer.destroy()); }
+  } finally { Object.values(buffers).flatMap(buffer => Array.isArray(buffer) ? buffer : [buffer]).forEach(buffer => buffer.destroy()); }
 }
 
 export function createWebGpuFieldMetrics({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 65536 }, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
@@ -245,7 +311,7 @@ export function createWebGpuFieldMetrics({ gpu = globalThis.navigator?.gpu, grid
   return Object.freeze({
     async availability() { const probe = await probeWebGpuCapabilities({ gpu, requiredLimits: limits }); if (!probe.adapterAvailable) return Object.freeze({ schema: WEBGPU_FIELD_METRICS_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: 'webgpu-adapter-unavailable', grid: normalizedGrid }); if (!probe.requiredLimitsSatisfied) return Object.freeze({ schema: WEBGPU_FIELD_METRICS_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: 'webgpu-required-limits-unsatisfied', grid: normalizedGrid }); return Object.freeze({ schema: WEBGPU_FIELD_METRICS_SCHEMA, status: 'available', backend: 'webgpu', grid: normalizedGrid }); },
     async evaluate(candidates, { verifyParity = true } = {}) {
-      const normalized = normalizeCandidates(candidates, normalizedGrid), status = await this.availability();
+      const status = await this.availability(), normalized = normalizeCandidates(candidates, normalizedGrid, { deriveOutsideMask: verifyParity });
       if (status.status !== 'available') return unavailable(status.reason, normalizedGrid, cpuEvaluateFieldMetrics(normalized, normalizedGrid));
       try {
         const device = await deviceCache.getDevice(), maxBinding = Number(device.limits?.maxStorageBufferBindingSize) || limits.maxStorageBufferBindingSize, maxBatch = Math.max(1, Math.floor(maxBinding / Math.max(normalizedGrid.wordCount * 8, 4))), metrics = [];

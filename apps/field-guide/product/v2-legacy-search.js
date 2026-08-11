@@ -13,7 +13,7 @@ import { createFrontierEvaluationCandidate } from '../../../packages/search-core
 import { cpuScoreFrontierCandidate } from '../../../packages/search-core/src/webgpu-frontier-scorer.js?v=20260811-pipelinecache1';
 import { createFrontierMaskFromCells } from '../../../packages/search-core/src/webgpu-frontier-validator.js';
 import { createFrontierMetricsCandidate } from '../../../packages/search-core/src/webgpu-frontier-metrics.js?v=20260811-maskcache2';
-import { createFieldMetricsCandidate } from '../../../packages/search-core/src/webgpu-field-metrics.js?v=20260811-floodfill4';
+import { createFieldMetricsCandidate } from '../../../packages/search-core/src/webgpu-field-metrics.js?v=20260811-floodfill5';
 import { createLabeledFrontierStateCandidate } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 import { canonicalSignatureFromLabeledFrontierState } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 import { DEFAULT_FRONTIER_GRID } from '../../../packages/search-core/src/webgpu-frontier-topology.js';
@@ -639,10 +639,10 @@ async function evaluateFieldAggregates(entries, state, centroidId, fieldMetricsA
       if (availability?.status !== 'available') { onMetrics({ status: 'fallback', backend: 'cpu-oracle', reason: availability?.reason || 'field-metrics-unavailable', candidateCount: entries.length }); return entries; }
     }
     const input = frontierInputForState(state, centroidId);
-    const candidates = entries.map(entry => createFieldMetricsCandidate({ occupiedMask: unionFrontierMasks(input.parentMask, cachedFrontierMask(entry.candidate.cells)), centroidMask: input.centroidMask }));
+    const candidates = entries.map(entry => createFieldMetricsCandidate({ occupiedMask: unionFrontierMasks(input.parentMask, cachedFrontierMask(entry.candidate.cells)), centroidMask: input.centroidMask, deferOutsideMask: true }));
     const result = await fieldMetricsAdapter.evaluate(candidates, { verifyParity });
     if (Array.isArray(result?.metrics) && result.metrics.length === entries.length) {
-      onMetrics({ status: result.status === 'completed' && result.parity === 'verified' ? 'used' : 'fallback', backend: result.backend || 'cpu-oracle', parity: result.parity, reason: result.reason, candidateCount: entries.length });
+      onMetrics({ status: result.status === 'completed' && ['verified', 'deferred'].includes(result.parity) ? 'used' : 'fallback', backend: result.backend || 'cpu-oracle', parity: result.parity, reason: result.reason, candidateCount: entries.length });
       return entries.map((entry, index) => ({ ...entry, gpuFieldMetrics: result.metrics[index] }));
     }
     onMetrics({ status: 'fallback', reason: result?.reason || 'field-metrics-unavailable' });
@@ -662,13 +662,13 @@ async function evaluateFieldAggregatesAcrossBeam(jobs, centroidId, fieldMetricsA
     const pending = [];
     for (const [jobIndex, job] of jobs.entries()) {
       const input = frontierInputForState(job.state, centroidId);
-      for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, candidate: entry, fieldCandidate: createFieldMetricsCandidate({ occupiedMask: unionFrontierMasks(input.parentMask, cachedFrontierMask(entry.candidate.cells)), centroidMask: input.centroidMask }) });
+      for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, candidate: entry, fieldCandidate: createFieldMetricsCandidate({ occupiedMask: unionFrontierMasks(input.parentMask, cachedFrontierMask(entry.candidate.cells)), centroidMask: input.centroidMask, deferOutsideMask: true }) });
     }
     if (!pending.length) return jobs;
     const result = await fieldMetricsAdapter.evaluate(pending.map(item => item.fieldCandidate), { verifyParity });
     if (Array.isArray(result?.metrics) && result.metrics.length === pending.length) {
       for (const [index, item] of pending.entries()) jobs[item.jobIndex].entries[item.entryIndex] = { ...item.candidate, gpuFieldMetrics: result.metrics[index] };
-      onMetrics({ status: result.status === 'completed' && result.parity === 'verified' ? 'used' : 'fallback', backend: result.backend || 'cpu-oracle', parity: result.parity, reason: result.reason, candidateCount: pending.length, batch: 'beam' });
+      onMetrics({ status: result.status === 'completed' && ['verified', 'deferred'].includes(result.parity) ? 'used' : 'fallback', backend: result.backend || 'cpu-oracle', parity: result.parity, reason: result.reason, candidateCount: pending.length, batch: 'beam' });
       return jobs;
     }
     onMetrics({ status: 'fallback', reason: result?.reason || 'field-metrics-unavailable', candidateCount: pending.length, batch: 'beam' });
