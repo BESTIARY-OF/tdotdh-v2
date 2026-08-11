@@ -26,4 +26,38 @@ assert.deepEqual(receipt.validity, single.validity);
 const batchReceipt = await adapter.generateBatch([{ pieceId: 'a', ...input }]);
 assert.equal(batchReceipt.status, 'unavailable');
 assert.deepEqual(batchReceipt.items[0].validity, single.validity);
+
+{
+  const previousBufferUsage = globalThis.GPUBufferUsage, previousMapMode = globalThis.GPUMapMode;
+  globalThis.GPUBufferUsage = { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, MAP_READ: 16 };
+  globalThis.GPUMapMode = { READ: 1 };
+  let createdBuffers = 0;
+  const fakeDevice = {
+    queue: { writeBuffer() {}, submit() {}, async onSubmittedWorkDone() {} },
+    createBuffer() {
+      const index = ++createdBuffers;
+      return { destroy() {}, async mapAsync() {}, getMappedRange() {
+        if (index === 8) return Int32Array.from([1, 0, 0, 0, 0, 1, -1, 1]).buffer;
+        return Uint32Array.from([1, 0, 1, 1]).buffer;
+      }, unmap() {} };
+    },
+    createShaderModule() { return {}; },
+    createComputePipeline() { return { getBindGroupLayout() { return {}; } }; },
+    createBindGroup() { return {}; },
+    createCommandEncoder() { return { beginComputePass() { return { setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() {}, end() {} }; }, copyBufferToBuffer() {}, finish() { return {}; } }; },
+  };
+  const fakeAdapter = { limits: { maxStorageBufferBindingSize: 64 * 1024 * 1024 }, async requestDevice() { return fakeDevice; } };
+  const persistentGenerator = createWebGpuFrontierTargetGenerator({ gpu: { async requestAdapter() { return fakeAdapter; } } });
+  const firstPersistent = await persistentGenerator.generateBatch([{ pieceId: 'a', ...input }]);
+  const secondPersistent = await persistentGenerator.generateBatch([{ pieceId: 'a', ...input }]);
+  assert.equal(firstPersistent.backend, 'webgpu');
+  assert.equal(firstPersistent.parity, 'verified');
+  assert.equal(firstPersistent.persistent, true);
+  assert.equal(firstPersistent.dispatch, 'webgpu-frontier-target-resident');
+  assert.equal(firstPersistent.dispatchCount, 1);
+  assert.equal(secondPersistent.dispatchCount, 2);
+  assert.equal(createdBuffers, 9, 'persistent target generation reuses its nine GPU buffers');
+  if (previousBufferUsage === undefined) delete globalThis.GPUBufferUsage; else globalThis.GPUBufferUsage = previousBufferUsage;
+  if (previousMapMode === undefined) delete globalThis.GPUMapMode; else globalThis.GPUMapMode = previousMapMode;
+}
 console.log('WebGPU frontier target generator tests passed');

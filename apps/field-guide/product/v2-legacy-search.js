@@ -254,11 +254,12 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
     else chunks.push({ inputs: [...group.inputs], refs: [...group.refs], candidateCount: group.candidateCount });
   }
   const items = [];
-  let totalCandidateCount = 0, batches = 0, backend = 'compute-shader', fallbackReason = null, recordBackend = 'cpu-oracle', recordParity = 'oracle', recordInputCount = 0, recordOutputCount = 0;
+  let totalCandidateCount = 0, batches = 0, backend = 'compute-shader', fallbackReason = null, recordBackend = 'cpu-oracle', recordParity = 'oracle', recordInputCount = 0, recordOutputCount = 0, persistent = false, persistentDispatchCount = 0, persistentBufferCapacity = null;
   for (const chunk of chunks) {
     const result = await frontierTargetGenerator.generateBatch(chunk.inputs);
     if (result?.backend) backend = result.backend;
     if (result?.reason) fallbackReason = result.reason;
+    if (result?.persistent) { persistent = true; persistentDispatchCount = result.dispatchCount; persistentBufferCapacity = result.bufferCapacity; }
     if (result?.status === 'completed' && Array.isArray(result.items) && result.items.length === chunk.inputs.length) result.items.forEach((item, offset) => items.push({ item, ref: chunk.refs[offset] }));
     else for (const ref of chunk.refs) {
       const byTarget = generated[ref.planIndex] || new Map();
@@ -295,7 +296,7 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
     generated[ref.planIndex] = byTarget;
   }
   const inputCount = planGroups.reduce((sum, group) => sum + group.inputs.length, 0);
-  onGeneration({ status: items.length === inputCount ? 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? 'verified' : 'oracle', reason: items.length === inputCount ? undefined : (fallbackReason || 'frontier-generator-batch-fallback'), candidateCount: totalCandidateCount, batches, batch: 'beam', candidateRecords: { backend: recordBackend, parity: recordParity, inputCount: recordInputCount, outputCount: recordOutputCount } });
+  onGeneration({ status: items.length === inputCount ? 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? 'verified' : 'oracle', reason: items.length === inputCount ? undefined : (fallbackReason || 'frontier-generator-batch-fallback'), candidateCount: totalCandidateCount, batches, batch: 'beam', ...(persistent ? { persistent: true, dispatch: 'webgpu-frontier-target-resident', dispatchCount: persistentDispatchCount, bufferCapacity: persistentBufferCapacity } : {}), candidateRecords: { backend: recordBackend, parity: recordParity, inputCount: recordInputCount, outputCount: recordOutputCount } });
   return generated;
 }
 async function generateFrontierTargetPoolsAcrossBeam(plans, frontierTargetPool, centroidId, onTargetPool = () => {}, availabilityStatus = null) {
