@@ -586,21 +586,11 @@ async function evaluateFrontierGeometryAcrossBeam(jobs, centroidId, frontierMetr
       for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, entry, candidate: createFrontierMetricsCandidate({ parentCells, candidateCells: entry.candidate.cells, centroidCells, ringCells: [...centroidRing.values()], bounds: job.state.bounds }) });
     }
     if (!pending.length) return jobs;
-    const groups = new Map();
-    for (const item of pending) {
-      const bounds = item.candidate.bounds;
-      const groupKey = `${bounds.minX},${bounds.maxX},${bounds.minY},${bounds.maxY}`;
-      const group = groups.get(groupKey) || { items: [] };
-      group.items.push(item); groups.set(groupKey, group);
-    }
-    let used = true, reason = null;
-    for (const group of groups.values()) {
-      const result = await frontierMetrics.evaluate(group.items.map(item => item.candidate));
-      if (result?.status === 'completed' && result.parity === 'verified' && Array.isArray(result.metrics) && result.metrics.length === group.items.length) {
-        for (const [index, item] of group.items.entries()) jobs[item.jobIndex].entries[item.entryIndex] = { ...item.entry, gpuGeometry: result.metrics[index] };
-      } else { used = false; reason = result?.reason || 'frontier-metrics-unavailable'; }
-    }
-    onMetrics({ status: used ? 'used' : 'fallback', backend: used ? 'compute-shader' : 'cpu-oracle', parity: used ? 'verified' : 'oracle', reason, candidateCount: pending.length, batch: 'beam', boundsGroups: groups.size });
+    const result = await frontierMetrics.evaluate(pending.map(item => item.candidate));
+    const used = result?.status === 'completed' && result.parity === 'verified' && Array.isArray(result.metrics) && result.metrics.length === pending.length;
+    const reason = used ? null : (result?.reason || 'frontier-metrics-unavailable');
+    if (used) for (const [index, item] of pending.entries()) jobs[item.jobIndex].entries[item.entryIndex] = { ...item.entry, gpuGeometry: result.metrics[index] };
+    onMetrics({ status: used ? 'used' : 'fallback', backend: used ? 'compute-shader' : 'cpu-oracle', parity: used ? 'verified' : 'oracle', reason, candidateCount: pending.length, batch: 'beam', boundsGroups: 1 });
     if (used) return jobs;
   } catch (error) { onMetrics({ status: 'fallback', reason: `frontier-metrics-failed:${error.message}`, batch: 'beam' }); }
   return jobs;
