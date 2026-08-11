@@ -332,7 +332,9 @@ function normalizeResidentEntries(entries) {
   if (!Array.isArray(entries) || entries.length === 0) throw new TypeError('resident navigation entries must be a non-empty array');
   return entries.map((entry, index) => {
     const handle = entry?.residentHandle || entry;
-    if (!handle || handle.schema !== 'tdotdh.webgpu-frontier-candidate-records-resident.v0') throw new TypeError(`resident navigation entry ${index} has an invalid candidate-record handle`);
+    const compatibleSchema = handle?.schema === 'tdotdh.webgpu-frontier-candidate-records-resident.v0'
+      || handle?.schema === 'tdotdh.webgpu-frontier-target-records.v0';
+    if (!compatibleSchema) throw new TypeError(`resident navigation entry ${index} has an invalid candidate-record handle`);
     if (!Number.isSafeInteger(handle.recordCount) || handle.recordCount < 0) throw new RangeError(`resident navigation entry ${index} has an invalid recordCount`);
     if (!handle.recordsBuffer || typeof handle.recordsBuffer !== 'object') throw new TypeError(`resident navigation entry ${index} has no recordsBuffer`);
     if (handle.recordsOffsetBytes !== undefined && (!Number.isSafeInteger(handle.recordsOffsetBytes) || handle.recordsOffsetBytes < 0 || handle.recordsOffsetBytes % 4)) throw new RangeError(`resident navigation entry ${index} has an invalid recordsOffsetBytes`);

@@ -62,6 +62,12 @@ assert.equal(residentReceipt.backend, 'webgpu');
 assert.equal(residentReceipt.parity, 'verified');
 assert.equal(residentReceipt.dispatch, 'fake-resident-record-dispatch');
 assert.deepEqual(Array.from(residentReceipt.selectedRows), [2, 3]);
+const targetResidentReceipt = await residentScheduler.selectResidentCandidateRecords([
+  { residentHandle: { schema: 'tdotdh.webgpu-frontier-target-records.v0', recordCount: rows.length, recordsBuffer: {}, validityBuffer: {} }, piecePlans: [0, 0, 0, 0, 0, 0, 0, 1] },
+], { planCount: 2, expectedRows: rows });
+assert.equal(targetResidentReceipt.backend, 'webgpu');
+assert.equal(targetResidentReceipt.parity, 'verified');
+assert.deepEqual(Array.from(targetResidentReceipt.selectedRows), [2, 3]);
 const validityScheduler = createWebGpuFrontierNavigationScheduler({ accelerator: async ({ oracle }) => ({ status: 'completed', selectedRows: Array.from(oracle.selectedRows, index => [0, 1, 3][index]), dispatch: 'fake-resident-validity-dispatch' }) });
 const validityReceipt = await validityScheduler.selectResidentCandidateRecords([
   { residentHandle: { schema: 'tdotdh.webgpu-frontier-candidate-records-resident.v0', recordCount: rows.length, recordsBuffer: {} }, piecePlans: [0, 0, 0, 0, 0, 0, 0, 1] },
