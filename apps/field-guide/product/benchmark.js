@@ -1,6 +1,6 @@
 const output = document.querySelector('#output');
 const runButton = document.querySelector('#run');
-const workerUrl = new URL('./v2-search-worker.js?v=20260811-matched65', import.meta.url);
+const workerUrl = new URL('./v2-search-worker.js?v=20260811-matched75', import.meta.url);
 
 function signature(placements) {
   if (!Array.isArray(placements) || placements.length === 0) return null;
@@ -83,7 +83,7 @@ function runWorker(pieces, backend, onProgress = () => {}) {
       reject(new Error(`${backend} worker error: ${event.message || 'unknown error'}`));
     };
     const diagnostic = new URL(location.href).searchParams.get('diagnostic');
-    const diagnosticSteering = diagnostic === 'no-topology' ? { disableGpuCandidateTopology: true } : diagnostic === 'no-geometry' ? { disableGpuCandidateGeometry: true } : diagnostic === 'no-field-metrics' ? { disableGpuCandidateFieldMetrics: true } : diagnostic === 'no-target-pool' ? { disableGpuTargetPool: true } : diagnostic === 'no-target-generation' ? { disableGpuCandidateGeneration: true } : diagnostic === 'no-resident-navigation' ? { disableGpuResidentNavigation: true } : diagnostic === 'verify-resident-navigation' ? { verifyGpuResidentNavigation: true } : diagnostic === 'no-state-parity' ? { verifyGpuTransitionParity: false } : {};
+    const diagnosticSteering = diagnostic === 'no-topology' ? { disableGpuCandidateTopology: true } : diagnostic === 'no-geometry' ? { disableGpuCandidateGeometry: true } : diagnostic === 'no-field-metrics' ? { disableGpuCandidateFieldMetrics: true } : diagnostic === 'no-target-pool' ? { disableGpuTargetPool: true } : diagnostic === 'no-target-generation' ? { disableGpuCandidateGeneration: true } : diagnostic === 'no-resident-navigation' ? { disableGpuResidentNavigation: true } : diagnostic === 'verify-resident-navigation' ? { verifyGpuResidentNavigation: true, captureGpuResidentDiagnostics: true } : diagnostic === 'no-state-parity' ? { verifyGpuTransitionParity: false } : {};
     worker.postMessage({
       type: 'start',
       protocolVersion: 1,

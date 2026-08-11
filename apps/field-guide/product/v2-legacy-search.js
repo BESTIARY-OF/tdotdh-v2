@@ -1299,7 +1299,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         }
       }
       const navigationPlan = useResidentNavigation
-        ? await navigationScheduler.selectResidentCandidateRecords(residentNavigationEntries, { planCount: beamPlans.length, expectedRows: residentNavigationExpectedRows.length ? residentNavigationExpectedRows : null })
+        ? await navigationScheduler.selectResidentCandidateRecords(residentNavigationEntries, { planCount: beamPlans.length, expectedRows: residentNavigationExpectedRows.length ? residentNavigationExpectedRows : null, captureTargetCounts: options.captureGpuResidentDiagnostics === true })
         : useFlatTargetPlan
         ? await navigationScheduler.selectCandidateRecords(targetPlanEntries, { planCount: beamPlans.length })
         : await navigationScheduler.select(navigationRows, { planCount: beamPlans.length });
@@ -1312,7 +1312,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         residentDecodeReceipt = { checked: samples.length, mismatchCount: samples.filter(sample => sample.mismatch).length, samples };
         navigationPlanReceipt = { ...navigationPlanReceipt, residentDecode: residentDecodeReceipt };
       }
-      navigationPlanHistory.push({ depth, status: navigationPlan.status, backend: navigationPlan.backend, parity: navigationPlan.parity, rowCount: navigationPlan.rowCount, selectedCount: navigationPlan.selectedCount, selectedRows: Array.from(navigationPlan.selectedRows || []).slice(0, 64), observedSelectedRows: Array.from(navigationPlan.observedSelectedRows || []).slice(0, 64), observedSelectedRecords: navigationPlan.observedSelectedRecords, expectedSelectedRecords: navigationPlan.expectedSelectedRecords, observedRecordCount: navigationPlan.observedRecordCount, expectedRecordCount: navigationPlan.expectedRecordCount, recordMismatch: navigationPlan.recordMismatch, reason: navigationPlan.reason });
+      navigationPlanHistory.push({ depth, status: navigationPlan.status, backend: navigationPlan.backend, parity: navigationPlan.parity, rowCount: navigationPlan.rowCount, selectedCount: navigationPlan.selectedCount, selectedRows: Array.from(navigationPlan.selectedRows || []).slice(0, 128), observedSelectedRows: Array.from(navigationPlan.observedSelectedRows || []).slice(0, 128), selectedRowMismatchIndex: navigationPlan.selectedRowMismatchIndex, observedSelectedRecords: navigationPlan.observedSelectedRecords, expectedSelectedRecords: navigationPlan.expectedSelectedRecords, observedRecordCount: navigationPlan.observedRecordCount, expectedRecordCount: navigationPlan.expectedRecordCount, recordMismatch: navigationPlan.recordMismatch, residentDiagnostics: navigationPlan.residentDiagnostics, reason: navigationPlan.reason });
       navigationPlanReceipt = { ...navigationPlanReceipt, history: navigationPlanHistory.slice(-64) };
       navigationPlanReceipt = { ...navigationPlanReceipt, expansion: { depth, beamPlanCount: beamPlans.length, selectedCount: navigationPlan.selectedCount, selectedPlanCount: navigationPlan.selectedRows?.length || 0 } };
       const selectedByPlan = new Map();
