@@ -281,9 +281,12 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
           if (item.validity?.[index] === 1 && origin && Number.isSafeInteger(origin.x) && Number.isSafeInteger(origin.y)) { const pieceCount = Number(item.pieceCount) || 1; expectedRecords.push({ pieceId: itemOrdinal, targetOrdinal: Math.floor(index / pieceCount), originX: origin.x, originY: origin.y, inputOrdinal: index % pieceCount }); }
         }));
         const compacted = frontierCandidateRecords?.compactResident ? await frontierCandidateRecords.compactResident(result.residentHandle, verifyResidentNavigation ? { expectedRecords } : {}) : null;
-        if (compacted?.status === 'completed' && compacted.residentHandle && (compacted.parity === 'verified' || compacted.parity === 'deferred')) {
+        const cpuCandidateKeys = verifyResidentNavigation ? chunk.refs.flatMap((ref, itemOrdinal) => ref.plan.targetPool.flatMap((target, targetOrdinal) => candidateTranslationsForTarget(ref.piece, ref.plan.state.field, ref.plan.state.bounds, target, positionLocks, seedOrigin).map(candidate => `${itemOrdinal}:${targetOrdinal}:${candidate.origin.x}:${candidate.origin.y}`))) : null;
+        const residentCandidateKeys = verifyResidentNavigation && compacted?.records ? compacted.records.map(record => `${record.pieceId}:${record.targetOrdinal}:${record.originX}:${record.originY}`) : null;
+        const residentCandidateParity = !verifyResidentNavigation || JSON.stringify(residentCandidateKeys) === JSON.stringify(cpuCandidateKeys);
+        if (compacted?.status === 'completed' && compacted.residentHandle && (compacted.parity === 'verified' || compacted.parity === 'deferred') && residentCandidateParity) {
           recordBackend = compacted.backend || 'webgpu'; recordParity = compacted.parity; recordPersistent = Boolean(compacted.persistent); recordDispatchCount = compacted.dispatchCount; recordBufferCapacity = compacted.bufferCapacity;
-          const residentHandle = Object.freeze({ ...compacted.residentHandle, itemMetadata: Object.freeze(result.items.map(item => Object.freeze({ pieceId: item.pieceId }))) });
+          const residentHandle = Object.freeze({ ...compacted.residentHandle, itemMetadata: Object.freeze(result.items.map(item => Object.freeze({ pieceId: item.pieceId, pieceCount: Number(item.pieceCount) || 0, targetCount: Number(item.targetCount) || 0 }))) });
           const expectedRows = verifyResidentNavigation ? (compacted.records || []).flatMap(record => {
             const ref = chunk.refs[record.pieceId], target = ref?.plan.targetPool[record.targetOrdinal];
             const item = result.items[record.pieceId], pieceCount = Number(item?.pieceCount) || 1;
@@ -296,10 +299,10 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
           }
         } else {
           directResidentNavigation = false;
-          recordReason = compacted?.reason || 'resident-record-compaction-fallback';
+          recordReason = compacted?.reason || (residentCandidateParity ? 'resident-record-compaction-fallback' : 'resident-record-candidate-parity-mismatch');
           fallbackReason = recordReason;
         }
-      } else if (result.residentHandle && frontierCandidateRecords?.compactResident) {
+      } else if (result.residentHandle && frontierCandidateRecords?.compactResident && !materializeCandidates) {
         const expectedRecords = [];
         result.items.forEach((item, itemOrdinal) => (item.origins || []).forEach((origin, index) => {
           if (item.validity?.[index] === 1 && origin && Number.isSafeInteger(origin.x) && Number.isSafeInteger(origin.y)) { const pieceCount = Number(item.pieceCount) || 1; expectedRecords.push({ pieceId: itemOrdinal, targetOrdinal: Math.floor(index / pieceCount), originX: origin.x, originY: origin.y, inputOrdinal: index % pieceCount }); }
@@ -308,7 +311,7 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
         if (compacted.status === 'completed' && compacted.parity === 'verified') {
           recordBackend = compacted.backend || recordBackend; recordParity = compacted.parity || recordParity; recordPersistent = Boolean(compacted.persistent); recordDispatchCount = compacted.dispatchCount; recordBufferCapacity = compacted.bufferCapacity;
           if (compacted.residentHandle) {
-            const residentHandle = Object.freeze({ ...compacted.residentHandle, itemMetadata: Object.freeze(result.items.map(item => Object.freeze({ pieceId: item.pieceId }))) });
+            const residentHandle = Object.freeze({ ...compacted.residentHandle, itemMetadata: Object.freeze(result.items.map(item => Object.freeze({ pieceId: item.pieceId, pieceCount: Number(item.pieceCount) || 0, targetCount: Number(item.targetCount) || 0 }))) });
             const expectedRows = (compacted.records || []).flatMap(record => {
               const ref = chunk.refs[record.pieceId], target = ref?.plan.targetPool[record.targetOrdinal];
               const item = result.items[record.pieceId], pieceCount = Number(item?.pieceCount) || 1;
@@ -1309,7 +1312,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         residentDecodeReceipt = { checked: samples.length, mismatchCount: samples.filter(sample => sample.mismatch).length, samples };
         navigationPlanReceipt = { ...navigationPlanReceipt, residentDecode: residentDecodeReceipt };
       }
-      navigationPlanHistory.push({ depth, status: navigationPlan.status, backend: navigationPlan.backend, parity: navigationPlan.parity, rowCount: navigationPlan.rowCount, selectedCount: navigationPlan.selectedCount, selectedRows: Array.from(navigationPlan.selectedRows || []).slice(0, 64), observedSelectedRows: Array.from(navigationPlan.observedSelectedRows || []).slice(0, 64), observedSelectedRecords: navigationPlan.observedSelectedRecords, expectedSelectedRecords: navigationPlan.expectedSelectedRecords, reason: navigationPlan.reason });
+      navigationPlanHistory.push({ depth, status: navigationPlan.status, backend: navigationPlan.backend, parity: navigationPlan.parity, rowCount: navigationPlan.rowCount, selectedCount: navigationPlan.selectedCount, selectedRows: Array.from(navigationPlan.selectedRows || []).slice(0, 64), observedSelectedRows: Array.from(navigationPlan.observedSelectedRows || []).slice(0, 64), observedSelectedRecords: navigationPlan.observedSelectedRecords, expectedSelectedRecords: navigationPlan.expectedSelectedRecords, observedRecordCount: navigationPlan.observedRecordCount, expectedRecordCount: navigationPlan.expectedRecordCount, recordMismatch: navigationPlan.recordMismatch, reason: navigationPlan.reason });
       navigationPlanReceipt = { ...navigationPlanReceipt, history: navigationPlanHistory.slice(-64) };
       navigationPlanReceipt = { ...navigationPlanReceipt, expansion: { depth, beamPlanCount: beamPlans.length, selectedCount: navigationPlan.selectedCount, selectedPlanCount: navigationPlan.selectedRows?.length || 0 } };
       const selectedByPlan = new Map();
