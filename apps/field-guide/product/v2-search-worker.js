@@ -21,7 +21,7 @@ import { createWebGpuFrontierNavigationScheduler } from '../../../packages/searc
 import { createWebGpuDeviceCache } from '../../../packages/search-core/src/webgpu-device-cache.js?v=20260811-lifecycle1';
 import { probeWebGpuExecutionCapabilities } from '../../../packages/search-core/src/webgpu-execution-probe.js?v=20260810-gpu35';
 import { createNavigationCoordinator } from '../../../packages/search-worker/src/navigation-coordinator.js?v=20260811-gpu-expansion3';
-import { search } from './v2-legacy-search.js?v=20260811-gpufirst65';
+import { search } from './v2-legacy-search.js?v=20260811-gpufirst66';
 
 const deviceCache = createWebGpuDeviceCache({ gpu: globalThis.navigator?.gpu });
 const candidatePrefilter = createWebGpuCandidatePrefilter({ gpu: globalThis.navigator?.gpu, deviceCache });
@@ -110,6 +110,11 @@ async function runProductSearch(request, context) {
     // canonical replay remains the CPU correctness boundary; the diagnostic
     // verify-resident-navigation mode opts back into per-depth readback.
     verifyGpuResidentNavigation: steering.verifyGpuResidentNavigation === true,
+    // The CPU frontier coordinates are a small control-plane input. When GPU
+    // target generation is available, recomputing the identical 64x64 target
+    // pool and reading it back only adds a synchronization barrier; candidate
+    // generation and resident navigation remain GPU-owned.
+    skipRedundantGpuTargetPool: steering.skipRedundantGpuTargetPool !== false,
     gpuExecution: { ...gpuExecution, stageAvailability },
     knownSignatures: request.knownSignatureHints,
     searchSalt: request.seed,

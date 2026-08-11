@@ -1239,7 +1239,23 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       if (nodes - mainNodeStart >= NODE_LIMIT) break;
       beamPlans.push({ state });
     }
-    const gpuTargetPools = await generateFrontierTargetPoolsAcrossBeam(beamPlans, options.disableGpuTargetPool ? null : frontierTargetPool, centroidId, receipt => { frontierTargetPoolReceipt = receipt; }, frontierTargetPoolStatus);
+    const useTargetGeneratedFrontier = options.disableGpuCandidateGeneration !== true && options.disableGpuTargetGeneration !== true && frontierTargetGeneratorStatus?.status === 'available';
+    const skipRedundantGpuTargetPool = options.skipRedundantGpuTargetPool === true && useTargetGeneratedFrontier;
+    const gpuTargetPools = await generateFrontierTargetPoolsAcrossBeam(
+      beamPlans,
+      options.disableGpuTargetPool || skipRedundantGpuTargetPool ? null : frontierTargetPool,
+      centroidId,
+      receipt => { frontierTargetPoolReceipt = receipt; },
+      frontierTargetPoolStatus,
+    );
+    if (skipRedundantGpuTargetPool) frontierTargetPoolReceipt = {
+      status: 'skipped',
+      backend: 'cpu-control',
+      parity: 'structural',
+      batch: 'beam',
+      stateCount: beamPlans.length,
+      reason: 'redundant-with-gpu-target-generation-input',
+    };
     for (const [planIndex, plan] of beamPlans.entries()) {
       const state = plan.state, openCentroid = [...centroidRing].filter(ringKey => !state.field.has(ringKey)), frontier = new Map();
       for (const cellKey of state.field) {
@@ -1251,7 +1267,6 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       plan.targetPool = ringTargets.length ? ringTargets : frontierTargets;
     }
     for (let index = beamPlans.length - 1; index >= 0; index--) if (!beamPlans[index].targetPool?.length) beamPlans.splice(index, 1);
-    const useTargetGeneratedFrontier = options.disableGpuCandidateGeneration !== true && options.disableGpuTargetGeneration !== true && frontierTargetGeneratorStatus?.status === 'available';
     const generatedByTargetBeam = useTargetGeneratedFrontier
       ? await generateFrontierTargetTranslationsAcrossBeam(beamPlans, frontierTargetGenerator, positionLocks, seedOrigin, receipt => { frontierTargetGenerationReceipt = receipt; }, frontierTargetGeneratorStatus, frontierCandidateRecords, navigationAvailability?.status !== 'available' || options.disableGpuResidentNavigation === true, isCancelled, options.verifyGpuResidentNavigation !== false)
       : null;

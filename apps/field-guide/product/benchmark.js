@@ -65,6 +65,7 @@ function runWorker(pieces, backend, onProgress = () => {}) {
           frontierMetrics: lastResult.frontierMetrics || null,
           fieldMetrics: lastResult.fieldMetrics || null,
           frontierTargetGeneration: lastResult.frontierTargetGeneration || null,
+          frontierTargetPool: lastResult.frontierTargetPool || null,
           navigationPlan: lastResult.navigationPlan || null,
           frontierScore: lastResult.frontierScore || null,
           frontierRanker: lastResult.frontierRanker || null,
