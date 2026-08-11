@@ -258,7 +258,7 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
   let totalCandidateCount = 0, batches = 0, backend = 'compute-shader', generationParity = 'verified', fallbackReason = null, recordBackend = 'cpu-oracle', recordParity = 'oracle', recordInputCount = 0, recordOutputCount = 0, persistent = false, persistentDispatchCount = 0, persistentBufferCapacity = null, recordPersistent = false, recordDispatchCount = 0, recordBufferCapacity = null;
   for (const chunk of chunks) {
     const result = !materializeCandidates && typeof frontierTargetGenerator.generateBatchResident === 'function'
-      ? await frontierTargetGenerator.generateBatchResident(chunk.inputs, { isCancelled })
+      ? await frontierTargetGenerator.generateBatchResident(chunk.inputs, { isCancelled, verifyParity: true })
       : await frontierTargetGenerator.generateBatch(chunk.inputs, { isCancelled });
     if (result?.backend) backend = result.backend;
     if (result?.parity === 'deferred') generationParity = 'deferred';

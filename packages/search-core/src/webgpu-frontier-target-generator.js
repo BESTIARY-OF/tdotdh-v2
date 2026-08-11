@@ -197,7 +197,7 @@ function parityMismatchReason(actualItems, expectedItems) {
       if (actual.validity[index] !== expected.validity[index]) return `oracle-parity-mismatch:item-${itemIndex}:validity-${index}:gpu-${actual.validity[index]}:cpu-${expected.validity[index]}`;
     }
   }
-  return 'oracle-parity-mismatch';
+  return null;
 }
 
 async function runGpuBatch(device, normalized, grid, shaderSource) {
@@ -342,7 +342,7 @@ export function createWebGpuFrontierTargetGenerator({ gpu = globalThis.navigator
         return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'verified', batch: 'verified', candidateCount: normalized.candidateCount, items: result, ...(resident?.persistent ? { persistent: true, dispatch: resident.dispatch, dispatchCount: resident.dispatchCount, residentHandle: resident.residentHandle, bufferCapacity: resident.bufferCapacity } : {}) });
       } catch (error) { if (error?.name === 'AbortError' || isCancelled?.()) return Object.freeze({ ...status, status: 'cancelled', backend: 'webgpu', parity: 'deferred', reason: 'frontier-target-generation-cancelled', candidateCount: normalized.candidateCount, items: cpu.items, readback: 'deferred' }); persistentRunner?.reset(); persistentRunner = null; deviceCache.reset(); return Object.freeze({ ...status, status: 'unavailable', reason: `webgpu-batch-execution-failed:${error?.message || String(error)}`, candidateCount: normalized.candidateCount, items: cpu.items }); }
       },
-    async generateBatchResident(inputs, { isCancelled = null } = {}) {
+    async generateBatchResident(inputs, { isCancelled = null, verifyParity = false } = {}) {
       const normalized = normalizeBatchInput(inputs, normalizedGrid), cpu = cpuGenerateFrontierTargetBatch(inputs, normalizedGrid), status = await availability();
       if (typeof isCancelled === 'function' && isCancelled()) return Object.freeze({ ...status, status: 'cancelled', backend: 'webgpu', parity: 'deferred', reason: 'frontier-target-generation-cancelled', candidateCount: normalized.candidateCount, items: cpu.items, readback: 'deferred' });
       if (status.status !== 'available') return Object.freeze({ ...status, candidateCount: normalized.candidateCount, items: cpu.items, readback: 'cpu-fallback' });
@@ -350,8 +350,11 @@ export function createWebGpuFrontierTargetGenerator({ gpu = globalThis.navigator
         const device = await deviceCache.getDevice();
         if (persistent && !persistentRunner) persistentRunner = createPersistentGpuTargetRunner(device, normalizedGrid, shaderSource);
         if (!persistentRunner) return Object.freeze({ ...status, status: 'unavailable', reason: 'resident-target-runner-unavailable', candidateCount: normalized.candidateCount, items: cpu.items, readback: 'cpu-fallback' });
-        const resident = await persistentRunner.run(normalized, { readback: false, isCancelled });
-        return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'deferred', batch: 'resident', candidateCount: normalized.candidateCount, items: cpu.items, readback: 'deferred', persistent: true, dispatch: resident.dispatch, dispatchCount: resident.dispatchCount, residentHandle: resident.residentHandle, bufferCapacity: resident.bufferCapacity });
+        const resident = await persistentRunner.run(normalized, { readback: verifyParity, isCancelled });
+        if (verifyParity && (!resident.items || parityMismatchReason(resident.items, cpu.items) !== null)) {
+          return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'rejected', backend: 'webgpu', parity: 'rejected', reason: parityMismatchReason(resident.items || [], cpu.items), batch: 'resident', candidateCount: normalized.candidateCount, items: cpu.items, readback: 'result-boundary' });
+        }
+        return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'webgpu', parity: verifyParity ? 'verified' : 'deferred', batch: 'resident', candidateCount: normalized.candidateCount, items: verifyParity ? resident.items : cpu.items, readback: verifyParity ? 'result-boundary' : 'deferred', persistent: true, dispatch: resident.dispatch, dispatchCount: resident.dispatchCount, residentHandle: resident.residentHandle, bufferCapacity: resident.bufferCapacity });
       } catch (error) { if (error?.name === 'AbortError' || isCancelled?.()) return Object.freeze({ ...status, status: 'cancelled', backend: 'webgpu', parity: 'deferred', reason: 'frontier-target-generation-cancelled', candidateCount: normalized.candidateCount, items: cpu.items, readback: 'deferred' }); persistentRunner?.reset(); persistentRunner = null; deviceCache.reset(); return Object.freeze({ ...status, status: 'unavailable', reason: `webgpu-resident-batch-execution-failed:${error?.message || String(error)}`, candidateCount: normalized.candidateCount, items: cpu.items, readback: 'cpu-fallback' }); }
       },
   });
