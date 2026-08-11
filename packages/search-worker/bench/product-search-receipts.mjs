@@ -141,13 +141,20 @@ async function run(mode, options = {}) {
     cursor: { depth: 0, nodeOffset: 0, rootChoice: 0 },
   });
   const started = performance.now();
-  const result = await search(pieces, [], { searchStrategy: mode, candidatePrefilter, frontierMetrics, fieldMetrics, frontierState, frontierTargetGenerator, frontierTargetPool, frontierTopology, frontierCompactor, navigationBatch: details => navigation.beginBatch(details), navigationCancellation: cancelled => navigation.observeCancellation(cancelled), reportProgress: progress => navigation.observeProgress(progress.cursor), ...options });
+  const maxDurationMs = Number.isFinite(options.maxDurationMs) ? Math.max(1, options.maxDurationMs) : null;
+  const deadline = maxDurationMs == null ? null : started + maxDurationMs;
+  const callerCancelled = typeof options.isCancelled === 'function' ? options.isCancelled : () => false;
+  const result = await search(pieces, [], { searchStrategy: mode, candidatePrefilter, frontierMetrics, fieldMetrics, frontierState, frontierTargetGenerator, frontierTargetPool, frontierTopology, frontierCompactor, navigationBatch: details => navigation.beginBatch(details), navigationCancellation: cancelled => navigation.observeCancellation(cancelled), reportProgress: progress => navigation.observeProgress(progress.cursor), ...options, isCancelled: () => callerCancelled() || (deadline != null && performance.now() >= deadline) });
   const navigationReceipt = navigation.complete(result);
   return {
     mode,
     elapsedMs: Number((performance.now() - started).toFixed(2)),
+    bounded: maxDurationMs != null,
+    cancelled: deadline != null && performance.now() >= deadline && !result.placements,
     nodes: result.nodes,
     placements: Boolean(result.placements),
+    centroidFamilyId: result.metrics?.centroidFamilyId || null,
+    centroidSeed: result.metrics?.centroidSeed || null,
     prefilter: result.prefilter,
     ...candidatePrefilter.receipt,
     frontierMetrics: frontierMetrics.receipt,
@@ -158,16 +165,19 @@ async function run(mode, options = {}) {
     frontierTopology: frontierTopology.receipt,
     frontierCompactor: frontierCompactor.receipt,
     navigation: navigationReceipt,
-    result,
+    ...(bounded ? {} : { result }),
   };
 }
 
-const breadth = await run('breadth');
-const depth = await run('depth');
+const bounded = process.argv.includes('--bounded');
+const runOptions = bounded ? { maxDurationMs: 15000 } : {};
+const breadth = await run('breadth', runOptions);
+const depth = await run('depth', runOptions);
 const target = await run('balanced', {
-  targetFamily: breadth.result.metrics?.centroidFamilyId || null,
-  targetSeed: breadth.result.metrics?.centroidSeed || null,
+  targetFamily: breadth.centroidFamilyId,
+  targetSeed: breadth.centroidSeed,
   searchSalt: 'product-search-receipt-target',
+  ...runOptions,
 });
 
 console.log(JSON.stringify({
