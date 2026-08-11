@@ -498,9 +498,11 @@ export function createWebGpuFrontierNavigationScheduler({ gpu = globalThis.navig
       const expectedRowIndices = expectedRows ? expectedRows.flatMap((row, index) => row?.valid === 0 ? [] : [index]) : null;
       const expected = expectedRows ? cpuSelectFrontierNavigationRows(createWebGpuFrontierNavigationPlan(expectedRows.filter(row => row?.valid !== 0)), { planCount }) : null;
       const expectedResidentRows = expected ? Uint32Array.from(expected.selectedRows, index => expectedRowIndices[index]) : null;
+      const residentTargetOrdinalOverflow = expectedRows?.some(row => row?.valid !== 0 && row.targetOrdinal >= FRONTIER_NAVIGATION_RESIDENT_MAX_TARGETS) || false;
       if (!rowCount) return Object.freeze({ schema: WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA, status: 'not-used', backend: 'webgpu', parity: expected ? 'verified' : 'deferred', rowCount: 0, selectedCount: 0, selectedRows: new Uint32Array(), planCount: planCount || 0, inputDigest, dispatch: 'webgpu-navigation-resident-records' });
       try {
         assertNotAborted(signal);
+        if (residentTargetOrdinalOverflow) return Object.freeze({ ...expected, status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', rowCount, selectedCount: expectedResidentRows.length, selectedRows: expectedResidentRows, planCount: expected.planCount, inputDigest, dispatch: 'cpu-oracle-resident-target-cap-fallback', reason: 'resident-target-ordinal-exceeds-cap' });
         let result;
         if (typeof accelerator === 'function') result = await accelerator({ entries: normalized, oracle: expected, inputDigest });
         else {

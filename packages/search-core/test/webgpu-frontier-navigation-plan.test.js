@@ -75,6 +75,22 @@ const validityReceipt = await validityScheduler.selectResidentCandidateRecords([
 ], { planCount: 2, expectedRows: rows.map((row, index) => ({ ...row, valid: index === 2 ? 0 : 1 })) });
 assert.equal(validityReceipt.parity, 'verified');
 assert.deepEqual(Array.from(validityReceipt.selectedRows), [0, 1, 3]);
+let overflowAcceleratorCalled = false;
+let overflowHandleReleased = false;
+const overflowReceipt = await createWebGpuFrontierNavigationScheduler({ accelerator: async () => { overflowAcceleratorCalled = true; return { status: 'completed', selectedRows: [1, 2], dispatch: 'incorrect-overflow-dispatch' }; } }).selectResidentCandidateRecords([
+  { residentHandle: { schema: 'tdotdh.webgpu-frontier-candidate-records-resident.v0', recordCount: 3, recordsBuffer: {}, release() { overflowHandleReleased = true; } }, piecePlans: [0, 0, 0] },
+], { planCount: 1, expectedRows: [
+  { planIndex: 0, targetOrdinal: 1024, pieceId: 4, candidateIndex: 0, originX: 0, originY: 0, targetX: 0, targetY: 1, valid: 1 },
+  { planIndex: 0, targetOrdinal: 0, pieceId: 5, candidateIndex: 1, originX: 1, originY: 0, targetX: 1, targetY: 1, valid: 1 },
+  { planIndex: 0, targetOrdinal: 0, pieceId: 6, candidateIndex: 2, originX: 2, originY: 0, targetX: 2, targetY: 1, valid: 1 },
+] });
+assert.equal(overflowAcceleratorCalled, false, 'resident target overflow must bypass the resident accelerator');
+assert.equal(overflowHandleReleased, true, 'resident target overflow must release the handle');
+assert.equal(overflowReceipt.status, 'fallback');
+assert.equal(overflowReceipt.backend, 'cpu-oracle');
+assert.equal(overflowReceipt.parity, 'oracle');
+assert.equal(overflowReceipt.reason, 'resident-target-ordinal-exceeds-cap');
+assert.deepEqual(Array.from(overflowReceipt.selectedRows), [0]);
 
 {
   const previousBufferUsage = globalThis.GPUBufferUsage, previousMapMode = globalThis.GPUMapMode;
