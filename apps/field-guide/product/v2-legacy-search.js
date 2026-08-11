@@ -1345,8 +1345,16 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         entries.push({ piece: ref.piece, candidate });
         selectedByPlan.set(ref.planIndex, entries);
       }
+      const candidateGroups = beamPlans.map((plan, planIndex) => ({ planIndex, entries: selectedByPlan.get(planIndex) || [] })).filter(group => group.entries.length);
+      const flattenedCandidates = candidateGroups.flatMap(group => group.entries.map(entry => ({ entry, planIndex: group.planIndex })));
+      const filteredCandidates = await filterCandidates(flattenedCandidates.map(item => item.entry));
+      const ownerByEntry = new Map(flattenedCandidates.map(item => [item.entry, item.planIndex])), filteredByPlan = new Map();
+      for (const entry of filteredCandidates) {
+        const planIndex = ownerByEntry.get(entry), entries = filteredByPlan.get(planIndex) || [];
+        entries.push(entry); filteredByPlan.set(planIndex, entries);
+      }
       for (const [planIndex, plan] of beamPlans.entries()) {
-        const selectedOptions = await filterCandidates(selectedByPlan.get(planIndex) || []);
+        const selectedOptions = filteredByPlan.get(planIndex) || [];
         if (selectedOptions.length) beamJobs.push({ state: plan.state, entries: selectedOptions });
       }
     }
