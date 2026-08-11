@@ -29,7 +29,7 @@ const frontierValidator = createWebGpuFrontierValidator({ gpu: globalThis.naviga
 const frontierEvaluator = createWebGpuFrontierEvaluator({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierGenerator = createWebGpuFrontierGenerator({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierTargetGenerator = createWebGpuFrontierTargetGenerator({ gpu: globalThis.navigator?.gpu, deviceCache });
-const frontierTargetPool = createWebGpuFrontierTargetPool({ gpu: globalThis.navigator?.gpu, deviceCache });
+  const frontierTargetPool = createWebGpuFrontierTargetPool({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierMetrics = createWebGpuFrontierMetrics({ gpu: globalThis.navigator?.gpu, deviceCache });
 const fieldMetrics = createWebGpuFieldMetrics({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierState = createWebGpuLabeledFrontierState({ gpu: globalThis.navigator?.gpu, deviceCache });
@@ -64,6 +64,7 @@ async function runProductSearch(request, context) {
     : await probeWebGpuExecutionCapabilities({ gpu: globalThis.navigator?.gpu, requiredLimits: { maxStorageBufferBindingSize: 33554432 }, deviceCache });
   const navigation = createNavigationCoordinator({ ticket: request.ticket, cursor: request.cursor });
   const frontierNavigator = createWebGpuFrontierNavigator({ stateAdapter: residentFrontierState, ticket: request.ticket, cursor: request.cursor, isCancelled: context.isCancelled });
+  let executionDecision = null;
   const stageAvailability = forceCpuBenchmark ? {} : await getGpuStageAvailability();
   const stage = (name, adapter = gpuStageAdapters[name]) => forceCpuBenchmark ? null : adapter;
   const result = await search(request.pieces, steering.knownCentroidFamilies || [], {
@@ -98,6 +99,7 @@ async function runProductSearch(request, context) {
     navigationBatch: details => navigation.beginBatch(details),
     navigationCancellation: cancelled => navigation.observeCancellation(cancelled),
     reportProgress: progress => context.reportProgress({ ...progress, cursor: navigation.observeProgress(progress.cursor) }),
+    reportExecutionDecision: decision => { executionDecision = decision; },
   });
   return {
     ...result,
@@ -106,6 +108,7 @@ async function runProductSearch(request, context) {
     placements: Array.isArray(result?.placements) ? result.placements : [],
     hasPlacement: Array.isArray(result?.placements) && result.placements.length > 0,
     benchmarkBackend,
+    executionDecision,
     protocolOperation: 'product-search',
   };
 }
