@@ -77,8 +77,11 @@ function fieldShapeMetrics(placements, map, outside, minX, maxX, minY, maxY, cen
   const inletRisk = inletCells + inletEdges * .25 + nestedPeninsulaDepth * 2 + terminalChains * 2;
   return { inletCells, inletEdges, peninsulaDepth, nestedPeninsulaDepth, terminalChains, inletRisk };
 }
-function fieldMetrics(placements, centroidId = 3, aggregate = null, gpuState = null) {
-  const map = occupiedMap(placements), cells = [...map.keys()].map(k => { const [x, y] = k.split(',').map(Number); return { x, y }; });
+function fieldMetrics(placements, centroidId = 3, aggregate = null, gpuState = null, parentMetrics = null, candidate = null) {
+  const reuseParent = parentMetrics?.map instanceof Map && Array.isArray(parentMetrics.cells) && candidate?.cells?.length;
+  const map = reuseParent ? new Map(parentMetrics.map) : occupiedMap(placements);
+  if (reuseParent) for (const cell of candidate.cells) map.set(key(cell.x, cell.y), candidate.id);
+  const cells = reuseParent ? [...parentMetrics.cells, ...candidate.cells] : [...map.keys()].map(k => { const [x, y] = k.split(',').map(Number); return { x, y }; });
   const minX = aggregate ? aggregate[2] : Math.min(...cells.map(c => c.x)), maxX = aggregate ? aggregate[3] : Math.max(...cells.map(c => c.x)), minY = aggregate ? aggregate[4] : Math.min(...cells.map(c => c.y)), maxY = aggregate ? aggregate[5] : Math.max(...cells.map(c => c.y));
   const outside = aggregate ? null : new Set([key(minX - 1, minY - 1)]), queue = aggregate ? null : [{ x: minX - 1, y: minY - 1 }];
   if (!aggregate) {
@@ -1496,7 +1499,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         const hasGpuGeometryScore = gpuGeometryScore != null || gpuEvaluatorScore != null || gpuTopologyScore != null;
         const contact = hasGpuGeometryScore ? 0 : candidate.cells.reduce((n, c) => n + adjacent(c).filter(a => state.field.has(key(a.x, a.y))).length, 0), centroidContact = hasGpuGeometryScore ? 0 : candidate.cells.reduce((n, c) => n + adjacent8(c).filter(a => seedSet.has(key(a.x, a.y))).length, 0), ringCoverage = hasGpuGeometryScore ? 0 : candidate.cells.reduce((n, c) => n + (centroidRing.has(key(c.x, c.y)) ? 1 : 0), 0), openCentroid = hasGpuGeometryScore ? 0 : [...centroidRing].filter(ringKey => !state.field.has(ringKey) && !candidate.cells.some(c => key(c.x, c.y) === ringKey)).length;
         nodes++;
-        const candidatePlacements = [...state.placements, candidate], candidateMetrics = fieldMetrics(candidatePlacements, centroidId, gpuFieldMetrics, gpuState), candidateFamilyTarget = candidateMetrics.centroidSeed === 'none' || targetSeedCompatible(candidateMetrics.centroidSeed, targetSeed);
+        const candidatePlacements = [...state.placements, candidate], candidateMetrics = fieldMetrics(candidatePlacements, centroidId, gpuFieldMetrics, gpuState, state.bounds, candidate), candidateFamilyTarget = candidateMetrics.centroidSeed === 'none' || targetSeedCompatible(candidateMetrics.centroidSeed, targetSeed);
         if (targetFamily && !candidateFamilyTarget) return null;
         const targetProgress = targetFamily ? targetSeedProgress(candidateMetrics.centroidSeed, targetSeed) : 0, familyIsNew = !knownFamilies.has(candidateMetrics.centroidFamilyId), hint = searchHints && positionPreferences[piece.id] ? pieceDirections(candidatePlacements, piece.id, centroidId).includes(positionPreferences[piece.id]) : false, hintMatches = (state.hintMatches || 0) + (hint ? 1 : 0);
         const targetBonus = targetFamily ? -320 * targetProgress : 0;
