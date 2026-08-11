@@ -139,6 +139,60 @@ function nextPowerOfTwo(value) {
   return result;
 }
 
+function createPersistentGpuBeamRunner(device) {
+  const usage = globalThis.GPUBufferUsage, mapMode = globalThis.GPUMapMode;
+  let resources = null, queue = Promise.resolve();
+  const destroy = () => {
+    if (!resources) return;
+    for (const buffer of Object.values(resources.buffers)) buffer.destroy();
+    resources = null;
+  };
+  const ensure = paddedCount => {
+    const rowCapacity = nextPowerOfTwo(Math.max(1, paddedCount));
+    if (resources && resources.rowCapacity >= rowCapacity) return resources;
+    destroy();
+    const buffers = {
+      inputs: device.createBuffer({ size: rowCapacity * 48, usage: usage.STORAGE | usage.COPY_DST }),
+      rowsA: device.createBuffer({ size: rowCapacity * 16, usage: usage.STORAGE | usage.COPY_SRC }),
+      rowsB: device.createBuffer({ size: rowCapacity * 16, usage: usage.STORAGE | usage.COPY_SRC }),
+      params: device.createBuffer({ size: 16, usage: usage.UNIFORM | usage.COPY_DST }),
+      readback: device.createBuffer({ size: rowCapacity * 16, usage: usage.MAP_READ | usage.COPY_DST }),
+    };
+    const scoreModule = device.createShaderModule({ code: SCORE_SHADER }), scoreInputModule = device.createShaderModule({ code: SCORE_INPUT_SHADER }), sortModule = device.createShaderModule({ code: SORT_SHADER });
+    const scorePipeline = device.createComputePipeline({ layout: 'auto', compute: { module: scoreModule, entryPoint: 'main' } }), scoreInputPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: scoreInputModule, entryPoint: 'main' } }), sortPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: sortModule, entryPoint: 'main' } });
+    const scoreEntries = (pipeline, output) => ({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.inputs } }, { binding: 1, resource: { buffer: output } }, { binding: 2, resource: { buffer: buffers.params } }] });
+    const scoreBindGroup = device.createBindGroup(scoreEntries(scorePipeline, buffers.rowsA)), scoreInputBindGroup = device.createBindGroup(scoreEntries(scoreInputPipeline, buffers.rowsA));
+    const sortEntries = (input, output) => ({ layout: sortPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: input } }, { binding: 1, resource: { buffer: output } }, { binding: 2, resource: { buffer: buffers.params } }] });
+    const sortAToB = device.createBindGroup(sortEntries(buffers.rowsA, buffers.rowsB)), sortBToA = device.createBindGroup(sortEntries(buffers.rowsB, buffers.rowsA));
+    resources = { buffers, scorePipeline, scoreInputPipeline, sortPipeline, scoreBindGroup, scoreInputBindGroup, sortAToB, sortBToA, rowCapacity };
+    return resources;
+  };
+  const checkCancelled = (signal, isCancelled) => {
+    if (signal?.aborted || isCancelled?.()) { const error = new Error('resident beam selection cancelled'); error.name = 'AbortError'; throw error; }
+  };
+  const runExclusive = async (rows, retain, signal, isCancelled, scoreInputs) => {
+    const paddedCount = nextPowerOfTwo(rows.length), current = ensure(paddedCount), { buffers } = current;
+    checkCancelled(signal, isCancelled);
+    device.queue.writeBuffer(buffers.inputs, 0, scoreInputs ? packScoreInputs(rows) : packRows(rows));
+    device.queue.writeBuffer(buffers.params, 0, new Uint32Array([rows.length, paddedCount, 0, 0]));
+    let encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
+    pass.setPipeline(scoreInputs ? current.scoreInputPipeline : current.scorePipeline); pass.setBindGroup(0, scoreInputs ? current.scoreInputBindGroup : current.scoreBindGroup); pass.dispatchWorkgroups(Math.ceil(paddedCount / RESIDENT_BEAM_WORKGROUP_SIZE)); pass.end(); device.queue.submit([encoder.finish()]);
+    let sourceIsA = true;
+    for (let k = 2; k <= paddedCount; k *= 2) for (let j = k / 2; j >= 1; j /= 2) {
+      checkCancelled(signal, isCancelled);
+      device.queue.writeBuffer(buffers.params, 0, new Uint32Array([rows.length, paddedCount, j, k]));
+      encoder = device.createCommandEncoder(); pass = encoder.beginComputePass(); pass.setPipeline(current.sortPipeline); pass.setBindGroup(0, sourceIsA ? current.sortAToB : current.sortBToA); pass.dispatchWorkgroups(Math.ceil(paddedCount / RESIDENT_BEAM_WORKGROUP_SIZE)); pass.end(); device.queue.submit([encoder.finish()]); sourceIsA = !sourceIsA;
+    }
+    checkCancelled(signal, isCancelled);
+    encoder = device.createCommandEncoder(); encoder.copyBufferToBuffer(sourceIsA ? buffers.rowsA : buffers.rowsB, 0, buffers.readback, 0, Math.max(1, retain) * 16); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone(); checkCancelled(signal, isCancelled);
+    await buffers.readback.mapAsync(mapMode.READ); const view = new DataView(buffers.readback.getMappedRange()), indices = []; for (let index = 0; index < retain; index++) indices.push(view.getUint32(index * 16 + 8, true)); buffers.readback.unmap(); return indices;
+  };
+  return Object.freeze({
+    run(rows, retain, signal, isCancelled, scoreInputs) { const task = queue.then(() => runExclusive(rows, retain, signal, isCancelled, scoreInputs)); queue = task.catch(() => {}); return task; },
+    reset() { queue = Promise.resolve(); destroy(); },
+  });
+}
+
 export function cpuSelectResidentBeam(rows, retain) {
   const normalized = normalizeRows(rows), limit = Math.min(Math.max(0, Number(retain) || 0), normalized.length);
   const indices = normalized.map((row, index) => index).sort((left, right) => normalized[left].score - normalized[right].score || normalized[left].tie - normalized[right].tie || left - right).slice(0, limit);
@@ -213,7 +267,7 @@ async function runGpu(device, rows, retain, signal, isCancelled, { scoreInputs =
 }
 
 export function createWebGpuResidentBeamSelector({ gpu = globalThis.navigator?.gpu, requiredLimits = { maxComputeWorkgroupSizeX: RESIDENT_BEAM_WORKGROUP_SIZE }, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
-  let availabilityPromise = null;
+  let availabilityPromise = null, persistentRunner = null;
   const availability = async () => {
     if (!availabilityPromise) availabilityPromise = probeWebGpuCapabilities({ gpu, requiredLimits }).then(probe => probe.adapterAvailable && probe.requiredLimitsSatisfied ? Object.freeze({ schema: WEBGPU_RESIDENT_BEAM_SELECTOR_SCHEMA, status: 'available', backend: 'webgpu', algorithm: 'resident-score-rank', readback: 'selected-indices' }) : Object.freeze({ schema: WEBGPU_RESIDENT_BEAM_SELECTOR_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: probe.adapterAvailable ? 'webgpu-required-limits-unsatisfied' : 'webgpu-adapter-unavailable' }));
     return availabilityPromise;
@@ -226,9 +280,10 @@ export function createWebGpuResidentBeamSelector({ gpu = globalThis.navigator?.g
       try {
         const device = await deviceCache.getDevice(), paddedCount = nextPowerOfTwo(normalized.length), maxRows = Math.floor((Number(device.limits?.maxStorageBufferBindingSize) || 0) / 16);
         if (maxRows < paddedCount) return unavailable('resident-beam-storage-capacity', normalized, retain);
-        const indices = await runGpu(device, normalized, cpu.selectedCount, signal, isCancelled), parity = JSON.stringify(indices) === JSON.stringify(cpu.indices);
+        if (!persistentRunner) persistentRunner = createPersistentGpuBeamRunner(device);
+        const indices = await persistentRunner.run(normalized, cpu.selectedCount, signal, isCancelled, false), parity = JSON.stringify(indices) === JSON.stringify(cpu.indices);
         return parity ? Object.freeze({ ...cpu, status: 'completed', backend: 'webgpu', parity: 'verified', readback: 'selected-indices', algorithm: 'resident-score-rank' }) : unavailable('oracle-parity-mismatch', normalized, retain);
-      } catch (error) { deviceCache.reset(); if (error?.name === 'AbortError') return Object.freeze({ ...cpu, status: 'cancelled', backend: 'webgpu', parity: 'deferred', reason: 'resident-beam-selection-cancelled' }); return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalized, retain); }
+      } catch (error) { persistentRunner?.reset(); persistentRunner = null; deviceCache.reset(); if (error?.name === 'AbortError') return Object.freeze({ ...cpu, status: 'cancelled', backend: 'webgpu', parity: 'deferred', reason: 'resident-beam-selection-cancelled' }); return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalized, retain); }
     },
     async selectScoreInputs(rows, retain, { signal, isCancelled } = {}) {
       const normalized = normalizeScoreInputs(rows), cpu = cpuSelectResidentScoreInputs(normalized, retain), status = await availability();
@@ -236,9 +291,10 @@ export function createWebGpuResidentBeamSelector({ gpu = globalThis.navigator?.g
       try {
         const device = await deviceCache.getDevice(), paddedCount = nextPowerOfTwo(normalized.length), maxRows = Math.floor((Number(device.limits?.maxStorageBufferBindingSize) || 0) / 16);
         if (maxRows < paddedCount) return unavailableScoreInputs('resident-beam-storage-capacity', normalized, retain);
-        const indices = await runGpu(device, normalized, cpu.selectedCount, signal, isCancelled, { scoreInputs: true }), parity = JSON.stringify(indices) === JSON.stringify(cpu.indices);
+        if (!persistentRunner) persistentRunner = createPersistentGpuBeamRunner(device);
+        const indices = await persistentRunner.run(normalized, cpu.selectedCount, signal, isCancelled, true), parity = JSON.stringify(indices) === JSON.stringify(cpu.indices);
         return parity ? Object.freeze({ ...cpu, status: 'completed', backend: 'webgpu', parity: 'verified', readback: 'selected-indices', algorithm: 'resident-score-input-rank' }) : unavailableScoreInputs('oracle-parity-mismatch', normalized, retain);
-      } catch (error) { deviceCache.reset(); if (error?.name === 'AbortError') return Object.freeze({ ...cpu, status: 'cancelled', backend: 'webgpu', parity: 'deferred', reason: 'resident-score-rank-cancelled' }); return unavailableScoreInputs(`webgpu-execution-failed:${error?.message || String(error)}`, normalized, retain); }
+      } catch (error) { persistentRunner?.reset(); persistentRunner = null; deviceCache.reset(); if (error?.name === 'AbortError') return Object.freeze({ ...cpu, status: 'cancelled', backend: 'webgpu', parity: 'deferred', reason: 'resident-score-rank-cancelled' }); return unavailableScoreInputs(`webgpu-execution-failed:${error?.message || String(error)}`, normalized, retain); }
     },
   });
 }
