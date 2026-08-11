@@ -220,6 +220,7 @@ const lockedResult = await search(lockedPieces, [], {
 });
 const residentBaseline = await search(lockedPieces, [], { ...sharedOptions, searchStrategy: 'breadth', frontierGenerator });
 const residentResult = await search(lockedPieces, [], { ...sharedOptions, searchStrategy: 'breadth', frontierGenerator, frontierNavigator: residentNavigator });
+const gpuFirstBreadthResult = await search(lockedPieces, [], { ...sharedOptions, searchStrategy: 'breadth', frontierGenerator, gpuExecution: { deviceAvailable: true } });
 
 assert.equal(result.type, 'done');
 assert.deepEqual(singleResult.prefilter, { status: 'used', backend: 'test-compute-shader', candidateCount: 6 });
@@ -272,6 +273,8 @@ assert.equal(residentResult.frontierState.resident, true);
 assert.equal(residentResult.frontierState.backend, 'resident-test-webgpu');
 assert.deepEqual(residentResult.placements, residentBaseline.placements);
 assert.deepEqual(residentResult.metrics, residentBaseline.metrics);
+assert.equal(gpuFirstBreadthResult.frontierGeneration.status, 'used', 'GPU-capable breadth search must reach frontier generation instead of returning from the CPU locked-branch shortcut');
+assert.equal(gpuFirstBreadthResult.frontierGeneration.backend, 'test-frontier-generator');
 assert.ok(frontierDeduplicatorCalls > 0);
 assert.equal(targetPoolResult.frontierDedup.status, 'used');
 assert.equal(targetPoolResult.frontierDedup.backend, 'test-frontier-deduplicator');

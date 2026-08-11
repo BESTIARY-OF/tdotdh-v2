@@ -974,6 +974,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const knownFamilies = new Set(knownCentroidFamilies);
   const gpuExecution = options.gpuExecution && typeof options.gpuExecution === 'object' ? options.gpuExecution : null;
   const gpuNavigationEnabled = !gpuExecution || gpuExecution.deviceAvailable === true;
+  const gpuFirstSearch = gpuExecution?.deviceAvailable === true;
   const gpuUnavailableReason = gpuExecution?.reason || 'webgpu-device-unavailable';
   const gpuAdapter = adapter => gpuNavigationEnabled ? adapter : null;
   const candidatePrefilter = gpuAdapter(options.candidatePrefilter);
@@ -1072,11 +1073,11 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     return { beam, depth: Math.max(0, Number(checkpoint.depth) || 0), nodeOffset: Math.max(0, Number(checkpoint.nodeOffset) || 0) };
   };
   const restored = restoreCheckpoint(options.resumeCheckpoint);
-  const seed = { placements: [seedPlacement], field: new Set(seedCells.map(c => key(c.x, c.y))), remaining: pieces.filter(p => p.id !== centroidId), bounds: fieldMetrics([seedPlacement], centroidId), hintMatches: 0 }, seedBranches = restored ? [] : searchStrategy === 'breadth' ? await lockedSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, centroidRing, positionLocks, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; }) : targetFamily ? await targetSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, targetSeed, positionLocks, random, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; }) : [];
+  const seed = { placements: [seedPlacement], field: new Set(seedCells.map(c => key(c.x, c.y))), remaining: pieces.filter(p => p.id !== centroidId), bounds: fieldMetrics([seedPlacement], centroidId), hintMatches: 0 }, seedBranches = restored ? [] : searchStrategy === 'breadth' && !gpuFirstSearch ? await lockedSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, centroidRing, positionLocks, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; }) : targetFamily ? await targetSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, targetSeed, positionLocks, random, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; }) : [];
   if (!restored && targetFamily && (!targetSeed || !seedBranches.length)) targetFamily = null;
   let navigationPlanReceipt = { status: 'cpu-oracle', backend: 'cpu-oracle', parity: 'oracle', rowCount: 0, selectedCount: 0, planCount: 0 };
   let lockedSearchNodes = 0;
-  if (seedBranches.length && searchStrategy === 'breadth') {
+  if (seedBranches.length && searchStrategy === 'breadth' && !gpuFirstSearch) {
     const lockedResult = await searchLockedSeedBranches(pieces, seedBranches, knownFamilies, centroidId, targetNeighborCount, Boolean(targetFamily), knownSignatures, searchHints, positionPreferences, random, quality, candidatePrefilter, receipt => { prefilterReceipt = receipt; }, options.frontierValidator, frontierEvaluator, frontierGenerator, frontierGeneratorStatus, receipt => { frontierReceipt = receipt; }, receipt => { frontierGenerationReceipt = receipt; }, isCancelled, options.frontierMetrics, receipt => { frontierMetricsReceipt = receipt; }, options.frontierState, receipt => { frontierStateReceipt = receipt; }, frontierTopology, receipt => { frontierTopologyReceipt = receipt; }, fieldMetricsAdapter, frontierTargetPool, frontierTargetPoolStatus, receipt => { frontierTargetPoolReceipt = receipt; }, frontierNavigator, frontierCandidateRecords, navigationScheduler, receipt => { navigationPlanReceipt = receipt; }, navigationBatch);
     if (lockedResult?.placements || !targetFamily) return { ...lockedResult, prefilter: prefilterReceipt, frontier: frontierReceipt, navigationPlan: navigationPlanReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierRanker: frontierRankerReceipt, frontierScore: frontierScoreReceipt, frontierCompactor: frontierCompactorReceipt, frontierDedup: frontierDedupReceipt };
     lockedSearchNodes = Number(lockedResult?.nodes) || 0;
