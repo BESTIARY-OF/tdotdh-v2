@@ -52,4 +52,31 @@ assert.equal(flatReceipt.backend, 'webgpu');
 assert.equal(flatReceipt.parity, 'verified');
 assert.equal(flatReceipt.dispatch, 'fake-flat-record-dispatch');
 assert.equal(flatReceipt.plan.rowCount, 2);
+
+{
+  const previousBufferUsage = globalThis.GPUBufferUsage, previousMapMode = globalThis.GPUMapMode;
+  globalThis.GPUBufferUsage = { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, MAP_READ: 16 };
+  globalThis.GPUMapMode = { READ: 1 };
+  let createdBuffers = 0;
+  const fakeDevice = {
+    queue: { writeBuffer() {}, submit() {}, async onSubmittedWorkDone() {} },
+    createBuffer() { createdBuffers += 1; return { destroy() {}, async mapAsync() {}, getMappedRange() { return Uint32Array.from([0, 0, 1, 1]).buffer; }, unmap() {} }; },
+    createShaderModule() { return {}; },
+    createComputePipeline() { return { getBindGroupLayout() { return {}; } }; },
+    createBindGroup() { return {}; },
+    createCommandEncoder() { return { beginComputePass() { return { setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() {}, end() {} }; }, copyBufferToBuffer() {}, finish() { return {}; } }; },
+  };
+  const fakeAdapter = { limits: { maxStorageBufferBindingSize: 64 * 1024 * 1024 }, async requestDevice() { return fakeDevice; } };
+  const persistentScheduler = createWebGpuFrontierNavigationScheduler({ gpu: { async requestAdapter() { return fakeAdapter; } } });
+  const firstPersistent = await persistentScheduler.select(rows, { planCount: 2 });
+  const secondPersistent = await persistentScheduler.select(rows, { planCount: 2 });
+  assert.equal(firstPersistent.backend, 'webgpu');
+  assert.equal(firstPersistent.persistent, true);
+  assert.equal(firstPersistent.dispatch, 'webgpu-navigation-plan-resident');
+  assert.equal(firstPersistent.dispatchCount, 1);
+  assert.equal(secondPersistent.dispatchCount, 2);
+  assert.equal(createdBuffers, 7, 'persistent navigation reuses its seven GPU buffers');
+  if (previousBufferUsage === undefined) delete globalThis.GPUBufferUsage; else globalThis.GPUBufferUsage = previousBufferUsage;
+  if (previousMapMode === undefined) delete globalThis.GPUMapMode; else globalThis.GPUMapMode = previousMapMode;
+}
 console.log('WebGPU frontier navigation-plan tests passed');

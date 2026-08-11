@@ -204,8 +204,60 @@ async function runGpu(device, plan, planCount, shaderSource) {
   } finally { for (const buffer of [rowsBuffer, rowGroupsBuffer, groupsBuffer, bestGroupsBuffer, selectedBuffer, paramsBuffer, selectedReadback]) buffer.destroy(); }
 }
 
-export function createWebGpuFrontierNavigationScheduler({ gpu = globalThis.navigator?.gpu, requiredLimits = { maxStorageBufferBindingSize: 262144 }, shaderSource = FRONTIER_NAVIGATION_PLAN_SHADER, deviceCache = createWebGpuDeviceCache({ gpu }), accelerator = null } = {}) {
+function nextCapacity(required) {
+  let capacity = 1;
+  while (capacity < required) capacity *= 2;
+  return capacity;
+}
+
+function createPersistentGpuNavigationRunner(device, shaderSource) {
+  const usage = globalThis.GPUBufferUsage, mapMode = globalThis.GPUMapMode;
+  let resources = null, dispatchCount = 0;
+  const destroy = () => {
+    if (!resources) return;
+    for (const buffer of Object.values(resources.buffers)) buffer.destroy();
+    resources = null;
+  };
+  const ensure = (rowCount, planCount, groupCount) => {
+    const rowCapacity = nextCapacity(Math.max(1, rowCount)), planCapacity = nextCapacity(Math.max(1, planCount)), groupCapacity = nextCapacity(Math.max(1, groupCount));
+    if (resources && resources.rowCapacity >= rowCapacity && resources.planCapacity >= planCapacity && resources.groupCapacity >= groupCapacity) return resources;
+    destroy();
+    const rowBytes = rowCapacity * FRONTIER_NAVIGATION_PLAN_STRIDE * 4, rowCountBytes = rowCapacity * 4, groupBytes = groupCapacity * FRONTIER_NAVIGATION_GROUP_STRIDE * 4, planCountBytes = planCapacity * 4;
+    const buffers = {
+      rows: device.createBuffer({ size: rowBytes, usage: usage.STORAGE | usage.COPY_DST }),
+      rowGroups: device.createBuffer({ size: rowCountBytes, usage: usage.STORAGE | usage.COPY_DST }),
+      groups: device.createBuffer({ size: groupBytes, usage: usage.STORAGE | usage.COPY_DST }),
+      bestGroups: device.createBuffer({ size: planCountBytes, usage: usage.STORAGE }),
+      selected: device.createBuffer({ size: rowCountBytes, usage: usage.STORAGE | usage.COPY_SRC }),
+      params: device.createBuffer({ size: 16, usage: usage.UNIFORM | usage.COPY_DST }),
+      selectedReadback: device.createBuffer({ size: rowCountBytes, usage: usage.MAP_READ | usage.COPY_DST }),
+    };
+    const module = device.createShaderModule({ code: shaderSource });
+    const choosePipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'choose' } });
+    const chooseGroup = device.createBindGroup({ layout: choosePipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.rows } }, { binding: 1, resource: { buffer: buffers.rowGroups } }, { binding: 2, resource: { buffer: buffers.groups } }, { binding: 3, resource: { buffer: buffers.bestGroups } }, { binding: 4, resource: { buffer: buffers.params } }] });
+    const selectPipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'select' } });
+    const selectGroup = device.createBindGroup({ layout: selectPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.rows } }, { binding: 1, resource: { buffer: buffers.rowGroups } }, { binding: 2, resource: { buffer: buffers.bestGroups } }, { binding: 3, resource: { buffer: buffers.selected } }, { binding: 4, resource: { buffer: buffers.params } }] });
+    resources = { buffers, choosePipeline, chooseGroup, selectPipeline, selectGroup, rowCapacity, planCapacity, groupCapacity };
+    return resources;
+  };
+  return Object.freeze({
+    reset: destroy,
+    async run(plan, planCount) {
+      const current = ensure(plan.rowCount, planCount, plan.groupCount), { buffers } = current, rowCountBytes = Math.max(4, plan.rowCount * 4);
+      device.queue.writeBuffer(buffers.rows, 0, plan.values); device.queue.writeBuffer(buffers.rowGroups, 0, plan.groupIndices); device.queue.writeBuffer(buffers.groups, 0, plan.groupValues); device.queue.writeBuffer(buffers.params, 0, new Uint32Array([plan.rowCount, planCount, plan.groupCount, 0]));
+      const encoder = device.createCommandEncoder(), choosePass = encoder.beginComputePass();
+      choosePass.setPipeline(current.choosePipeline); choosePass.setBindGroup(0, current.chooseGroup); choosePass.dispatchWorkgroups(Math.ceil(planCount / FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE)); choosePass.end();
+      const selectPass = encoder.beginComputePass(); selectPass.setPipeline(current.selectPipeline); selectPass.setBindGroup(0, current.selectGroup); selectPass.dispatchWorkgroups(Math.ceil(plan.rowCount / FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE)); selectPass.end();
+      encoder.copyBufferToBuffer(buffers.selected, 0, buffers.selectedReadback, 0, rowCountBytes); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
+      await buffers.selectedReadback.mapAsync(mapMode.READ); const selectedValues = new Uint32Array(buffers.selectedReadback.getMappedRange().slice(0, rowCountBytes)); buffers.selectedReadback.unmap(); dispatchCount += 1;
+      return { selectedRows: Array.from(selectedValues).flatMap((value, index) => value ? [index] : []), dispatch: 'webgpu-navigation-plan-resident', persistent: true, dispatchCount, bufferCapacity: { rows: current.rowCapacity, plans: current.planCapacity, groups: current.groupCapacity } };
+    },
+  });
+}
+
+export function createWebGpuFrontierNavigationScheduler({ gpu = globalThis.navigator?.gpu, requiredLimits = { maxStorageBufferBindingSize: 262144 }, shaderSource = FRONTIER_NAVIGATION_PLAN_SHADER, deviceCache = createWebGpuDeviceCache({ gpu }), accelerator = null, persistent = true } = {}) {
   let availabilityPromise = null;
+  let persistentRunner = null;
   const availability = async () => {
     if (!availabilityPromise) availabilityPromise = probeWebGpuCapabilities({ gpu, requiredLimits }).then(probe => probe.adapterAvailable && probe.requiredLimitsSatisfied ? Object.freeze({ schema: WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA, status: 'available', backend: 'webgpu' }) : Object.freeze({ schema: WEBGPU_FRONTIER_NAVIGATION_PLAN_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: probe.adapterAvailable ? 'webgpu-required-limits-unsatisfied' : 'webgpu-adapter-unavailable' }));
     return availabilityPromise;
@@ -218,11 +270,18 @@ export function createWebGpuFrontierNavigationScheduler({ gpu = globalThis.navig
         if (status.status !== 'available') return Object.freeze({ ...oracle, status: 'fallback', backend: 'cpu-oracle', reason: status.reason });
       }
       try {
-        const result = typeof accelerator === 'function' ? await accelerator({ plan, oracle }) : { status: 'completed', selectedRows: await runGpu(await deviceCache.getDevice(), plan, oracle.planCount, shaderSource), dispatch: 'webgpu-navigation-plan' };
+        let result;
+        if (typeof accelerator === 'function') result = await accelerator({ plan, oracle });
+        else {
+          const device = await deviceCache.getDevice();
+          if (persistent && !persistentRunner) persistentRunner = createPersistentGpuNavigationRunner(device, shaderSource);
+          result = persistentRunner ? { status: 'completed', ...await persistentRunner.run(plan, oracle.planCount) } : { status: 'completed', selectedRows: await runGpu(device, plan, oracle.planCount, shaderSource), dispatch: 'webgpu-navigation-plan' };
+        }
         const selected = result?.selectedRows instanceof Uint32Array ? result.selectedRows : Uint32Array.from(result?.selectedRows || []);
         if (result?.status !== 'completed' || selected.length !== oracle.selectedRows.length || JSON.stringify(Array.from(selected)) !== JSON.stringify(Array.from(oracle.selectedRows))) return Object.freeze({ ...oracle, status: 'rejected', backend: 'cpu-oracle', reason: 'navigation-oracle-parity-mismatch' });
-        return Object.freeze({ ...oracle, status: 'completed', backend: 'webgpu', parity: 'verified', selectedRows: selected, dispatch: result.dispatch || 'navigation-plan' });
+        return Object.freeze({ ...oracle, status: 'completed', backend: 'webgpu', parity: 'verified', selectedRows: selected, dispatch: result.dispatch || 'navigation-plan', ...(result.persistent ? { persistent: true, bufferCapacity: result.bufferCapacity, dispatchCount: result.dispatchCount } : {}) });
       } catch (error) {
+        persistentRunner?.reset(); persistentRunner = null;
         deviceCache.reset();
         return Object.freeze({ ...oracle, status: 'fallback', backend: 'cpu-oracle', reason: `navigation-accelerator-failed:${error?.message || String(error)}` });
       }
