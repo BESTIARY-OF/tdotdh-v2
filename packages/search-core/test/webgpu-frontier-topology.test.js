@@ -56,5 +56,9 @@ assert.equal(batch.status, 'completed');
 assert.equal(batch.parity, 'verified');
 assert.equal(batch.candidateCount, 2);
 assert.equal(batch.results.length, 2);
+const deferred = await createWebGpuFrontierTopology({ accelerator: async () => expectedReduction }).evaluateBatch([input, input], { verifyParity: false });
+assert.equal(deferred.status, 'completed');
+assert.equal(deferred.parity, 'deferred');
+assert.equal(deferred.results[0].metrics.area, expectedReduction.area);
 
 console.log('WebGPU frontier topology tests passed');

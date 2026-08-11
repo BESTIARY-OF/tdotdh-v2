@@ -168,8 +168,8 @@ const residentNavigationScheduler = {
 };
 const residentTargetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator: residentTargetGenerator, frontierCandidateRecords: residentCandidateRecords, navigationScheduler: residentNavigationScheduler });
 assert.ok(residentNavigationSelectCalls > 0);
-assert.equal(residentCompactionCalls, 0);
-assert.equal(residentTargetResult.navigationPlan.inputRepresentation, 'gpu-resident-target-records');
+assert.equal(residentCompactionCalls, 1, 'parity-gated resident navigation compacts the GPU record handle at the result boundary');
+assert.equal(residentTargetResult.navigationPlan.inputRepresentation, 'gpu-resident-compacted-records');
 const fallbackTargetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator: fallbackTargetGenerator, navigationScheduler: fallbackFlatNavigationScheduler });
 let targetFallbackGeneratorCalls = 0;
 const targetFallbackGenerator = {
@@ -226,8 +226,8 @@ const gpuFirstBreadthResult = await search(lockedPieces, [], { ...sharedOptions,
 assert.equal(result.type, 'done');
 assert.deepEqual(singleResult.prefilter, { status: 'used', backend: 'test-compute-shader', candidateCount: 6 });
 assert.deepEqual(result.prefilter, { status: 'used', backend: 'test-compute-shader', candidateCount: 3 });
-assert.deepEqual(singleResult.frontier, { status: 'used', backend: 'test-frontier-evaluator', parity: 'verified', candidateCount: 6, batch: 'beam', ticket: { presetFingerprint: 'test-preset', familyId: 'open', pass: 0, threadId: 0 }, cursor: { depth: 0, nodeOffset: 0, rootChoice: 0 } });
-assert.deepEqual(result.frontier, { status: 'used', backend: 'test-frontier-evaluator', parity: 'verified', candidateCount: 3, batch: 'beam', ticket: { presetFingerprint: 'test-preset', familyId: 'open', pass: 0, threadId: 0 }, cursor: { depth: 0, nodeOffset: 0, rootChoice: 0 } });
+assert.deepEqual(singleResult.frontier, { status: 'used', backend: 'test-frontier-evaluator', parity: 'verified', candidateCount: 6, validCount: 6, rejectedCount: 0, batch: 'beam', ticket: { presetFingerprint: 'test-preset', familyId: 'open', pass: 0, threadId: 0 }, cursor: { depth: 0, nodeOffset: 0, rootChoice: 0 } });
+assert.deepEqual(result.frontier, { status: 'used', backend: 'test-frontier-evaluator', parity: 'verified', candidateCount: 3, validCount: 3, rejectedCount: 0, batch: 'beam', ticket: { presetFingerprint: 'test-preset', familyId: 'open', pass: 0, threadId: 0 }, cursor: { depth: 0, nodeOffset: 0, rootChoice: 0 } });
 assert.equal(result.frontierGeneration.status, 'used');
 assert.equal(result.frontierGeneration.backend, 'test-frontier-generator');
 assert.equal(result.frontierGeneration.parity, 'verified');

@@ -11,4 +11,8 @@ const largeRows = Array.from({ length: 129 }, (_, index) => ({ score: 129 - inde
 const largeFallback = await createWebGpuFrontierRanker({ gpu: null }).rank(largeRows);
 assert.equal(largeFallback.rowCount, 129);
 assert.equal(largeFallback.indices.length, 129);
+const batchFallback = await createWebGpuFrontierRanker({ gpu: null }).rankMany([rows, largeRows]);
+assert.equal(batchFallback.length, 2);
+assert.deepEqual(batchFallback[0].indices, cpu.indices);
+assert.deepEqual(batchFallback[1].indices, largeFallback.indices);
 console.log('WebGPU frontier ranker tests passed');

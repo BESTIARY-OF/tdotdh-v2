@@ -45,8 +45,8 @@ assert.equal(cancelledBeforeDispatch.readback, 'deferred');
     createBuffer() {
       const index = ++createdBuffers;
       return { destroy() {}, async mapAsync() { mappedReads += 1; }, getMappedRange() {
-        if (index === 9) return Int32Array.from([1, 0, 0, 0, 0, 1, -1, 1]).buffer;
-        if (index === 10) return Uint32Array.from([1, 0, 1, 1]).buffer;
+        if (index === 10) return Int32Array.from([1, 0, 0, 0, 0, 1, -1, 1]).buffer;
+        if (index === 11) return Uint32Array.from([1, 0, 1, 1]).buffer;
         return Uint32Array.from([1, 0, 1, 1]).buffer;
       }, unmap() {} };
     },
@@ -76,7 +76,8 @@ assert.equal(cancelledBeforeDispatch.readback, 'deferred');
   assert.equal(residentBatch.readback, 'deferred');
   assert.equal(residentBatch.dispatchCount, 3);
   assert.equal(residentBatch.residentHandle.recordCount, 4);
-  assert.deepEqual(residentBatch.items[0].validity, single.validity, 'resident mode retains the CPU oracle without GPU row readback');
+  assert.equal(residentBatch.items[0].candidateCount, 4, 'resident mode returns GPU record metadata without CPU candidate reconstruction');
+  assert.equal('validity' in residentBatch.items[0], false, 'resident mode does not materialize intermediate validity rows');
   assert.equal(mappedReads, mappedBeforeResident, 'resident target generation does not map intermediate GPU rows');
   const mappedBeforeBoundary = mappedReads;
   const boundaryBatch = await persistentGenerator.generateBatchResident([{ pieceId: 'a', ...input }], { verifyParity: true });
@@ -85,7 +86,7 @@ assert.equal(cancelledBeforeDispatch.readback, 'deferred');
   assert.equal(boundaryBatch.readback, 'result-boundary');
   assert.equal(boundaryBatch.residentHandle.recordCount, 4);
   assert.ok(mappedReads > mappedBeforeBoundary, 'result-boundary parity maps the GPU validity/origin batch');
-  assert.equal(createdBuffers, 10, 'persistent target generation reuses its ten GPU buffers');
+  assert.equal(createdBuffers, 20, 'persistent target generation reuses its twelve working buffers and snapshots each resident batch');
   if (previousBufferUsage === undefined) delete globalThis.GPUBufferUsage; else globalThis.GPUBufferUsage = previousBufferUsage;
   if (previousMapMode === undefined) delete globalThis.GPUMapMode; else globalThis.GPUMapMode = previousMapMode;
 }

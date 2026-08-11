@@ -20,7 +20,7 @@ const fakeDevice = {
   createBindGroup() { return {}; },
   createCommandEncoder() { return { beginComputePass() { return { setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() {}, end() {} }; }, copyBufferToBuffer() {}, finish() { return {}; } }; },
 };
-const fakeAdapter = { limits: { maxStorageBufferBindingSize: 64 * 1024 * 1024 }, async requestDevice() { return fakeDevice; } };
+const fakeAdapter = { limits: { maxStorageBufferBindingSize: 64 * 1024 * 1024, maxStorageBuffersPerShaderStage: 14 }, async requestDevice() { return fakeDevice; } };
 const grid = { width: 33, height: 2, originX: 0, originY: 0 };
 const rootCandidates = [
   createLabeledFrontierStateCandidate({ pieceIds: [1, 2], parentPlacements: [], candidate: { id: 1, cells: [{ x: 0, y: 0 }] }, remainingIds: [2] }, grid),
@@ -36,8 +36,8 @@ try {
   assert.match(specializedShader, /let labelStride = 3u/);
   assert.match(specializedShader, /let labelsPerState = 2u \* labelStride/);
   assert.match(specializedShader, /for \(var y: u32 = 0u; y < 2u;/);
-  const residentParentBuffer = 10;
-  assert.deepEqual(writes.filter(write => write.buffer.id === residentParentBuffer).map(write => write.offset), [0, 24]);
+  const seedParentBuffer = 1;
+  assert.deepEqual(writes.filter(write => write.buffer.id === seedParentBuffer).map(write => write.offset), [0, 24]);
 } finally {
   if (previousBufferUsage === undefined) delete globalThis.GPUBufferUsage; else globalThis.GPUBufferUsage = previousBufferUsage;
   if (previousMapMode === undefined) delete globalThis.GPUMapMode; else globalThis.GPUMapMode = previousMapMode;
