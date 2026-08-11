@@ -144,18 +144,16 @@ async function runGpu(device, inputs, grid, shaderSource) {
   const frontier = device.createBuffer({ size: flagBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
   const ring = device.createBuffer({ size: flagBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
   const params = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const frontierReadback = device.createBuffer({ size: flagBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-  const ringReadback = device.createBuffer({ size: flagBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  const flagsReadback = device.createBuffer({ size: flagBytes * 2, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
   try {
     device.queue.writeBuffer(parent, 0, flattenMasks(inputs, 'fieldCells', grid));
     device.queue.writeBuffer(centroid, 0, flattenMasks(inputs, 'centroidCells', grid));
     device.queue.writeBuffer(params, 0, new Int32Array([count, grid.cellCount, grid.wordCount, grid.width, grid.height, grid.originX, grid.originY, 0]));
     const module = device.createShaderModule({ code: shaderSource }), pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } }), bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: parent } }, { binding: 1, resource: { buffer: centroid } }, { binding: 2, resource: { buffer: frontier } }, { binding: 3, resource: { buffer: ring } }, { binding: 4, resource: { buffer: params } }] });
-    const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(total / FRONTIER_TARGET_POOL_WORKGROUP_SIZE)); pass.end(); encoder.copyBufferToBuffer(frontier, 0, frontierReadback, 0, flagBytes); encoder.copyBufferToBuffer(ring, 0, ringReadback, 0, flagBytes); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
-    await frontierReadback.mapAsync(GPUMapMode.READ); const frontierFlags = Array.from(new Uint32Array(frontierReadback.getMappedRange().slice(0, total * 4))); frontierReadback.unmap();
-    await ringReadback.mapAsync(GPUMapMode.READ); const ringFlags = Array.from(new Uint32Array(ringReadback.getMappedRange().slice(0, total * 4))); ringReadback.unmap();
+    const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(total / FRONTIER_TARGET_POOL_WORKGROUP_SIZE)); pass.end(); encoder.copyBufferToBuffer(frontier, 0, flagsReadback, 0, flagBytes); encoder.copyBufferToBuffer(ring, 0, flagsReadback, flagBytes, flagBytes); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
+    await flagsReadback.mapAsync(GPUMapMode.READ); const mapped = flagsReadback.getMappedRange(); const frontierFlags = Array.from(new Uint32Array(mapped.slice(0, total * 4))), ringFlags = Array.from(new Uint32Array(mapped.slice(flagBytes, flagBytes + total * 4))); flagsReadback.unmap();
     return { frontierFlags, ringFlags };
-  } finally { for (const buffer of [parent, centroid, frontier, ring, params, frontierReadback, ringReadback]) buffer.destroy(); }
+  } finally { for (const buffer of [parent, centroid, frontier, ring, params, flagsReadback]) buffer.destroy(); }
 }
 
 function nextCapacity(required) {
@@ -178,8 +176,7 @@ function createPersistentGpuRunner(device, grid, shaderSource) {
       frontier: device.createBuffer({ size: flagBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
       ring: device.createBuffer({ size: flagBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
       params: device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }),
-      frontierReadback: device.createBuffer({ size: flagBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
-      ringReadback: device.createBuffer({ size: flagBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
+      flagsReadback: device.createBuffer({ size: flagBytes * 2, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
     };
     const module = device.createShaderModule({ code: shaderSource }), pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } }), bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
       { binding: 0, resource: { buffer: buffers.parent } }, { binding: 1, resource: { buffer: buffers.centroid } },
@@ -193,8 +190,8 @@ function createPersistentGpuRunner(device, grid, shaderSource) {
     async run(inputs) {
       const current = ensure(inputs.length), { buffers, pipeline, bindGroup } = current, maskValues = flattenMasks(inputs, 'fieldCells', grid), centroidValues = flattenMasks(inputs, 'centroidCells', grid), maskBytes = inputs.length * grid.wordCount * 4, flagBytes = inputs.length * grid.cellCount * 4;
       device.queue.writeBuffer(buffers.parent, 0, maskValues); device.queue.writeBuffer(buffers.centroid, 0, centroidValues); device.queue.writeBuffer(buffers.params, 0, new Int32Array([inputs.length, grid.cellCount, grid.wordCount, grid.width, grid.height, grid.originX, grid.originY, 0]));
-      const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(inputs.length * grid.cellCount / FRONTIER_TARGET_POOL_WORKGROUP_SIZE)); pass.end(); encoder.copyBufferToBuffer(buffers.frontier, 0, buffers.frontierReadback, 0, flagBytes); encoder.copyBufferToBuffer(buffers.ring, 0, buffers.ringReadback, 0, flagBytes); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
-      await buffers.frontierReadback.mapAsync(GPUMapMode.READ); const frontierFlags = Array.from(new Uint32Array(buffers.frontierReadback.getMappedRange().slice(0, flagBytes))); buffers.frontierReadback.unmap(); await buffers.ringReadback.mapAsync(GPUMapMode.READ); const ringFlags = Array.from(new Uint32Array(buffers.ringReadback.getMappedRange().slice(0, flagBytes))); buffers.ringReadback.unmap();
+      const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(inputs.length * grid.cellCount / FRONTIER_TARGET_POOL_WORKGROUP_SIZE)); pass.end(); encoder.copyBufferToBuffer(buffers.frontier, 0, buffers.flagsReadback, 0, flagBytes); encoder.copyBufferToBuffer(buffers.ring, 0, buffers.flagsReadback, flagBytes, flagBytes); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
+      await buffers.flagsReadback.mapAsync(GPUMapMode.READ); const mapped = buffers.flagsReadback.getMappedRange(); const frontierFlags = Array.from(new Uint32Array(mapped.slice(0, flagBytes))), ringFlags = Array.from(new Uint32Array(mapped.slice(flagBytes, flagBytes * 2))); buffers.flagsReadback.unmap();
       return { frontierFlags, ringFlags };
     },
     reset,
