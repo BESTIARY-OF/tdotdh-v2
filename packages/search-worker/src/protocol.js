@@ -337,6 +337,9 @@ export function createWorkerRuntime({ postMessage, execute }) {
       const result = await execute(request, context);
       if (active !== run) return;
       if (run.cancelled) {
+        if (result?.cursor && typeof result.cursor === "object") {
+          try { run.cursor = normalizeCursor(result.cursor); } catch { /* retain the last validated progress cursor */ }
+        }
         emit(run, "cancelled", { reason: run.cancelReason || "requested" });
       } else {
         const normalized = normalizeResult(result);

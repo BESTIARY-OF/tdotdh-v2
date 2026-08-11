@@ -1000,7 +1000,7 @@ function stopContinuousSearch(message = 'Auto-search paused') {
   const activeWorker = app.searchWorker, activeRequestId = app.searchRequestId;
   if (activeWorker && activeRequestId) {
     activeWorker.postMessage({ type: 'cancel', requestId: activeRequestId, reason: message });
-    setTimeout(() => { if (app.searchWorker === activeWorker) { activeWorker.terminate(); app.searchWorker = null; app.searchRequestId = null; app.solving = false; } }, 120);
+    setTimeout(() => { if (app.searchWorker === activeWorker) { activeWorker.terminate(); app.searchWorker = null; app.searchRequestId = null; app.solving = false; document.querySelector('#searchStatus').textContent = 'Search cancellation timed out · last checkpoint retained'; } }, 5000);
   } else if (activeWorker) { activeWorker.terminate(); app.searchWorker = null; app.solving = false; }
   app.totalNodes = Math.max(app.totalNodes, app.nodes); persistSearchProgress(true);
   const button = document.querySelector('#solveButton'); button.disabled = false; button.innerHTML = '<span class="spark">✦</span> Find a new arrangement'; document.querySelector('#searchStatus').textContent = message; if (app.placements) renderBoard(); toast(`${message} · ${app.snapshots.length} unique arrangement${app.snapshots.length === 1 ? '' : 's'}`);

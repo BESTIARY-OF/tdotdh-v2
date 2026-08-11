@@ -71,6 +71,23 @@ assert.deepEqual(events[1].cursor, { depth: 1, nodeOffset: 1, rootChoice: 2, che
 assert.deepEqual(events[2].cursor, { depth: 1, nodeOffset: 1, rootChoice: 2, checkpoint: { schema: 'test.checkpoint.v0', depth: 1, beam: [{ placements: [{ id: 3, cells: [{ x: 0, y: 0 }] }] }] } });
 assert.equal(runtime.getActiveRequestId(), null);
 
+const returnedCursorEvents = [];
+let releaseReturnedCursor;
+const returnedCursorGate = new Promise(resolve => { releaseReturnedCursor = resolve; });
+const returnedCursorRuntime = createWorkerRuntime({
+  postMessage: event => returnedCursorEvents.push(event),
+  execute: async () => {
+    await returnedCursorGate;
+    return { placements: [], cursor: { depth: 4, nodeOffset: 99, rootChoice: 2, checkpoint: { schema: 'test.checkpoint.v1', depth: 4, beam: [] } } };
+  },
+});
+const returnedCursorRun = returnedCursorRuntime.handleMessage({ ...baseCommand, requestId: 'search-returned-cursor' });
+await Promise.resolve();
+await returnedCursorRuntime.handleMessage({ type: 'cancel', requestId: 'search-returned-cursor', reason: 'returned-cursor-test' });
+releaseReturnedCursor();
+await returnedCursorRun;
+assert.deepEqual(returnedCursorEvents.at(-1).cursor, { depth: 4, nodeOffset: 99, rootChoice: 2, checkpoint: { schema: 'test.checkpoint.v1', depth: 4, beam: [] } });
+
 const failed = [];
 const idleRuntime = createWorkerRuntime({ postMessage: (event) => failed.push(event), execute: async () => null });
 await idleRuntime.handleMessage({ type: "cancel", requestId: "missing" });
