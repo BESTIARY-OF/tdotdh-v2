@@ -146,6 +146,26 @@ async function run(mode, options = {}) {
   const callerCancelled = typeof options.isCancelled === 'function' ? options.isCancelled : () => false;
   const result = await search(pieces, [], { searchStrategy: mode, candidatePrefilter, frontierMetrics, fieldMetrics, frontierState, frontierTargetGenerator, frontierTargetPool, frontierTopology, frontierCompactor, navigationBatch: details => navigation.beginBatch(details), navigationCancellation: cancelled => navigation.observeCancellation(cancelled), reportProgress: progress => navigation.observeProgress(progress.cursor), ...options, isCancelled: () => callerCancelled() || (deadline != null && performance.now() >= deadline) });
   const navigationReceipt = navigation.complete(result);
+  const navigationSummary = bounded ? {
+    schema: navigationReceipt.schema,
+    status: navigationReceipt.status,
+    ticket: navigationReceipt.ticket,
+    cursor: navigationReceipt.cursor ? {
+      depth: navigationReceipt.cursor.depth,
+      nodeOffset: navigationReceipt.cursor.nodeOffset,
+      rootChoice: navigationReceipt.cursor.rootChoice,
+    } : null,
+    progressCount: navigationReceipt.progressCount,
+    batchCount: navigationReceipt.batchCount,
+    cancellationChecks: navigationReceipt.cancellationChecks,
+    expansionBackend: navigationReceipt.expansionBackend,
+    expansionOwnership: navigationReceipt.expansionOwnership,
+    gpuExpansionComplete: navigationReceipt.gpuExpansionComplete,
+    gpuExpansionBatches: navigationReceipt.gpuExpansionBatches,
+    gpuStages: navigationReceipt.gpuStages,
+    cpuFallbackStages: navigationReceipt.cpuFallbackStages,
+    canonicalReplay: navigationReceipt.canonicalReplay,
+  } : navigationReceipt;
   return {
     mode,
     elapsedMs: Number((performance.now() - started).toFixed(2)),
@@ -164,7 +184,7 @@ async function run(mode, options = {}) {
     frontierTargetPool: frontierTargetPool.receipt,
     frontierTopology: frontierTopology.receipt,
     frontierCompactor: frontierCompactor.receipt,
-    navigation: navigationReceipt,
+    navigation: navigationSummary,
     ...(bounded ? {} : { result }),
   };
 }
