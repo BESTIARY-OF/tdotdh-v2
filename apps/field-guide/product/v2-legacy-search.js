@@ -6,6 +6,8 @@ const NODE_LIMIT = 40000;
 const BEAM_LIMIT = 72;
 const yieldToEventLoop = () => new Promise(resolve => setTimeout(resolve, 0));
 const BRANCH_LIMIT = 30;
+const FRONTIER_RANK_QUANTUM = 256;
+function canonicalFrontierRankScore(score) { return Math.round(Math.fround(Number(score)) * FRONTIER_RANK_QUANTUM); }
 
 import { createFrontierEvaluationCandidate } from '../../../packages/search-core/src/webgpu-frontier-evaluator.js?v=20260811-pipelinecache1';
 import { cpuScoreFrontierCandidate } from '../../../packages/search-core/src/webgpu-frontier-scorer.js?v=20260811-pipelinecache1';
@@ -204,6 +206,7 @@ async function generateFrontierTranslationsAcrossBeam(plans, frontierGenerator, 
       for (const ref of chunk.refs) generated[ref.planIndex].set(ref.piece.id, candidateTranslations(ref.piece, plans[ref.planIndex].state.field, plans[ref.planIndex].state.bounds));
     }
     totalCandidateCount += Number(result?.candidateCount) || chunk.candidateCount; batches += 1;
+    if (result?.recordSample) frontierTargetGenerationReceipt = { ...(frontierTargetGenerationReceipt || {}), recordSample: result.recordSample };
   }
   for (const { item, ref } of items) {
     const piece = ref.piece, translations = new Map(), records = [];
@@ -220,7 +223,7 @@ async function generateFrontierTranslationsAcrossBeam(plans, frontierGenerator, 
   onGeneration({ status: items.length === inputCount ? 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? parity : 'oracle', reason: items.length === inputCount ? undefined : (fallbackReason || 'frontier-generator-batch-fallback'), candidateCount: totalCandidateCount, batches, batch: 'beam', candidateRecords: { backend: recordBackend, parity: recordParity, inputCount: recordInputCount, outputCount: recordOutputCount, ...(recordPersistent ? { persistent: true, dispatch: 'webgpu-frontier-record-compaction-resident', dispatchCount: recordDispatchCount, bufferCapacity: recordBufferCapacity } : {}) } });
   return generated;
 }
-async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTargetGenerator, positionLocks, seedOrigin, onGeneration = () => {}, availabilityStatus = null, frontierCandidateRecords = null, materializeCandidates = true, isCancelled = () => false) {
+async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTargetGenerator, positionLocks, seedOrigin, onGeneration = () => {}, availabilityStatus = null, frontierCandidateRecords = null, materializeCandidates = true, isCancelled = () => false, verifyResidentNavigation = false) {
   const generated = plans.map(() => new Map());
   if (!plans.length) return generated;
   if (!frontierTargetGenerator?.generateBatch) {
@@ -256,12 +259,12 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
   }
   const items = [];
   const residentNavigationEntries = [];
-  let totalCandidateCount = 0, batches = 0, backend = 'compute-shader', generationParity = 'verified', fallbackReason = null, recordBackend = 'cpu-oracle', recordParity = 'oracle', recordInputCount = 0, recordOutputCount = 0, persistent = false, persistentDispatchCount = 0, persistentBufferCapacity = null, recordPersistent = false, recordDispatchCount = 0, recordBufferCapacity = null;
+  let totalCandidateCount = 0, batches = 0, backend = 'compute-shader', generationParity = 'verified', fallbackReason = null, recordBackend = 'cpu-oracle', recordParity = 'oracle', recordInputCount = 0, recordOutputCount = 0, persistent = false, persistentDispatchCount = 0, persistentBufferCapacity = null, recordPersistent = false, recordDispatchCount = 0, recordBufferCapacity = null, recordSample = null, recordReason = null, residentItemShape = null;
   for (const chunk of chunks) {
     await yieldToEventLoop();
     if (isCancelled()) return generated;
     const result = !materializeCandidates && typeof frontierTargetGenerator.generateBatchResident === 'function'
-      ? await frontierTargetGenerator.generateBatchResident(chunk.inputs, { isCancelled, verifyParity: true })
+      ? await frontierTargetGenerator.generateBatchResident(chunk.inputs, { isCancelled, verifyParity: verifyResidentNavigation })
       : await frontierTargetGenerator.generateBatch(chunk.inputs, { isCancelled });
     if (result?.backend) backend = result.backend;
     if (result?.parity === 'deferred') generationParity = 'deferred';
@@ -269,38 +272,53 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
     if (result?.persistent) { persistent = true; persistentDispatchCount = result.dispatchCount; persistentBufferCapacity = result.bufferCapacity; }
     if (result?.status === 'completed' && Array.isArray(result.items) && result.items.length === chunk.inputs.length) {
       let residentRecordsByItem = null;
-      const directResidentNavigation = Boolean(result.residentHandle && !materializeCandidates);
+      let directResidentNavigation = Boolean(result.residentHandle && !materializeCandidates);
       if (directResidentNavigation) {
-        const expectedRows = [];
-        result.items.forEach((item, itemOrdinal) => {
-          const ref = chunk.refs[itemOrdinal], pieceCount = Number(item.pieceCount) || applyLock(ref?.piece || {}).length;
-          if (!ref || !pieceCount) return;
-          (item.origins || []).forEach((origin, index) => {
-            const target = ref.plan.targetPool[Math.floor(index / pieceCount)];
-            if (!target || !origin || !Number.isSafeInteger(origin.x) || !Number.isSafeInteger(origin.y)) return;
-            expectedRows.push({ planIndex: ref.planIndex, targetOrdinal: Math.floor(index / pieceCount), pieceId: ref.piece.id, candidateIndex: index, originX: origin.x, originY: origin.y, targetX: target.x, targetY: target.y, valid: item.validity?.[index] === 1 ? 1 : 0 });
-          });
-        });
-        residentNavigationEntries.push({ residentHandle: result.residentHandle, piecePlans: chunk.refs.map(ref => ref.planIndex), expectedRows, direct: true });
-        recordBackend = 'webgpu'; recordParity = 'deferred'; recordPersistent = true; recordDispatchCount = result.dispatchCount; recordBufferCapacity = result.bufferCapacity;
+        const firstItem = result.items?.[0];
+        residentItemShape = firstItem ? { keys: Object.keys(firstItem), originCount: Array.isArray(firstItem.origins) ? firstItem.origins.length : null, validityCount: firstItem.validity?.length ?? null, pieceCount: firstItem.pieceCount ?? null, targetCount: firstItem.targetCount ?? null } : null;
+        const expectedRecords = [];
+        if (verifyResidentNavigation) result.items.forEach((item, itemOrdinal) => (item.origins || []).forEach((origin, index) => {
+          if (item.validity?.[index] === 1 && origin && Number.isSafeInteger(origin.x) && Number.isSafeInteger(origin.y)) { const pieceCount = Number(item.pieceCount) || 1; expectedRecords.push({ pieceId: itemOrdinal, targetOrdinal: Math.floor(index / pieceCount), originX: origin.x, originY: origin.y, inputOrdinal: index % pieceCount }); }
+        }));
+        const compacted = frontierCandidateRecords?.compactResident ? await frontierCandidateRecords.compactResident(result.residentHandle, verifyResidentNavigation ? { expectedRecords } : {}) : null;
+        if (compacted?.status === 'completed' && compacted.residentHandle && (compacted.parity === 'verified' || compacted.parity === 'deferred')) {
+          recordBackend = compacted.backend || 'webgpu'; recordParity = compacted.parity; recordPersistent = Boolean(compacted.persistent); recordDispatchCount = compacted.dispatchCount; recordBufferCapacity = compacted.bufferCapacity;
+          const residentHandle = Object.freeze({ ...compacted.residentHandle, itemMetadata: Object.freeze(result.items.map(item => Object.freeze({ pieceId: item.pieceId }))) });
+          const expectedRows = verifyResidentNavigation ? (compacted.records || []).flatMap(record => {
+            const ref = chunk.refs[record.pieceId], target = ref?.plan.targetPool[record.targetOrdinal];
+            const item = result.items[record.pieceId], pieceCount = Number(item?.pieceCount) || 1;
+            return ref && target ? [{ planIndex: ref.planIndex, targetOrdinal: record.targetOrdinal, pieceId: ref.piece.id, candidateIndex: record.targetOrdinal * pieceCount + record.inputOrdinal, originX: record.originX, originY: record.originY, targetX: target.x, targetY: target.y }] : [];
+          }) : [];
+          residentNavigationEntries.push({ residentHandle, piecePlans: chunk.refs.map(ref => ref.planIndex), expectedRows });
+          if (verifyResidentNavigation) {
+            residentRecordsByItem = new Map();
+            for (const record of compacted.records || []) { const records = residentRecordsByItem.get(record.pieceId) || []; records.push(record); residentRecordsByItem.set(record.pieceId, records); }
+          }
+        } else {
+          directResidentNavigation = false;
+          recordReason = compacted?.reason || 'resident-record-compaction-fallback';
+          fallbackReason = recordReason;
+        }
       } else if (result.residentHandle && frontierCandidateRecords?.compactResident) {
         const expectedRecords = [];
         result.items.forEach((item, itemOrdinal) => (item.origins || []).forEach((origin, index) => {
-          if (item.validity?.[index] === 1 && origin && Number.isSafeInteger(origin.x) && Number.isSafeInteger(origin.y)) expectedRecords.push({ pieceId: itemOrdinal, targetOrdinal: Math.floor(index / (Number(item.pieceCount) || 1)), originX: origin.x, originY: origin.y, inputOrdinal: index });
+          if (item.validity?.[index] === 1 && origin && Number.isSafeInteger(origin.x) && Number.isSafeInteger(origin.y)) { const pieceCount = Number(item.pieceCount) || 1; expectedRecords.push({ pieceId: itemOrdinal, targetOrdinal: Math.floor(index / pieceCount), originX: origin.x, originY: origin.y, inputOrdinal: index % pieceCount }); }
         }));
         const compacted = await frontierCandidateRecords.compactResident(result.residentHandle, { expectedRecords });
         if (compacted.status === 'completed' && compacted.parity === 'verified') {
           recordBackend = compacted.backend || recordBackend; recordParity = compacted.parity || recordParity; recordPersistent = Boolean(compacted.persistent); recordDispatchCount = compacted.dispatchCount; recordBufferCapacity = compacted.bufferCapacity;
           if (compacted.residentHandle) {
+            const residentHandle = Object.freeze({ ...compacted.residentHandle, itemMetadata: Object.freeze(result.items.map(item => Object.freeze({ pieceId: item.pieceId }))) });
             const expectedRows = (compacted.records || []).flatMap(record => {
               const ref = chunk.refs[record.pieceId], target = ref?.plan.targetPool[record.targetOrdinal];
-              return ref && target ? [{ planIndex: ref.planIndex, targetOrdinal: record.targetOrdinal, pieceId: ref.piece.id, candidateIndex: record.inputOrdinal, originX: record.originX, originY: record.originY, targetX: target.x, targetY: target.y }] : [];
+              const item = result.items[record.pieceId], pieceCount = Number(item?.pieceCount) || 1;
+              return ref && target ? [{ planIndex: ref.planIndex, targetOrdinal: record.targetOrdinal, pieceId: ref.piece.id, candidateIndex: record.targetOrdinal * pieceCount + record.inputOrdinal, originX: record.originX, originY: record.originY, targetX: target.x, targetY: target.y }] : [];
             });
-            residentNavigationEntries.push({ residentHandle: compacted.residentHandle, piecePlans: chunk.refs.map(ref => ref.planIndex), expectedRows });
+            residentNavigationEntries.push({ residentHandle, piecePlans: chunk.refs.map(ref => ref.planIndex), expectedRows });
           }
           residentRecordsByItem = new Map();
           for (const record of compacted.records || []) { const records = residentRecordsByItem.get(record.pieceId) || []; records.push(record); residentRecordsByItem.set(record.pieceId, records); }
-        } else fallbackReason = compacted.reason || 'resident-record-compaction-fallback';
+        } else { recordReason = compacted.reason || 'resident-record-compaction-fallback'; fallbackReason = recordReason; }
       }
       result.items.forEach((item, offset) => items.push({ item, ref: chunk.refs[offset], residentRecords: residentRecordsByItem?.get(offset) || null, directResidentNavigation }));
     }
@@ -315,6 +333,7 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
       generated[ref.planIndex] = byTarget;
     }
     totalCandidateCount += Number(result?.candidateCount) || chunk.candidateCount; batches += 1;
+    if (result?.recordSample) recordSample = result.recordSample;
   }
   for (const { item, ref, residentRecords, directResidentNavigation } of items) {
     const byTarget = generated[ref.planIndex] || new Map(), piece = ref.piece, pieceCount = Number(item.pieceCount) || applyLock(piece).length, records = residentRecords ? residentRecords.map(record => ({ ...record, pieceId: piece.id })) : [];
@@ -339,7 +358,7 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
     generated[ref.planIndex] = byTarget;
   }
   const inputCount = planGroups.reduce((sum, group) => sum + group.inputs.length, 0);
-  onGeneration({ status: items.length === inputCount ? generationParity === 'deferred' ? 'resident' : 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? generationParity : 'oracle', reason: items.length === inputCount ? undefined : (fallbackReason || 'frontier-generator-batch-fallback'), candidateCount: totalCandidateCount, batches, batch: 'beam', ...(persistent ? { persistent: true, dispatch: 'webgpu-frontier-target-resident', dispatchCount: persistentDispatchCount, bufferCapacity: persistentBufferCapacity } : {}), candidateRecords: { backend: recordBackend, parity: recordParity, inputCount: recordInputCount, outputCount: recordOutputCount, ...(recordPersistent ? { persistent: true, dispatch: 'webgpu-frontier-record-compaction-resident', dispatchCount: recordDispatchCount, bufferCapacity: recordBufferCapacity } : {}) } });
+  onGeneration({ status: items.length === inputCount ? generationParity === 'deferred' ? 'resident' : 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? generationParity : 'oracle', reason: items.length === inputCount ? undefined : (fallbackReason || 'frontier-generator-batch-fallback'), candidateCount: totalCandidateCount, batches, batch: 'beam', residentEntryCount: residentNavigationEntries.length, residentExpectedRows: residentNavigationEntries.reduce((sum, entry) => sum + (entry.expectedRows?.length || 0), 0), ...(residentItemShape ? { residentItemShape } : {}), ...(recordSample ? { recordSample } : {}), ...(persistent ? { persistent: true, dispatch: 'webgpu-frontier-target-resident', dispatchCount: persistentDispatchCount, bufferCapacity: persistentBufferCapacity } : {}), candidateRecords: { backend: recordBackend, parity: recordParity, inputCount: recordInputCount, outputCount: recordOutputCount, ...(recordReason ? { reason: recordReason } : {}), ...(recordPersistent ? { persistent: true, dispatch: 'webgpu-frontier-record-compaction-resident', dispatchCount: recordDispatchCount, bufferCapacity: recordBufferCapacity } : {}) } });
   generated.residentNavigation = residentNavigationEntries;
   return generated;
 }
@@ -407,6 +426,7 @@ function sameGpuState(left, right) {
   if (!left || !right || left.wordCount !== right.wordCount || left.pieceIds.length !== right.pieceIds.length || left.remainingMask.length !== right.remainingMask.length) return false;
   for (let index = 0; index < left.pieceIds.length; index++) if (left.pieceIds[index] !== right.pieceIds[index]) return false;
   for (let index = 0; index < left.remainingMask.length; index++) if (left.remainingMask[index] !== right.remainingMask[index]) return false;
+  if (Number.isSafeInteger(left.absoluteHash) || Number.isSafeInteger(right.absoluteHash)) return left.absoluteHash === right.absoluteHash && left.canonicalHash === right.canonicalHash;
   if (left.canonicalSignature || right.canonicalSignature) return left.canonicalSignature === right.canonicalSignature;
   if (!left.nextLabels || !right.nextLabels || left.nextLabels.length !== right.nextLabels.length) return false;
   for (let index = 0; index < left.nextLabels.length; index++) if (left.nextLabels[index] !== right.nextLabels[index]) return false;
@@ -664,7 +684,7 @@ async function evaluateFrontierState(entries, state, frontierState, onState = ()
   return entries;
 }
 
-async function evaluateFrontierStateAcrossBeam(jobs, frontierState, onState = () => {}) {
+async function evaluateFrontierStateAcrossBeam(jobs, frontierState, onState = () => {}, transitionOptions = {}) {
   if (!jobs.length || !jobs.some(job => job.entries.length)) return jobs;
   if (!frontierState?.transition && !frontierState?.expand) return jobs;
   try {
@@ -674,15 +694,15 @@ async function evaluateFrontierStateAcrossBeam(jobs, frontierState, onState = ()
       for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, entry, candidate: createLabeledFrontierStateCandidate({ parentPlacements: job.state.placements, candidate: { id: entry.piece.id, cells: entry.candidate.cells }, pieceIds, remainingIds: job.state.remaining.filter(piece => piece.id !== entry.piece.id).map(piece => piece.id), parentStateIndex: job.state.gpuState?.residentStateIndex }) });
     }
     if (!pending.length) return jobs;
-    const result = frontierState.expand ? await frontierState.expand(pending.map(item => item.candidate)) : await frontierState.transition(pending.map(item => item.candidate));
-    if (result?.status === 'completed' && result.parity === 'verified' && Array.isArray(result.absoluteHashes) && result.absoluteHashes.length === pending.length) {
+    const result = frontierState.expand ? await frontierState.expand(pending.map(item => item.candidate), transitionOptions) : await frontierState.transition(pending.map(item => item.candidate), transitionOptions);
+    if (result?.status === 'completed' && ['verified', 'deferred'].includes(result.parity) && Array.isArray(result.absoluteHashes) && result.absoluteHashes.length === pending.length) {
       const wordCount = Number(result.wordCount) || 0, labelsPerCandidate = result.pieceIds.length * wordCount;
       for (const [index, item] of pending.entries()) {
         const labelStart = index * labelsPerCandidate;
-        const canonicalLabels = result.canonicalLabels.slice(labelStart, labelStart + labelsPerCandidate), resident = result.resident === true || result.navigator?.status === 'resident';
+        const hasLabels = Array.isArray(result.canonicalLabels) && result.canonicalLabels.length >= labelStart + labelsPerCandidate, canonicalLabels = hasLabels ? result.canonicalLabels.slice(labelStart, labelStart + labelsPerCandidate) : null, resident = result.resident === true || result.navigator?.status === 'resident';
         const statePayload = { absoluteHash: result.absoluteHashes[index], canonicalHash: result.canonicalHashes[index], pieceIds: result.pieceIds, wordCount, remainingMask: Array.from(item.candidate.remainingMask), residentStateIndex: result.residentStateIndices?.[index], residentEpoch: result.residentEpoch };
-        if (resident) { statePayload.parentLabelRef = { epoch: result.residentEpoch, index: result.residentStateIndices?.[index] }; statePayload.canonicalSignature = canonicalSignatureFromLabeledFrontierState({ pieceIds: result.pieceIds, canonicalLabels, wordCount }); }
-        else Object.assign(statePayload, { nextLabels: result.nextLabels.slice(labelStart, labelStart + labelsPerCandidate), canonicalLabels });
+        if (resident) { statePayload.parentLabelRef = { epoch: result.residentEpoch, index: result.residentStateIndices?.[index] }; if (canonicalLabels) statePayload.canonicalSignature = canonicalSignatureFromLabeledFrontierState({ pieceIds: result.pieceIds, canonicalLabels, wordCount }); }
+        else if (Array.isArray(result.nextLabels) && result.nextLabels.length >= labelStart + labelsPerCandidate) Object.assign(statePayload, { nextLabels: result.nextLabels.slice(labelStart, labelStart + labelsPerCandidate), ...(canonicalLabels ? { canonicalLabels } : {}) });
         jobs[item.jobIndex].entries[item.entryIndex] = { ...item.entry, gpuState: statePayload };
       }
       onState({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, persistent: result.persistent === true, resident: result.navigator?.status === 'resident', navigatorEpoch: result.navigator?.epoch, bufferCapacity: result.bufferCapacity, candidateCount: pending.length, batch: 'beam', parentReference: result.parentReference });
@@ -714,14 +734,55 @@ async function evaluateFrontierTopology(entries, state, centroidId, frontierTopo
     const parentCells = [...state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
     const centroidCells = state.placements.find(placement => placement.id === centroidId)?.cells || [];
     const inputs = entries.map(entry => ({ parentMask: createFrontierMaskFromCells(parentCells), candidateMask: createFrontierMaskFromCells(entry.candidate.cells), centroidMask: createFrontierMaskFromCells(centroidCells) }));
-    const result = frontierTopology.evaluateBatch ? await frontierTopology.evaluateBatch(inputs) : { status: 'completed', parity: 'verified', backend: 'compute-shader', results: await Promise.all(inputs.map(input => frontierTopology.evaluate(input))) };
-    if (result?.status === 'completed' && result.parity === 'verified' && Array.isArray(result.results) && result.results.length === entries.length) {
+    const result = frontierTopology.evaluateBatch ? await frontierTopology.evaluateBatch(inputs, { verifyParity: false }) : { status: 'completed', parity: 'deferred', backend: 'compute-shader', results: await Promise.all(inputs.map(input => frontierTopology.evaluate(input))) };
+    if (result?.status === 'completed' && ['verified', 'deferred'].includes(result.parity) && Array.isArray(result.results) && result.results.length === entries.length) {
       onTopology({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: entries.length });
       return entries.map((entry, index) => ({ ...entry, gpuTopology: result.results[index]?.metrics || null }));
     }
     onTopology({ status: 'fallback', reason: result?.reason || 'frontier-topology-batch-unavailable' });
   } catch (error) { onTopology({ status: 'fallback', reason: `frontier-topology-batch-failed:${error.message}` }); }
   return entries;
+}
+
+async function evaluateFrontierTopologyAcrossBeam(jobs, centroidId, frontierTopology, onTopology = () => {}, knownAvailability = null) {
+  if (!jobs.length || !jobs.some(job => job.entries.length) || !frontierTopology?.evaluateBatch && !frontierTopology?.evaluate) return jobs;
+  try {
+    if (knownAvailability && knownAvailability.status !== 'available') return jobs;
+    if (!knownAvailability && frontierTopology.availability) {
+      let availabilityPromise = frontierTopologyAvailability.get(frontierTopology);
+      if (!availabilityPromise) {
+        availabilityPromise = frontierTopology.availability();
+        frontierTopologyAvailability.set(frontierTopology, availabilityPromise);
+      }
+      const availability = await availabilityPromise;
+      if (availability?.status !== 'available') {
+        onTopology({ status: 'fallback', reason: availability?.reason || 'frontier-topology-unavailable' });
+        return jobs;
+      }
+    }
+    const pending = [];
+    for (const [jobIndex, job] of jobs.entries()) {
+      const parentCells = [...job.state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
+      const centroidCells = job.state.placements.find(placement => placement.id === centroidId)?.cells || [];
+      const parentMask = createFrontierMaskFromCells(parentCells), centroidMask = createFrontierMaskFromCells(centroidCells);
+      for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, entry, input: { parentMask, candidateMask: createFrontierMaskFromCells(entry.candidate.cells), centroidMask } });
+    }
+    if (!pending.length) return jobs;
+    const result = frontierTopology.evaluateBatch
+      ? await frontierTopology.evaluateBatch(pending.map(item => item.input), { verifyParity: false })
+      : { status: 'completed', parity: 'deferred', backend: 'compute-shader', results: await Promise.all(pending.map(item => frontierTopology.evaluate(item.input))) };
+    if (result?.status === 'completed' && ['verified', 'deferred'].includes(result.parity) && Array.isArray(result.results) && result.results.length === pending.length) {
+      for (const [index, item] of pending.entries()) {
+        jobs[item.jobIndex].entries[item.entryIndex] = { ...item.entry, gpuTopology: result.results[index]?.metrics || null };
+      }
+      onTopology({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: pending.length, batch: 'beam', parityGate: result.parity === 'verified' ? 'checked' : 'deferred-to-final-canonical-boundary' });
+      return jobs;
+    }
+    onTopology({ status: 'fallback', reason: result?.reason || 'frontier-topology-batch-unavailable', candidateCount: pending.length, batch: 'beam' });
+  } catch (error) {
+    onTopology({ status: 'fallback', reason: `frontier-topology-batch-failed:${error.message}`, batch: 'beam' });
+  }
+  return jobs;
 }
 
 async function evaluateFrontierOptions(entries, state, centroidId, frontierEvaluator, frontierValidator, onFrontier = () => {}) {
@@ -765,7 +826,8 @@ async function evaluateFrontierOptionsAcrossBeam(jobs, centroidId, frontierEvalu
       if (Array.isArray(result?.validity) && result.validity.length === pending.length && result.status === 'completed') {
         for (const job of jobs) job.entries = [];
         for (const [index, item] of pending.entries()) if (result.validity[index] === 1) jobs[item.jobIndex].entries.push({ ...item.entry, gpuScore: result.scores?.[index] });
-        onFrontier({ status: result.parity === 'verified' ? 'used' : 'fallback', backend: result.backend || 'cpu-oracle', parity: result.parity, candidateCount: pending.length, batch: 'beam' });
+        const validCount = result.validity.reduce((count, value) => count + (value === 1 ? 1 : 0), 0);
+        onFrontier({ status: result.parity === 'verified' ? 'used' : 'fallback', backend: result.backend || 'cpu-oracle', parity: result.parity, candidateCount: pending.length, validCount, rejectedCount: pending.length - validCount, batch: 'beam' });
         return jobs;
       }
       onFrontier({ status: 'fallback', reason: result?.reason || 'frontier-evaluator-unavailable', candidateCount: pending.length, batch: 'beam' });
@@ -775,7 +837,8 @@ async function evaluateFrontierOptionsAcrossBeam(jobs, centroidId, frontierEvalu
     if (result?.status === 'completed' && Array.isArray(result.validity) && result.validity.length === pending.length) {
       for (const job of jobs) job.entries = [];
       for (const [index, item] of pending.entries()) if (result.validity[index] === 1) jobs[item.jobIndex].entries.push(item.entry);
-      onFrontier({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: pending.length, batch: 'beam' });
+      const validCount = result.validity.reduce((count, value) => count + (value === 1 ? 1 : 0), 0);
+      onFrontier({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: pending.length, validCount, rejectedCount: pending.length - validCount, batch: 'beam' });
       return jobs;
     }
     onFrontier({ status: 'fallback', reason: result?.reason || 'frontier-validator-unavailable', candidateCount: pending.length, batch: 'beam' });
@@ -785,12 +848,25 @@ async function evaluateFrontierOptionsAcrossBeam(jobs, centroidId, frontierEvalu
 
 async function orderFrontierRows(entries, frontierRanker, onRank = () => {}) {
   if (!entries.length) return entries;
-  const cpu = () => [...entries].sort((a, b) => a.score - b.score || a.tie - b.tie);
+  const cpu = () => [...entries].sort((a, b) => (a.rankScore ?? canonicalFrontierRankScore(a.score)) - (b.rankScore ?? canonicalFrontierRankScore(b.score)) || a.tie - b.tie);
   if (!frontierRanker?.rank) { onRank({ status: 'fallback', backend: 'cpu-oracle', reason: 'frontier-ranker-unavailable', candidateCount: entries.length }); return cpu(); }
-  const result = await frontierRanker.rank(entries.map((entry, index) => ({ score: entry.score, tie: index })));
-  onRank({ status: result?.parity === 'verified' ? 'used' : 'fallback', backend: result?.backend || 'cpu-oracle', parity: result?.parity, candidateCount: entries.length });
+  const result = await frontierRanker.rank(entries.map((entry, index) => ({ score: entry.rankScore ?? canonicalFrontierRankScore(entry.score), tie: index })));
+  onRank({ status: result?.parity === 'verified' ? 'used' : 'fallback', backend: result?.backend || 'cpu-oracle', parity: result?.parity, reason: result?.reason, diagnostics: result?.diagnostics, candidateCount: entries.length });
   if (Array.isArray(result?.indices) && result.indices.length === entries.length) return result.indices.map(index => entries[index]);
   return cpu();
+}
+
+async function orderFrontierRowsMany(buckets, frontierRanker, onRank = () => {}) {
+  const nonEmpty = buckets.map((entries, index) => ({ entries, index })).filter(item => item.entries.length);
+  if (!nonEmpty.length || !frontierRanker?.rankMany) return Promise.all(buckets.map(entries => orderFrontierRows(entries, frontierRanker, onRank)));
+  const results = await frontierRanker.rankMany(nonEmpty.map(item => item.entries.map((entry, index) => ({ score: entry.rankScore ?? canonicalFrontierRankScore(entry.score), tie: index }))));
+  const total = nonEmpty.reduce((sum, item) => sum + item.entries.length, 0), used = results.every(result => result?.parity === 'verified' && Array.isArray(result.indices));
+  onRank({ status: used ? 'used' : 'fallback', backend: used ? 'webgpu' : 'cpu-oracle', parity: used ? 'verified' : 'oracle', reason: used ? undefined : results.find(result => result?.reason)?.reason, candidateCount: total, batch: 'family-buckets', bucketCount: nonEmpty.length });
+  return buckets.map((entries, bucketIndex) => {
+    const resultIndex = nonEmpty.findIndex(item => item.index === bucketIndex), result = resultIndex >= 0 ? results[resultIndex] : null;
+    if (!result || !Array.isArray(result.indices) || result.indices.length !== entries.length) return [...entries].sort((a, b) => (a.rankScore ?? canonicalFrontierRankScore(a.score)) - (b.rankScore ?? canonicalFrontierRankScore(b.score)) || a.tie - b.tie);
+    return result.indices.map(index => entries[index]);
+  });
 }
 
 async function rankFrontierOptions(entries, frontierRanker, onRank = () => {}) {
@@ -805,7 +881,7 @@ async function scoreFrontierCandidates(entries, frontierScorer, onScore = () => 
       const selected = result.indices.map(index => ({ entry: entries[index], score: result.scores?.[index] })).filter(row => row.entry);
       onScore({ status: 'used', backend: result.backend, parity: result.parity, algorithm: result.algorithm, candidateCount: entries.length, selectedCount: selected.length, batch: 'beam', resident: true, readback: result.readback });
       onRank({ status: 'used', backend: result.backend, parity: result.parity, algorithm: result.algorithm, candidateCount: entries.length, selectedCount: selected.length, batch: 'beam', resident: true, readback: result.readback });
-      return { entries: selected.map(({ entry, score }) => ({ ...entry, score })), residentRanked: true };
+      return { entries: selected.map(({ entry, score }) => ({ ...entry, score, rankScore: canonicalFrontierRankScore(score) })), residentRanked: true };
     }
     onScore({ status: result?.status === 'cancelled' ? 'cancelled' : 'fallback', backend: result?.backend || 'cpu-oracle', parity: result?.parity, algorithm: result?.algorithm, candidateCount: entries.length, selectedCount: result?.selectedCount || 0, resident: true, readback: result?.readback, reason: result?.reason || 'resident-score-rank-unavailable' });
     if (result?.status === 'cancelled') return { entries: [], residentRanked: true };
@@ -814,17 +890,17 @@ async function scoreFrontierCandidates(entries, frontierScorer, onScore = () => 
   const result = await frontierScorer.score(entries.map(entry => entry.scoreInput));
   if (result?.status === 'completed' && result.parity === 'verified' && Array.isArray(result.scores) && result.scores.length === entries.length) {
     onScore({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, algorithm: result.algorithm, candidateCount: entries.length, batch: 'beam' });
-    return { entries: entries.map((entry, index) => ({ ...entry, score: result.scores[index] })), residentRanked: false };
+    return { entries: entries.map((entry, index) => ({ ...entry, score: result.scores[index], rankScore: canonicalFrontierRankScore(result.scores[index]) })), residentRanked: false };
   }
   onScore({ status: 'fallback', backend: 'cpu-oracle', parity: result?.parity, reason: result?.reason || 'frontier-scorer-unavailable', candidateCount: entries.length, batch: 'beam' });
   return { entries, residentRanked: false };
 }
 
 async function compactFrontierRows(entries, retain, frontierCompactor, onCompact = () => {}, residentBeamSelector = null, isCancelled = () => false) {
-  const cpu = () => entries.map((entry, index) => ({ entry, index })).sort((left, right) => left.entry.score - right.entry.score || left.index - right.index).slice(0, retain).map(row => row.entry);
+  const cpu = () => entries.map((entry, index) => ({ entry, index })).sort((left, right) => (left.entry.rankScore ?? canonicalFrontierRankScore(left.entry.score)) - (right.entry.rankScore ?? canonicalFrontierRankScore(right.entry.score)) || left.index - right.index).slice(0, retain).map(row => row.entry);
   if (!entries.length) { onCompact({ status: 'not-used', backend: 'cpu-oracle', parity: 'oracle', candidateCount: 0, selectedCount: 0 }); return entries; }
   if (residentBeamSelector?.select) {
-    const result = await residentBeamSelector.select(entries.map((entry, index) => ({ score: entry.score, tie: entry.tie ?? index })), retain, { isCancelled });
+    const result = await residentBeamSelector.select(entries.map((entry, index) => ({ score: entry.rankScore ?? canonicalFrontierRankScore(entry.score), tie: entry.tie ?? index })), retain, { isCancelled });
     if (result?.status === 'completed' && result.backend === 'webgpu' && result.parity === 'verified' && Array.isArray(result.indices) && result.indices.length <= retain) {
       onCompact({ status: 'used', backend: result.backend, parity: result.parity, algorithm: result.algorithm, resident: true, readback: result.readback, candidateCount: entries.length, selectedCount: result.selectedCount });
       return result.indices.map(index => entries[index]).filter(Boolean);
@@ -833,7 +909,7 @@ async function compactFrontierRows(entries, retain, frontierCompactor, onCompact
     if (result?.status === 'cancelled') return [];
   }
   if (!frontierCompactor?.compact) { onCompact({ status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', candidateCount: entries.length, selectedCount: Math.min(entries.length, retain) }); return cpu(); }
-  const result = await frontierCompactor.compact(entries.map((entry, index) => ({ score: entry.score, tie: entry.tie ?? index })), retain);
+  const result = await frontierCompactor.compact(entries.map((entry, index) => ({ score: entry.rankScore ?? canonicalFrontierRankScore(entry.score), tie: entry.tie ?? index })), retain);
   onCompact({ status: result?.parity === 'verified' ? 'used' : 'fallback', backend: result?.backend || 'cpu-oracle', parity: result?.parity, algorithm: result?.algorithm, persistent: result?.persistent === true, bufferCapacity: result?.bufferCapacity, candidateCount: entries.length, selectedCount: result?.selectedCount || 0, reason: result?.reason });
   if (Array.isArray(result?.indices) && result.indices.length <= retain) return result.indices.map(index => entries[index]).filter(Boolean);
   return cpu();
@@ -992,11 +1068,12 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const frontierState = gpuAdapter(options.frontierState);
   const frontierNavigator = gpuAdapter(options.frontierNavigator);
   const frontierTopology = gpuAdapter(options.frontierTopology);
-  const frontierRanker = gpuAdapter(options.frontierRanker);
-  const frontierScorer = gpuAdapter(options.frontierScorer);
-  const frontierCompactor = gpuAdapter(options.frontierCompactor);
-  const residentBeamSelector = gpuAdapter(options.residentBeamSelector);
-  const frontierDeduplicator = gpuAdapter(options.frontierDeduplicator);
+  const gpuRankingEnabled = options.disableGpuCandidateRanking !== true;
+  const frontierRanker = gpuRankingEnabled ? gpuAdapter(options.frontierRanker) : null;
+  const frontierScorer = gpuRankingEnabled ? gpuAdapter(options.frontierScorer) : null;
+  const frontierCompactor = gpuRankingEnabled ? gpuAdapter(options.frontierCompactor) : null;
+  const residentBeamSelector = gpuRankingEnabled ? gpuAdapter(options.residentBeamSelector) : null;
+  const frontierDeduplicator = gpuRankingEnabled ? gpuAdapter(options.frontierDeduplicator) : null;
   const frontierTopologyAvailabilityReceipt = frontierTopology?.availability ? await frontierTopology.availability() : null;
   const frontierGeneratorStatus = frontierGenerator?.availability ? await frontierGenerator.availability() : null;
   const frontierTargetGeneratorStatus = frontierTargetGenerator?.availability ? await frontierTargetGenerator.availability() : null;
@@ -1018,6 +1095,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   });
   const initialStageReceipt = () => gpuExecution && !gpuNavigationEnabled ? { status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', reason: gpuUnavailableReason } : { status: 'cpu-oracle' };
   let prefilterReceipt = initialStageReceipt(), frontierReceipt = initialStageReceipt(), frontierGenerationReceipt = initialStageReceipt(), frontierTargetGenerationReceipt = initialStageReceipt(), frontierTargetPoolReceipt = initialStageReceipt(), frontierMetricsReceipt = initialStageReceipt(), fieldMetricsReceipt = initialStageReceipt(), frontierStateReceipt = initialStageReceipt(), frontierTopologyReceipt = initialStageReceipt(), frontierRankerReceipt = initialStageReceipt(), frontierScoreReceipt = initialStageReceipt(), frontierCompactorReceipt = initialStageReceipt(), frontierDedupReceipt = initialStageReceipt();
+  const stageHistory = { frontier: [], frontierMetrics: [], fieldMetrics: [], frontierState: [], frontierTopology: [], frontierScore: [], frontierRanker: [], frontierCompactor: [], frontierDedup: [] };
   if (frontierTargetGeneratorStatus?.status !== 'available' && frontierTargetGeneratorStatus) frontierTargetGenerationReceipt = { status: 'fallback', reason: frontierTargetGeneratorStatus.reason || 'frontier-target-generator-unavailable' };
   if (frontierTargetPoolStatus?.status !== 'available' && frontierTargetPoolStatus) frontierTargetPoolReceipt = { status: 'fallback', reason: frontierTargetPoolStatus.reason || 'frontier-target-pool-unavailable' };
   if (frontierDeduplicatorStatus?.status !== 'available' && frontierDeduplicatorStatus) frontierDedupReceipt = { status: 'fallback', reason: frontierDeduplicatorStatus.reason || 'frontier-deduplicator-unavailable' };
@@ -1048,6 +1126,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     return entries;
   }
   const searchHints = Boolean(options.searchHints);
+  const gpuStateDedupEnabled = options.disableGpuStateDedup !== true;
   const searchStrategy = options.searchStrategy || 'balanced';
   let targetFamily = options.targetFamily || null;
   const targetSeed = options.targetSeed || null;
@@ -1067,12 +1146,13 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     : progress => postMessage({ type: 'progress', ...progress });
   const random = seededRandom(options.searchSalt || `${targetFamily || 'open'}:${options.rootChoice || 0}`);
   const navigationScheduler = options.navigationScheduler || createWebGpuFrontierNavigationScheduler();
+  const verifyGpuTransitionParity = options.verifyGpuTransitionParity !== false;
   const navigationAvailability = await navigationScheduler?.availability?.();
   const preferNewFamily = searchStrategy === 'breadth' && !targetFamily;
   const centroidId = Number(options.centroidId || 3), centroidPiece = pieces.find(p => p.id === centroidId), centerShape = applyLock(centroidPiece), centerSize = shapeSize(centerShape), seedOrigin = { x: -Math.floor(centerSize.width / 2), y: -Math.floor(centerSize.height / 2) }, seedCells = placedCells(centroidPiece, seedOrigin), seedPlacement = { id: centroidId, origin: seedOrigin, cells: seedCells };
   const seedSet = new Set(seedCells.map(c => key(c.x, c.y))), centroidRing = new Set(); seedCells.forEach(cell => adjacent(cell).forEach(next => { if (!seedSet.has(key(next.x, next.y))) centroidRing.add(key(next.x, next.y)); }));
   const checkpointSchema = 'tdotdh.product-search-checkpoint.v0';
-  const serializeCheckpoint = (beam, depth, nodeOffset) => ({ schema: checkpointSchema, depth, nodeOffset, strategy: searchStrategy, centroidId, targetFamily, targetSeed, threadId: Number(options.threadId || 0), searchSalt: options.searchSalt || `${targetFamily || 'open'}:${options.rootChoice || 0}`, beam: beam.slice(0, BEAM_LIMIT).map(state => ({ placements: state.placements.map(placement => ({ id: placement.id, origin: placement.origin, cells: placement.cells })), score: Number(state.score) || 0, hintMatches: Number(state.hintMatches) || 0 })) });
+  const serializeCheckpoint = (beam, depth, nodeOffset) => ({ schema: checkpointSchema, depth, nodeOffset, strategy: searchStrategy, centroidId, targetFamily, targetSeed, threadId: Number(options.threadId || 0), searchSalt: options.searchSalt || `${targetFamily || 'open'}:${options.rootChoice || 0}`, beam: beam.slice(0, BEAM_LIMIT).map(state => ({ placements: state.placements.map(placement => ({ id: placement.id, origin: placement.origin, cells: placement.cells })), score: Number(state.score) || 0, rankScore: Number.isFinite(state.rankScore) ? state.rankScore : canonicalFrontierRankScore(state.score), hintMatches: Number(state.hintMatches) || 0 })) });
   const restoreCheckpoint = checkpoint => {
     if (!checkpoint || checkpoint.schema !== checkpointSchema || checkpoint.strategy !== searchStrategy || Number(checkpoint.centroidId) !== centroidId || (checkpoint.targetFamily || null) !== targetFamily || (checkpoint.targetSeed || null) !== targetSeed || !Array.isArray(checkpoint.beam) || checkpoint.beam.length === 0) return null;
     const beam = [];
@@ -1086,7 +1166,8 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       const cellCount = placements.reduce((sum, placement) => sum + placement.cells.length, 0);
       if (field.size !== cellCount) return null;
       const bounds = fieldMetrics(placements, centroidId);
-      beam.push({ placements, field, remaining: pieces.filter(piece => !ids.has(piece.id)), bounds, score: Number(savedState.score) || 0, hintMatches: Number(savedState.hintMatches) || 0, centroidFamily: bounds.centroidFamily, centroidFamilyId: bounds.centroidFamilyId, centroidSeed: bounds.centroidSeed, gpuState: null });
+      const score = Number(savedState.score) || 0;
+      beam.push({ placements, field, remaining: pieces.filter(piece => !ids.has(piece.id)), bounds, score, rankScore: Number.isFinite(savedState.rankScore) ? Number(savedState.rankScore) : canonicalFrontierRankScore(score), hintMatches: Number(savedState.hintMatches) || 0, centroidFamily: bounds.centroidFamily, centroidFamilyId: bounds.centroidFamilyId, centroidSeed: bounds.centroidSeed, gpuState: null });
     }
     return { beam, depth: Math.max(0, Number(checkpoint.depth) || 0), nodeOffset: Math.max(0, Number(checkpoint.nodeOffset) || 0) };
   };
@@ -1094,6 +1175,8 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const seed = { placements: [seedPlacement], field: new Set(seedCells.map(c => key(c.x, c.y))), remaining: pieces.filter(p => p.id !== centroidId), bounds: fieldMetrics([seedPlacement], centroidId), hintMatches: 0 }, seedBranches = restored ? [] : searchStrategy === 'breadth' && !gpuFirstSearch ? await lockedSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, centroidRing, positionLocks, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; }) : targetFamily ? await targetSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, targetSeed, positionLocks, random, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; }) : [];
   if (!restored && targetFamily && (!targetSeed || !seedBranches.length)) targetFamily = null;
   let navigationPlanReceipt = { status: 'cpu-oracle', backend: 'cpu-oracle', parity: 'oracle', rowCount: 0, selectedCount: 0, planCount: 0 };
+  let residentDecodeReceipt = null;
+  const navigationPlanHistory = [];
   let lockedSearchNodes = 0;
   if (seedBranches.length && searchStrategy === 'breadth' && !gpuFirstSearch) {
     const lockedResult = await searchLockedSeedBranches(pieces, seedBranches, knownFamilies, centroidId, targetNeighborCount, Boolean(targetFamily), knownSignatures, searchHints, positionPreferences, random, quality, candidatePrefilter, receipt => { prefilterReceipt = receipt; }, options.frontierValidator, frontierEvaluator, frontierGenerator, frontierGeneratorStatus, receipt => { frontierReceipt = receipt; }, receipt => { frontierGenerationReceipt = receipt; }, isCancelled, options.frontierMetrics, receipt => { frontierMetricsReceipt = receipt; }, options.frontierState, receipt => { frontierStateReceipt = receipt; }, frontierTopology, receipt => { frontierTopologyReceipt = receipt; }, fieldMetricsAdapter, frontierTargetPool, frontierTargetPoolStatus, receipt => { frontierTargetPoolReceipt = receipt; }, frontierNavigator, frontierCandidateRecords, navigationScheduler, receipt => { navigationPlanReceipt = receipt; }, navigationBatch);
@@ -1122,7 +1205,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       if (nodes - mainNodeStart >= NODE_LIMIT) break;
       beamPlans.push({ state });
     }
-    const gpuTargetPools = await generateFrontierTargetPoolsAcrossBeam(beamPlans, frontierTargetPool, centroidId, receipt => { frontierTargetPoolReceipt = receipt; }, frontierTargetPoolStatus);
+    const gpuTargetPools = await generateFrontierTargetPoolsAcrossBeam(beamPlans, options.disableGpuTargetPool ? null : frontierTargetPool, centroidId, receipt => { frontierTargetPoolReceipt = receipt; }, frontierTargetPoolStatus);
     for (const [planIndex, plan] of beamPlans.entries()) {
       const state = plan.state, openCentroid = [...centroidRing].filter(ringKey => !state.field.has(ringKey)), frontier = new Map();
       for (const cellKey of state.field) {
@@ -1134,11 +1217,11 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       plan.targetPool = ringTargets.length ? ringTargets : frontierTargets;
     }
     for (let index = beamPlans.length - 1; index >= 0; index--) if (!beamPlans[index].targetPool?.length) beamPlans.splice(index, 1);
-    const useTargetGeneratedFrontier = frontierTargetGeneratorStatus?.status === 'available';
+    const useTargetGeneratedFrontier = options.disableGpuCandidateGeneration !== true && options.disableGpuTargetGeneration !== true && frontierTargetGeneratorStatus?.status === 'available';
     const generatedByTargetBeam = useTargetGeneratedFrontier
-      ? await generateFrontierTargetTranslationsAcrossBeam(beamPlans, frontierTargetGenerator, positionLocks, seedOrigin, receipt => { frontierTargetGenerationReceipt = receipt; }, frontierTargetGeneratorStatus, frontierCandidateRecords, navigationAvailability?.status !== 'available', isCancelled)
+      ? await generateFrontierTargetTranslationsAcrossBeam(beamPlans, frontierTargetGenerator, positionLocks, seedOrigin, receipt => { frontierTargetGenerationReceipt = receipt; }, frontierTargetGeneratorStatus, frontierCandidateRecords, navigationAvailability?.status !== 'available' || options.disableGpuResidentNavigation === true, isCancelled, options.verifyGpuResidentNavigation !== false)
       : null;
-    const useGeneratedFrontier = !useTargetGeneratedFrontier && frontierGeneratorStatus?.status === 'available';
+    const useGeneratedFrontier = options.disableGpuCandidateGeneration !== true && !useTargetGeneratedFrontier && frontierGeneratorStatus?.status === 'available';
     const generatedByBeam = useGeneratedFrontier
       ? await generateFrontierTranslationsAcrossBeam(beamPlans, frontierGenerator, receipt => { frontierGenerationReceipt = receipt; }, frontierGeneratorStatus, frontierCandidateRecords)
       : null;
@@ -1171,11 +1254,13 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
           if (selectedOptions.length) beamJobs.push({ state, entries: selectedOptions });
         }
       }
+      navigationPlanHistory.push({ depth, status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', rowCount: 0, selectedCount: beamJobs.reduce((sum, job) => sum + job.entries.length, 0), beamJobCount: beamJobs.length, nextBeamCount: null });
+      navigationPlanReceipt = { ...navigationPlanReceipt, history: navigationPlanHistory.slice(-64), expansion: { depth, beamPlanCount: beamPlans.length, selectedCount: beamJobs.reduce((sum, job) => sum + job.entries.length, 0), selectedPlanCount: beamJobs.length } };
     } else {
       const navigationRows = [], navigationRefs = [], targetPlanEntries = [], targetPieces = new Map();
       const residentNavigationEntries = generatedByTargetBeam?.residentNavigation || [], residentNavigationExpectedRows = residentNavigationEntries.flatMap(entry => entry.expectedRows || []);
       const useFlatTargetPlan = useTargetGeneratedFrontier && typeof navigationScheduler.selectCandidateRecords === 'function';
-      const useResidentNavigation = useTargetGeneratedFrontier && typeof navigationScheduler.selectResidentCandidateRecords === 'function' && residentNavigationEntries.length > 0 && residentNavigationExpectedRows.length > 0;
+      const useResidentNavigation = useTargetGeneratedFrontier && typeof navigationScheduler.selectResidentCandidateRecords === 'function' && residentNavigationEntries.length > 0;
       for (const [planIndex, plan] of beamPlans.entries()) {
         const state = plan.state, generatedByPiece = generatedByBeam?.[planIndex] || null, generatedByTarget = generatedByTargetBeam?.[planIndex] || null;
         if (useResidentNavigation) continue;
@@ -1211,15 +1296,31 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         }
       }
       const navigationPlan = useResidentNavigation
-        ? await navigationScheduler.selectResidentCandidateRecords(residentNavigationEntries, { planCount: beamPlans.length, expectedRows: residentNavigationExpectedRows })
+        ? await navigationScheduler.selectResidentCandidateRecords(residentNavigationEntries, { planCount: beamPlans.length, expectedRows: residentNavigationExpectedRows.length ? residentNavigationExpectedRows : null })
         : useFlatTargetPlan
         ? await navigationScheduler.selectCandidateRecords(targetPlanEntries, { planCount: beamPlans.length })
         : await navigationScheduler.select(navigationRows, { planCount: beamPlans.length });
-      navigationPlanReceipt = { status: navigationPlan.rowCount === 0 ? 'not-used' : navigationPlan.status === 'completed' && navigationPlan.backend === 'webgpu' && navigationPlan.parity === 'verified' ? 'used' : navigationPlan.status, backend: navigationPlan.backend, parity: navigationPlan.parity, rowCount: navigationPlan.rowCount, selectedCount: navigationPlan.selectedCount, planCount: navigationPlan.planCount, inputDigest: navigationPlan.inputDigest, inputRepresentation: useResidentNavigation ? (residentNavigationEntries.some(entry => entry.direct) ? 'gpu-resident-target-records' : 'gpu-resident-compacted-records') : useFlatTargetPlan ? 'gpu-flat-target-records' : useTargetGeneratedFrontier ? 'flat-target-records' : 'materialized-candidates', ...(useResidentNavigation ? { resident: true } : {}), ...(navigationPlan.rowCount === 0 ? { reason: 'no-navigation-candidates' } : navigationPlan.reason ? { reason: navigationPlan.reason } : {}), ...(navigationPlan.dispatch ? { dispatch: navigationPlan.dispatch } : {}), ...(navigationPlan.persistent ? { persistent: true, bufferCapacity: navigationPlan.bufferCapacity, dispatchCount: navigationPlan.dispatchCount } : {}) };
+      navigationPlanReceipt = { status: navigationPlan.rowCount === 0 ? 'not-used' : navigationPlan.status === 'completed' && navigationPlan.backend === 'webgpu' && navigationPlan.parity === 'verified' ? 'used' : navigationPlan.status, backend: navigationPlan.backend, parity: navigationPlan.parity, rowCount: navigationPlan.rowCount, selectedCount: navigationPlan.selectedCount, planCount: navigationPlan.planCount, inputDigest: navigationPlan.inputDigest, inputRepresentation: useResidentNavigation ? (residentNavigationEntries.some(entry => entry.direct) ? 'gpu-resident-target-records' : 'gpu-resident-compacted-records') : useFlatTargetPlan ? 'gpu-flat-target-records' : useTargetGeneratedFrontier ? 'flat-target-records' : 'materialized-candidates', ...(useResidentNavigation ? { resident: true, expectedRowsCount: residentNavigationExpectedRows.length } : {}), ...(navigationPlan.residentDiagnostics ? { residentDiagnostics: navigationPlan.residentDiagnostics } : {}), ...(navigationPlan.selectedRecords ? { selectedRecords: navigationPlan.selectedRecords.slice(0, 32) } : {}), ...(navigationPlan.rowCount === 0 ? { reason: 'no-navigation-candidates' } : navigationPlan.reason ? { reason: navigationPlan.reason } : {}), ...(navigationPlan.dispatch ? { dispatch: navigationPlan.dispatch } : {}), ...(navigationPlan.persistent ? { persistent: true, bufferCapacity: navigationPlan.bufferCapacity, dispatchCount: navigationPlan.dispatchCount } : {}) };
+      if (useResidentNavigation && navigationPlan.selectedRecords?.length) {
+        const samples = navigationPlan.selectedRecords.slice(0, 32).map(record => {
+          const parts = String(record.pieceId ?? '').split(':'), planIndex = parts.length > 1 ? Number(parts.shift()) : null, pieceId = parts.join(':'), plan = Number.isSafeInteger(planIndex) ? beamPlans[planIndex] : null, piece = plan?.state.remaining.find(candidate => String(candidate.id) === pieceId), target = plan?.targetPool?.[record.targetOrdinal], shape = piece ? applyLock(piece) : [], source = Number.isSafeInteger(record.candidateIndex) ? shape[record.candidateIndex] : null, expectedOrigin = target && source ? { x: target.x - source.x, y: target.y - source.y } : null, mismatch = !piece || !target || !source || record.originX !== expectedOrigin.x || record.originY !== expectedOrigin.y;
+          return { rowIndex: record.rowIndex, planIndex, pieceId, targetOrdinal: record.targetOrdinal, candidateIndex: record.candidateIndex, originX: record.originX, originY: record.originY, expectedOrigin, mismatch };
+        });
+        residentDecodeReceipt = { checked: samples.length, mismatchCount: samples.filter(sample => sample.mismatch).length, samples };
+        navigationPlanReceipt = { ...navigationPlanReceipt, residentDecode: residentDecodeReceipt };
+      }
+      navigationPlanHistory.push({ depth, status: navigationPlan.status, backend: navigationPlan.backend, parity: navigationPlan.parity, rowCount: navigationPlan.rowCount, selectedCount: navigationPlan.selectedCount, selectedRows: Array.from(navigationPlan.selectedRows || []).slice(0, 64), observedSelectedRows: Array.from(navigationPlan.observedSelectedRows || []).slice(0, 64), observedSelectedRecords: navigationPlan.observedSelectedRecords, expectedSelectedRecords: navigationPlan.expectedSelectedRecords, reason: navigationPlan.reason });
+      navigationPlanReceipt = { ...navigationPlanReceipt, history: navigationPlanHistory.slice(-64) };
+      navigationPlanReceipt = { ...navigationPlanReceipt, expansion: { depth, beamPlanCount: beamPlans.length, selectedCount: navigationPlan.selectedCount, selectedPlanCount: navigationPlan.selectedRows?.length || 0 } };
       const selectedByPlan = new Map();
       for (const rowIndex of navigationPlan.selectedRows || []) {
         if (useResidentNavigation) {
-          const row = residentNavigationExpectedRows[rowIndex], piece = beamPlans[row?.planIndex]?.state.remaining.find(candidate => candidate.id === row.pieceId);
+          const selectedRecord = navigationPlan.selectedRecords?.find(record => record.rowIndex === rowIndex);
+          const selectedParts = selectedRecord?.pieceId == null ? [] : String(selectedRecord.pieceId).split(':');
+          const selectedPlanIndex = selectedParts.length > 1 ? Number(selectedParts.shift()) : null;
+          const selectedPieceId = selectedParts.length ? selectedParts.join(':') : selectedRecord?.pieceId;
+          const row = selectedRecord && Number.isSafeInteger(selectedPlanIndex) ? { planIndex: selectedPlanIndex, targetOrdinal: selectedRecord.targetOrdinal, pieceId: selectedPieceId, originX: selectedRecord.originX, originY: selectedRecord.originY } : residentNavigationExpectedRows[rowIndex];
+          const piece = beamPlans[row?.planIndex]?.state.remaining.find(candidate => String(candidate.id) === String(row?.pieceId));
           if (!row || !piece) continue;
           const entries = selectedByPlan.get(row.planIndex) || [];
           entries.push({ piece, candidate: { id: piece.id, origin: { x: row.originX, y: row.originY }, cells: placedCells(piece, { x: row.originX, y: row.originY }) } });
@@ -1246,19 +1347,19 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         if (selectedOptions.length) beamJobs.push({ state: plan.state, entries: selectedOptions });
       }
     }
-    await evaluateFrontierGeometryAcrossBeam(beamJobs, centroidId, frontierMetrics, receipt => { frontierMetricsReceipt = receipt; });
-    await evaluateFieldAggregatesAcrossBeam(beamJobs, centroidId, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; });
-    await evaluateFrontierOptionsAcrossBeam(beamJobs, centroidId, frontierEvaluator, options.frontierValidator, receipt => { frontierReceipt = { ...receipt, ...(navigationTicket ? { ticket: navigationTicket } : {}), ...(navigationCursor ? { cursor: { ...navigationCursor, depth, nodeOffset: navigationCursor.nodeOffset + nodes } } : {}) }; });
+    await evaluateFrontierGeometryAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateGeometry ? null : frontierMetrics, receipt => { frontierMetricsReceipt = receipt; stageHistory.frontierMetrics.push({ depth, ...receipt }); });
+    await evaluateFieldAggregatesAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateFieldMetrics ? null : fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; stageHistory.fieldMetrics.push({ depth, ...receipt }); });
+    await evaluateFrontierOptionsAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateValidity ? null : frontierEvaluator, options.disableGpuCandidateValidity ? null : options.frontierValidator, receipt => { frontierReceipt = { ...receipt, ...(navigationTicket ? { ticket: navigationTicket } : {}), ...(navigationCursor ? { cursor: { ...navigationCursor, depth, nodeOffset: navigationCursor.nodeOffset + nodes } } : {}) }; stageHistory.frontier.push({ depth, ...frontierReceipt }); });
     frontierNavigator?.beginLayer?.();
-    await evaluateFrontierStateAcrossBeam(beamJobs, frontierNavigator || frontierState, receipt => { frontierStateReceipt = receipt; });
+    await evaluateFrontierStateAcrossBeam(beamJobs, frontierNavigator || frontierState, receipt => { frontierStateReceipt = receipt; stageHistory.frontierState.push({ depth, ...receipt }); }, { verifyParity: verifyGpuTransitionParity });
     frontierNavigator?.commitLayer?.();
     const cancelledAfterGpu = isCancelled();
     if (navigationCancellation) navigationCancellation(cancelledAfterGpu);
     if (cancelledAfterGpu) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierDedup: frontierDedupReceipt };
+    await evaluateFrontierTopologyAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateTopology ? null : frontierTopology, receipt => { frontierTopologyReceipt = receipt; stageHistory.frontierTopology.push({ depth, ...receipt }); }, frontierTopologyAvailabilityReceipt);
     for (const job of beamJobs) {
       const state = job.state;
       let selectedOptions = job.entries;
-      selectedOptions = await evaluateFrontierTopology(selectedOptions, state, centroidId, frontierTopology, receipt => { frontierTopologyReceipt = receipt; }, frontierTopologyAvailabilityReceipt);
       if (!selectedOptions.length) continue;
       const rankedCandidates = selectedOptions.map(({ piece, candidate, gpuGeometry, gpuFieldMetrics, gpuState, gpuTopology }) => {
         const nextBounds = { minX: Math.min(state.bounds.minX, ...candidate.cells.map(c => c.x)), maxX: Math.max(state.bounds.maxX, ...candidate.cells.map(c => c.x)), minY: Math.min(state.bounds.minY, ...candidate.cells.map(c => c.y)), maxY: Math.max(state.bounds.maxY, ...candidate.cells.map(c => c.y)) };
@@ -1277,15 +1378,16 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       const gpuTopologyScore = Number.isFinite(gpuTopology?.perimeter) ? gpuTopology.perimeter / 1000 : null;
         const geometryScore = gpuGeometryScore ?? gpuEvaluatorScore ?? gpuTopologyScore ?? (openCentroid * 40 + (nextBounds.maxX - nextBounds.minX + 1) * (nextBounds.maxY - nextBounds.minY + 1) - contact * 2.4 - centroidContact * 2 - ringCoverage * 8);
         const scoreInput = { geometryScore, targetProgress, targetActive: Boolean(targetFamily), novelty: Boolean(noveltyBonus), neighborCount: candidateMetrics.centroidNeighborCount, targetNeighborCount: targetNeighborCount == null ? 0 : targetNeighborCount, neighborActive: targetNeighborCount != null, hint, coastBias: Number(quality.coastBias) || 0, perimeter: candidateMetrics.perimeter, gravityBias: Number(quality.gravityBias) || 0, gravityTension: candidateMetrics.gravityTension, inletBias: Number(quality.inletBias) || 0, inletRisk: candidateMetrics.inletRisk, randomUnit: random(), flags: (targetFamily ? 1 : 0) | (noveltyBonus ? 2 : 0) | (targetNeighborCount != null ? 4 : 0) | (hint ? 8 : 0) };
-        return { piece, candidate, gpuState, metrics: candidateMetrics, score: cpuScoreFrontierCandidate(scoreInput), scoreInput, nextBounds, hintMatches };
+        const score = cpuScoreFrontierCandidate(scoreInput);
+        return { piece, candidate, gpuState, metrics: candidateMetrics, score, rankScore: canonicalFrontierRankScore(score), scoreInput, nextBounds, hintMatches };
       }).filter(Boolean);
-      const scoredCandidates = await scoreFrontierCandidates(rankedCandidates, frontierScorer, receipt => { frontierScoreReceipt = receipt; }, residentBeamSelector, receipt => { frontierRankerReceipt = receipt; }, isCancelled);
-      const ranked = scoredCandidates.residentRanked ? scoredCandidates.entries : await rankFrontierOptions(scoredCandidates.entries, frontierRanker, receipt => { frontierRankerReceipt = receipt; });
+      const scoredCandidates = await scoreFrontierCandidates(rankedCandidates, frontierScorer, receipt => { frontierScoreReceipt = receipt; stageHistory.frontierScore.push({ depth, ...receipt }); }, residentBeamSelector, receipt => { frontierRankerReceipt = receipt; stageHistory.frontierRanker.push({ depth, ...receipt }); }, isCancelled);
+      const ranked = scoredCandidates.residentRanked ? scoredCandidates.entries : await rankFrontierOptions(scoredCandidates.entries, frontierRanker, receipt => { frontierRankerReceipt = receipt; stageHistory.frontierRanker.push({ depth, ...receipt }); });
       const deduplicated = await deduplicateRankedOptions(ranked, state);
       for (const option of deduplicated) {
         const placements = [...state.placements, option.candidate], metrics = option.metrics, field = new Set(state.field); option.candidate.cells.forEach(c => field.add(key(c.x, c.y)));
         if (metrics.holes > 0) continue;
-        if (option.gpuState) {
+        if (option.gpuState && gpuStateDedupEnabled) {
           const hash = String(option.gpuState.absoluteHash >>> 0), bucket = gpuStateBuckets.get(hash) || [];
           if (bucket.some(existing => sameGpuState(existing, option.gpuState))) continue;
           bucket.push(option.gpuState); gpuStateBuckets.set(hash, bucket);
@@ -1295,13 +1397,19 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
           cpuStateKeys.add(cpuStateKey);
         }
         const familyId = metrics.centroidFamilyId;
-        nextBeam.push({ placements, field, remaining: state.remaining.filter(p => p.id !== option.piece.id), bounds: metrics, score: option.score + (targetFamily && targetSeedCompatible(metrics.centroidSeed, targetSeed) ? -220 : 0), hintMatches: option.hintMatches, centroidFamily: metrics.centroidFamily, centroidFamilyId: familyId, centroidSeed: metrics.centroidSeed, gpuState: option.gpuState || null });
+        const score = option.score + (targetFamily && targetSeedCompatible(metrics.centroidSeed, targetSeed) ? -220 : 0);
+        nextBeam.push({ placements, field, remaining: state.remaining.filter(p => p.id !== option.piece.id), bounds: metrics, score, rankScore: canonicalFrontierRankScore(score), hintMatches: option.hintMatches, centroidFamily: metrics.centroidFamily, centroidFamilyId: familyId, centroidSeed: metrics.centroidSeed, gpuState: option.gpuState || null });
       }
     }
     const familyBuckets = new Map();
+    navigationPlanReceipt = { ...navigationPlanReceipt, expansion: { ...(navigationPlanReceipt.expansion || {}), beamJobCount: beamJobs.length, nextBeamCount: nextBeam.length } };
+    const historyEntry = navigationPlanHistory[navigationPlanHistory.length - 1];
+    if (historyEntry) Object.assign(historyEntry, { beamJobCount: beamJobs.length, nextBeamCount: nextBeam.length, nextBeamSample: nextBeam.slice(0, 8).map(state => ({ placements: state.placements.map(placement => placement.id), family: state.centroidFamilyId, score: state.score })) });
+    navigationPlanReceipt = { ...navigationPlanReceipt, history: navigationPlanHistory.slice(-64), stageHistory };
     for (const state of nextBeam) { if (!familyBuckets.has(state.centroidFamilyId)) familyBuckets.set(state.centroidFamilyId, []); familyBuckets.get(state.centroidFamilyId).push(state); }
     if (searchStrategy === 'breadth') {
-      for (const [familyId, bucket] of familyBuckets) familyBuckets.set(familyId, await orderFrontierRows(bucket, frontierRanker, receipt => { frontierRankerReceipt = receipt; }));
+      const familyIds = [...familyBuckets.keys()], ordered = await orderFrontierRowsMany(familyIds.map(familyId => familyBuckets.get(familyId)), frontierRanker, receipt => { frontierRankerReceipt = receipt; });
+      for (const [index, familyId] of familyIds.entries()) familyBuckets.set(familyId, ordered[index]);
     }
     const orderedBuckets = [...familyBuckets.values()].sort((a, b) => {
       if (targetNeighborCount != null) {
@@ -1316,10 +1424,10 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         const bKnown = knownFamilies.has(b[0].centroidFamilyId) ? 1 : 0;
         if (aKnown !== bKnown) return aKnown - bKnown;
       }
-      return a[0].score - b[0].score;
+      return (a[0].rankScore ?? canonicalFrontierRankScore(a[0].score)) - (b[0].rankScore ?? canonicalFrontierRankScore(b[0].score));
     }), retained = [], retainedSet = new Set(), seedCounts = new Map();
     if (searchStrategy === 'depth') {
-      const compactedBeam = await compactFrontierRows(nextBeam.map((state, index) => ({ state, score: state.score, tie: index })), BEAM_LIMIT, frontierCompactor, receipt => { frontierCompactorReceipt = receipt; }, residentBeamSelector, isCancelled);
+      const compactedBeam = await compactFrontierRows(nextBeam.map((state, index) => ({ state, score: state.score, rankScore: state.rankScore, tie: index })), BEAM_LIMIT, frontierCompactor, receipt => { frontierCompactorReceipt = receipt; stageHistory.frontierCompactor.push({ depth, ...receipt }); }, residentBeamSelector, isCancelled);
       for (const { state } of compactedBeam) { retained.push(state); retainedSet.add(state); seedCounts.set(state.centroidFamilyId, (seedCounts.get(state.centroidFamilyId) || 0) + 1); }
     } else {
       const seedQuota = searchStrategy === 'breadth' ? 3 : 8;
@@ -1329,7 +1437,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
           const state = bucket[round]; if (!state) continue;
           quotaRows.push({ state, score: round * 4096 + bucketIndex, tie: quotaRows.length });
         }
-        const compactedQuota = await compactFrontierRows(quotaRows, BEAM_LIMIT, frontierCompactor, receipt => { frontierCompactorReceipt = { ...receipt, batch: 'breadth-quota' }; }, residentBeamSelector, isCancelled);
+        const compactedQuota = await compactFrontierRows(quotaRows, BEAM_LIMIT, frontierCompactor, receipt => { frontierCompactorReceipt = { ...receipt, batch: 'breadth-quota' }; stageHistory.frontierCompactor.push({ depth, ...frontierCompactorReceipt }); }, residentBeamSelector, isCancelled);
         for (const { state } of compactedQuota) { retained.push(state); retainedSet.add(state); seedCounts.set(state.centroidFamilyId, (seedCounts.get(state.centroidFamilyId) || 0) + 1); }
       } else for (let round = 0; round < seedQuota && retained.length < BEAM_LIMIT; round++) for (const bucket of orderedBuckets) {
         const state = bucket[round]; if (!state || retained.length >= BEAM_LIMIT) continue;

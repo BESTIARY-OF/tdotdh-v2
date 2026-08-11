@@ -1,6 +1,6 @@
 const output = document.querySelector('#output');
 const runButton = document.querySelector('#run');
-const workerUrl = new URL('./v2-search-worker.js?v=20260811-matched2', import.meta.url);
+const workerUrl = new URL('./v2-search-worker.js?v=20260811-matched62', import.meta.url);
 
 function signature(placements) {
   if (!Array.isArray(placements) || placements.length === 0) return null;
@@ -59,7 +59,22 @@ function runWorker(pieces, backend, onProgress = () => {}) {
         signature: signature(lastResult?.placements),
         frontierState: lastResult?.frontierState || null,
         navigation: lastResult?.navigation || null,
+        searchReceipt: lastResult?.searchReceipt || message.searchReceipt || null,
+        stageReceipts: lastResult ? {
+          frontier: lastResult.frontier || null,
+          frontierMetrics: lastResult.frontierMetrics || null,
+          fieldMetrics: lastResult.fieldMetrics || null,
+          frontierTargetGeneration: lastResult.frontierTargetGeneration || null,
+          navigationPlan: lastResult.navigationPlan || null,
+          frontierScore: lastResult.frontierScore || null,
+          frontierRanker: lastResult.frontierRanker || null,
+          frontierCompactor: lastResult.frontierCompactor || null,
+          frontierDedup: lastResult.frontierDedup || null,
+          frontierTopology: lastResult.frontierTopology || null,
+          frontierState: lastResult.frontierState || null,
+        } : null,
         gpuExecution: lastResult?.gpuExecution || null,
+        stageTimings: lastResult?.stageTimings || null,
       });
     };
     worker.onerror = event => {
@@ -67,6 +82,8 @@ function runWorker(pieces, backend, onProgress = () => {}) {
       worker.terminate();
       reject(new Error(`${backend} worker error: ${event.message || 'unknown error'}`));
     };
+    const diagnostic = new URL(location.href).searchParams.get('diagnostic');
+    const diagnosticSteering = diagnostic === 'no-topology' ? { disableGpuCandidateTopology: true } : diagnostic === 'no-geometry' ? { disableGpuCandidateGeometry: true } : diagnostic === 'no-field-metrics' ? { disableGpuCandidateFieldMetrics: true } : diagnostic === 'no-target-pool' ? { disableGpuTargetPool: true } : diagnostic === 'no-target-generation' ? { disableGpuCandidateGeneration: true } : diagnostic === 'no-resident-navigation' ? { disableGpuResidentNavigation: true } : diagnostic === 'verify-resident-navigation' ? { verifyGpuResidentNavigation: true } : {};
     worker.postMessage({
       type: 'start',
       protocolVersion: 1,
@@ -81,7 +98,7 @@ function runWorker(pieces, backend, onProgress = () => {}) {
       budget: { maxNodes: 40000, maxMilliseconds: 900000 },
       pieces,
       constraints: {},
-      steering: { searchStrategy: 'breadth', benchmarkBackend: backend },
+      steering: { searchStrategy: 'breadth', benchmarkBackend: backend, ...diagnosticSteering },
       knownSignatureHints: [],
     });
   });
@@ -94,10 +111,13 @@ function summarize(result) {
     elapsedMs: result.elapsedMs,
     nodes: result.nodes,
     progress: result.progress,
-    foundArrangement: Boolean(result.placements),
+    foundArrangement: Array.isArray(result.placements) && result.placements.length > 0,
     canonicalSignature: result.signature,
     gpuExecution: result.gpuExecution,
+    stageTimings: result.stageTimings,
     navigation: result.navigation,
+    searchReceipt: result.searchReceipt,
+    stageReceipts: result.stageReceipts,
     error: result.error,
   };
 }

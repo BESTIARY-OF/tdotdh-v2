@@ -3,25 +3,25 @@ import { createWebGpuCandidatePrefilter } from '../../../packages/search-core/sr
 import { createWebGpuFrontierValidator } from '../../../packages/search-core/src/webgpu-frontier-validator.js';
 import { createWebGpuFrontierEvaluator } from '../../../packages/search-core/src/webgpu-frontier-evaluator.js';
 import { createWebGpuFrontierGenerator } from '../../../packages/search-core/src/webgpu-frontier-generator.js?v=20260811-pipelinecache1';
-import { createWebGpuFrontierTargetGenerator } from '../../../packages/search-core/src/webgpu-frontier-target-generator.js?v=20260811-resident4';
+import { createWebGpuFrontierTargetGenerator } from '../../../packages/search-core/src/webgpu-frontier-target-generator.js?v=20260811-resident10';
 import { createWebGpuFrontierTargetPool } from '../../../packages/search-core/src/webgpu-frontier-target-pool.js';
 import { createWebGpuFrontierMetrics } from '../../../packages/search-core/src/webgpu-frontier-metrics.js?v=20260811-pipelinecache1';
 import { createWebGpuFieldMetrics } from '../../../packages/search-core/src/webgpu-field-metrics.js';
 import { createWebGpuLabeledFrontierState } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js?v=20260810-state3';
 import { createWebGpuFrontierTopology } from '../../../packages/search-core/src/webgpu-frontier-topology.js?v=20260810-topology2';
-import { createWebGpuFrontierRanker } from '../../../packages/search-core/src/webgpu-frontier-ranker.js?v=20260810-gpu4';
+import { createWebGpuFrontierRanker } from '../../../packages/search-core/src/webgpu-frontier-ranker.js?v=20260811-gpu6';
 import { createWebGpuPersistentFrontierCompactor } from '../../../packages/search-core/src/webgpu-frontier-compactor.js?v=20260811-pipelinecache1';
 import { createWebGpuResidentBeamSelector } from '../../../packages/search-core/src/webgpu-resident-beam-selector.js?v=20260811-beam2';
 import { createWebGpuFrontierDeduplicator } from '../../../packages/search-core/src/webgpu-frontier-deduplicator.js?v=20260810-gpu3';
-import { createWebGpuFrontierNavigator } from '../../../packages/search-core/src/webgpu-frontier-navigator.js';
-import { createWebGpuResidentFrontierState } from '../../../packages/search-core/src/webgpu-resident-frontier-state.js?v=20260810-gpu38';
+import { createWebGpuFrontierNavigator } from '../../../packages/search-core/src/webgpu-frontier-navigator.js?v=20260811-digest1';
+import { createWebGpuResidentFrontierState } from '../../../packages/search-core/src/webgpu-resident-frontier-state.js?v=20260811-gpu40';
 import { createWebGpuFrontierCandidateRecords } from '../../../packages/search-core/src/webgpu-frontier-candidate-records.js?v=20260811-resident2';
 import { createWebGpuFrontierScorer } from '../../../packages/search-core/src/webgpu-frontier-scorer.js?v=20260811-pipelinecache1';
-import { createWebGpuFrontierNavigationScheduler } from '../../../packages/search-core/src/webgpu-frontier-navigation-plan.js?v=20260811-resident2';
+import { createWebGpuFrontierNavigationScheduler } from '../../../packages/search-core/src/webgpu-frontier-navigation-plan.js?v=20260811-resident7';
 import { createWebGpuDeviceCache } from '../../../packages/search-core/src/webgpu-device-cache.js?v=20260811-lifecycle1';
 import { probeWebGpuExecutionCapabilities } from '../../../packages/search-core/src/webgpu-execution-probe.js?v=20260810-gpu35';
-import { createNavigationCoordinator } from '../../../packages/search-worker/src/navigation-coordinator.js?v=20260811-gpu-expansion2';
-import { search } from './v2-legacy-search.js?v=20260811-gpufirst9';
+import { createNavigationCoordinator } from '../../../packages/search-worker/src/navigation-coordinator.js?v=20260811-gpu-expansion3';
+import { search } from './v2-legacy-search.js?v=20260811-gpufirst56';
 
 const deviceCache = createWebGpuDeviceCache({ gpu: globalThis.navigator?.gpu });
 const candidatePrefilter = createWebGpuCandidatePrefilter({ gpu: globalThis.navigator?.gpu, deviceCache });
@@ -42,7 +42,7 @@ const frontierCompactor = createWebGpuPersistentFrontierCompactor({ gpu: globalT
 const residentBeamSelector = createWebGpuResidentBeamSelector({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierDeduplicator = createWebGpuFrontierDeduplicator({ gpu: globalThis.navigator?.gpu, deviceCache });
 const frontierNavigationScheduler = createWebGpuFrontierNavigationScheduler({ gpu: globalThis.navigator?.gpu, deviceCache });
-const gpuStageAdapters = Object.freeze({ prefilter: candidatePrefilter, frontier: frontierEvaluator, frontierGeneration: frontierGenerator, frontierTargetGeneration: frontierTargetGenerator, frontierTargetPool, frontierMetrics, fieldMetrics, frontierState, frontierTopology, frontierRanker, frontierCompactor, frontierDedup: frontierDeduplicator, frontierScore: frontierScorer, navigationPlan: frontierNavigationScheduler });
+const gpuStageAdapters = Object.freeze({ prefilter: candidatePrefilter, frontier: frontierEvaluator, frontierGeneration: frontierGenerator, frontierTargetGeneration: frontierTargetGenerator, frontierCandidateRecords, frontierTargetPool, frontierMetrics, fieldMetrics, frontierState, frontierTopology, frontierRanker, frontierCompactor, frontierDedup: frontierDeduplicator, frontierScore: frontierScorer, navigationPlan: frontierNavigationScheduler });
 let gpuStageAvailabilityPromise = null;
 async function getGpuStageAvailability() {
   if (!gpuStageAvailabilityPromise) gpuStageAvailabilityPromise = Promise.all(Object.entries(gpuStageAdapters).map(async ([name, adapter]) => [name, adapter?.availability ? await adapter.availability() : { status: 'unavailable', reason: 'stage-does-not-expose-availability' }])).then(entries => Object.freeze(Object.fromEntries(entries)));
@@ -65,8 +65,45 @@ async function runProductSearch(request, context) {
   const navigation = createNavigationCoordinator({ ticket: request.ticket, cursor: request.cursor });
   const frontierNavigator = createWebGpuFrontierNavigator({ stateAdapter: residentFrontierState, ticket: request.ticket, cursor: request.cursor, isCancelled: context.isCancelled });
   let executionDecision = null;
+  const stageTimings = Object.create(null);
+  const timedStage = (name, adapter) => {
+    if (!adapter) return null;
+    const wrapped = Object.create(Object.getPrototypeOf(adapter));
+    const seen = new Set();
+    const wrapMethod = (property, value) => async (...args) => {
+      const started = performance.now();
+      try {
+        return await value.apply(adapter, args);
+      } finally {
+        const timing = stageTimings[name] || (stageTimings[name] = { calls: 0, totalMs: 0, maxMs: 0, methods: {} });
+        const elapsedMs = performance.now() - started;
+        const methodName = String(property);
+        const method = timing.methods[methodName] || (timing.methods[methodName] = { calls: 0, totalMs: 0, maxMs: 0 });
+        timing.calls += 1;
+        timing.totalMs += elapsedMs;
+        timing.maxMs = Math.max(timing.maxMs, elapsedMs);
+        method.calls += 1;
+        method.totalMs += elapsedMs;
+        method.maxMs = Math.max(method.maxMs, elapsedMs);
+      }
+    };
+    for (let current = adapter; current && current !== Object.prototype; current = Object.getPrototypeOf(current)) {
+      for (const property of Reflect.ownKeys(current)) {
+        if (seen.has(property) || property === 'constructor') continue;
+        seen.add(property);
+        const descriptor = Reflect.getOwnPropertyDescriptor(current, property);
+        if (!descriptor) continue;
+        if ('value' in descriptor && typeof descriptor.value === 'function') {
+          Object.defineProperty(wrapped, property, { value: wrapMethod(property, descriptor.value), writable: true, configurable: true, enumerable: descriptor.enumerable });
+        } else if (current === adapter) {
+          Object.defineProperty(wrapped, property, descriptor);
+        }
+      }
+    }
+    return wrapped;
+  };
   const stageAvailability = forceCpuBenchmark ? {} : await getGpuStageAvailability();
-  const stage = (name, adapter = gpuStageAdapters[name]) => forceCpuBenchmark ? null : adapter;
+  const stage = (name, adapter = gpuStageAdapters[name]) => forceCpuBenchmark ? null : timedStage(name, adapter);
   const result = await search(request.pieces, steering.knownCentroidFamilies || [], {
     ...steering,
     gpuExecution: { ...gpuExecution, stageAvailability },
@@ -83,7 +120,7 @@ async function runProductSearch(request, context) {
     frontierGenerator: stage('frontierGeneration'),
     frontierTargetGenerator: stage('frontierTargetGeneration'),
     frontierTargetPool: stage('frontierTargetPool'),
-    frontierCandidateRecords: stage('frontierTargetGeneration'),
+    frontierCandidateRecords: stage('frontierCandidateRecords', frontierCandidateRecords),
     frontierScorer: stage('frontierScore'),
     frontierMetrics: stage('frontierMetrics'),
     fieldMetrics: stage('fieldMetrics'),
@@ -92,9 +129,9 @@ async function runProductSearch(request, context) {
     frontierTopology: stage('frontierTopology'),
     frontierRanker: stage('frontierRanker'),
     frontierCompactor: stage('frontierCompactor'),
-    residentBeamSelector: stage('frontierScore'),
+    residentBeamSelector: forceCpuBenchmark ? null : timedStage('frontierScore', residentBeamSelector),
     frontierDeduplicator: stage('frontierDedup'),
-    navigationScheduler: gpuExecution.deviceAvailable ? frontierNavigationScheduler : createWebGpuFrontierNavigationScheduler({ gpu: null }),
+    navigationScheduler: gpuExecution.deviceAvailable ? timedStage('navigationPlan', frontierNavigationScheduler) : createWebGpuFrontierNavigationScheduler({ gpu: null }),
     isCancelled: context.isCancelled,
     navigationBatch: details => navigation.beginBatch(details),
     navigationCancellation: cancelled => navigation.observeCancellation(cancelled),
@@ -104,6 +141,7 @@ async function runProductSearch(request, context) {
   return {
     ...result,
     gpuExecution: { ...gpuExecution, stageAvailability },
+    stageTimings,
     navigation: navigation.complete({ ...result, gpuExecution }),
     placements: Array.isArray(result?.placements) ? result.placements : [],
     hasPlacement: Array.isArray(result?.placements) && result.placements.length > 0,
