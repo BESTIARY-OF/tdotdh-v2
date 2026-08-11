@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>TDOTDH v2 matched benchmark</title>
+<style>
+  body { margin: 2rem; max-width: 72rem; font: 16px/1.45 system-ui, sans-serif; color: #17202a; background: #f6f1e8; }
+  button { padding: .65rem 1rem; font-weight: 700; cursor: pointer; }
+  pre { white-space: pre-wrap; background: #fff; padding: 1rem; border: 1px solid #c9bda9; min-height: 12rem; }
+  .note { color: #5f5548; }
+</style>
+<h1>Matched SEDLEC search benchmark</h1>
+<p class="note">Runs the same opinionated 15-piece fixture through the live WebGPU worker and the forced CPU oracle. This is diagnostic tooling, not the field-guide UI.</p>
+<button id="run" type="button">Run matched benchmark</button>
+<pre id="output">Ready. The benchmark has not run.</pre>
+<script type="module" src="./benchmark.js?v=20260811-matched1"></script>
