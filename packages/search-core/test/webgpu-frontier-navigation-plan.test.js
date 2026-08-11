@@ -99,6 +99,13 @@ assert.deepEqual(Array.from(validityReceipt.selectedRows), [0, 1, 3]);
   assert.equal(firstPersistent.dispatchCount, 1);
   assert.equal(secondPersistent.dispatchCount, 2);
   assert.equal(createdBuffers, 7, 'persistent navigation reuses its seven GPU buffers');
+  const residentPersistentScheduler = createWebGpuFrontierNavigationScheduler({ gpu: { async requestAdapter() { return fakeAdapter; } } });
+  const residentPersistentReceipt = await residentPersistentScheduler.selectResidentCandidateRecords([
+    { residentHandle: { schema: 'tdotdh.webgpu-frontier-target-records.v0', device: fakeDevice, recordCount: rows.length, recordsBuffer: fakeDevice.createBuffer(), validityBuffer: fakeDevice.createBuffer() }, piecePlans: [0, 0, 0, 0, 0, 0, 0, 1] },
+  ], { planCount: 2, expectedRows: rows });
+  assert.equal(residentPersistentReceipt.backend, 'webgpu');
+  assert.equal(residentPersistentReceipt.parity, 'verified');
+  assert.deepEqual(Array.from(residentPersistentReceipt.selectedRows), [2, 3]);
   const cancelledController = new AbortController();
   cancelledController.abort();
   const cancelled = await persistentScheduler.select(rows, { planCount: 2, signal: cancelledController.signal });
