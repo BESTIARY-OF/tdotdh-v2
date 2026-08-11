@@ -1000,7 +1000,7 @@ function stopContinuousSearch(message = 'Auto-search paused') {
   const activeWorker = app.searchWorker, activeRequestId = app.searchRequestId;
   if (activeWorker && activeRequestId) {
     activeWorker.postMessage({ type: 'cancel', requestId: activeRequestId, reason: message });
-    setTimeout(() => { if (app.searchWorker === activeWorker) { activeWorker.terminate(); app.searchWorker = null; app.searchRequestId = null; app.solving = false; document.querySelector('#searchStatus').textContent = 'Search cancellation timed out · last checkpoint retained'; } }, 5000);
+    setTimeout(() => { if (app.searchWorker === activeWorker) { activeWorker.terminate(); app.searchWorker = null; app.searchRequestId = null; app.solving = false; document.querySelector('#searchStatus').textContent = 'Search cancellation timed out · last checkpoint retained'; } }, 30000);
   } else if (activeWorker) { activeWorker.terminate(); app.searchWorker = null; app.solving = false; }
   app.totalNodes = Math.max(app.totalNodes, app.nodes); persistSearchProgress(true);
   const button = document.querySelector('#solveButton'); button.disabled = false; button.innerHTML = '<span class="spark">✦</span> Find a new arrangement'; document.querySelector('#searchStatus').textContent = message; if (app.placements) renderBoard(); toast(`${message} · ${app.snapshots.length} unique arrangement${app.snapshots.length === 1 ? '' : 's'}`);
@@ -1008,7 +1008,7 @@ function stopContinuousSearch(message = 'Auto-search paused') {
 function launchSearchPass() {
   if (!app.continuous) return;
   app.solving = true; const button = document.querySelector('#solveButton'); setSearchButton(); showSearchBoard(); document.querySelector('#searchStatus').textContent = `Growing candidates · pass ${app.pass + 1}`;
-  const worker = new Worker('/apps/field-guide/product/v2-search-worker.js?v=20260811-v2worker57', { type: 'module' }); app.searchWorker = worker; const startingNodes = app.totalNodes, startedAt = performance.now();
+  const worker = new Worker('/apps/field-guide/product/v2-search-worker.js?v=20260811-v2worker58', { type: 'module' }); app.searchWorker = worker; const startingNodes = app.totalNodes, startedAt = performance.now();
   const families = new Map();
   app.snapshots.forEach(snapshot => { const familyId = snapshotFamilyId(snapshot); if (!families.has(familyId)) families.set(familyId, []); families.get(familyId).push(snapshot); });
   const orderedFamilies = [...families.entries()].map(([family, snapshots]) => [family, orderedSnapshots(snapshots)]).filter(([, snapshots]) => snapshots.length).sort((a, b) => { const aMetric = familySortMetric(a[1]), bMetric = familySortMetric(b[1]); return aMetric.primary - bMetric.primary || aMetric.secondary - bMetric.secondary; });
