@@ -22,6 +22,20 @@ const cpuOracleFirst = createCpuOracleFirstAdapter({
 
 const workerUrl = new URL('./v2-search-worker.js', import.meta.url);
 const cpuWorker = new Worker(workerUrl, { type: 'module' });
+async function probeProductWorker() {
+  const worker = new Worker(workerUrl, { type: 'module' });
+  return await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { worker.terminate(); reject(new Error('worker GPU probe timed out')); }, 5000);
+    worker.addEventListener('message', event => {
+      if (event.data?.type !== 'gpu-probe' && event.data?.type !== 'gpu-probe-failed') return;
+      clearTimeout(timer); worker.terminate();
+      if (event.data.type === 'gpu-probe-failed') reject(new Error(event.data.error?.message || 'worker GPU probe failed'));
+      else resolve(event.data);
+    });
+    worker.addEventListener('error', error => { clearTimeout(timer); worker.terminate(); reject(error); });
+    worker.postMessage({ type: 'probe' });
+  });
+}
 const gpuDeviceCache = createWebGpuDeviceCache();
 const gpuScorer = createWebGpuCandidateScorer({ deviceCache: gpuDeviceCache });
 const gpuCandidatePrefilter = createWebGpuCandidatePrefilter({ deviceCache: gpuDeviceCache });
@@ -83,6 +97,17 @@ cpuWorker.postMessage({
   pieces: [{ id: 1, cells: [{ x: 0, y: 0 }] }],
   constraints: { candidateArrangements: [[{ pieceId: 1, cells: [{ x: 0, y: 0 }] }]] },
   knownSignatureHints: [],
+});
+
+void probeProductWorker().then(probe => {
+  window.__TDOTDH_V2_RUNTIME__ = Object.freeze({ ...window.__TDOTDH_V2_RUNTIME__, workerGpuProbe: probe });
+  if (status) {
+    status.dataset.workerGpu = probe.workerNavigatorGpu ? 'available' : 'unavailable';
+    const unavailableStages = Object.entries(probe.stageAvailability || {}).filter(([, stage]) => stage?.status !== 'available').map(([name, stage]) => `${name}=${stage?.reason || stage?.status || 'unknown'}`);
+    status.title = `${status.title || 'v2 runtime'} Worker probe: ${probe.workerNavigatorGpu ? 'navigator.gpu exposed' : 'navigator.gpu unavailable'}; ${unavailableStages.length ? `stage availability: ${unavailableStages.join(', ')}` : 'all stages available'}.`;
+  }
+}).catch(error => {
+  if (status) { status.dataset.workerGpu = 'probe-failed'; status.title = `${status.title || 'v2 runtime'} Worker probe failed: ${error.message}`; }
 });
 
 void gpuScorer.availability().then(async capability => {
