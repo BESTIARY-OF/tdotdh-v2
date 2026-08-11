@@ -118,7 +118,8 @@ function normalizeGrid(grid = DEFAULT_FRONTIER_GRID) {
 function normalizeMask(mask, wordCount, label) {
   if (!Array.isArray(mask) && !(mask instanceof Uint32Array)) throw new TypeError(`${label} must be a uint32 word array`);
   if (mask.length !== wordCount) throw new RangeError(`${label} must contain exactly ${wordCount} words`);
-  return Uint32Array.from(mask, word => { if (!Number.isSafeInteger(word) || word < 0 || word > 0xffffffff) throw new TypeError(`${label} contains a non-uint32 word`); return word; });
+  for (const word of mask) if (!Number.isSafeInteger(word) || word < 0 || word > 0xffffffff) throw new TypeError(`${label} contains a non-uint32 word`);
+  return mask instanceof Uint32Array ? mask : Uint32Array.from(mask);
 }
 
 function normalizeCandidate(candidate, grid, index) {
@@ -196,12 +197,14 @@ function normalizeCandidates(candidates, grid) {
   return candidates.map((candidate, index) => normalizeCandidate(candidate, grid, index));
 }
 
-export function createFieldMetricsCandidate({ occupiedCells = [], centroidCells = [], outsideCells = null } = {}, grid = DEFAULT_FRONTIER_GRID) {
+export function createFieldMetricsCandidate({ occupiedCells = [], centroidCells = [], outsideCells = null, occupiedMask = null, centroidMask = null, outsideMask = null } = {}, grid = DEFAULT_FRONTIER_GRID) {
   const normalizedGrid = normalizeGrid(grid);
-  const centroidMask = new Uint32Array(normalizedGrid.wordCount);
-  if (centroidCells?.length) centroidMask.set(createFrontierMaskFromCells(centroidCells, normalizedGrid));
-  const occupiedMask = createFrontierMaskFromCells(occupiedCells, normalizedGrid);
-  return Object.freeze({ occupiedMask, centroidMask, outsideMask: outsideCells ? createFrontierMaskFromCells(outsideCells, normalizedGrid) : outsideMaskFromOccupied(occupiedMask, normalizedGrid) });
+  const takeMask = (mask, label) => mask instanceof Uint32Array && mask.length === normalizedGrid.wordCount ? mask : normalizeMask(mask, normalizedGrid.wordCount, label);
+  const resolvedCentroidMask = centroidMask ? takeMask(centroidMask, 'centroidMask') : new Uint32Array(normalizedGrid.wordCount);
+  if (!centroidMask && centroidCells?.length) resolvedCentroidMask.set(createFrontierMaskFromCells(centroidCells, normalizedGrid));
+  const resolvedOccupiedMask = occupiedMask ? takeMask(occupiedMask, 'occupiedMask') : createFrontierMaskFromCells(occupiedCells, normalizedGrid);
+  const resolvedOutsideMask = outsideMask ? takeMask(outsideMask, 'outsideMask') : outsideCells ? createFrontierMaskFromCells(outsideCells, normalizedGrid) : outsideMaskFromOccupied(resolvedOccupiedMask, normalizedGrid);
+  return Object.freeze({ occupiedMask: resolvedOccupiedMask, centroidMask: resolvedCentroidMask, outsideMask: resolvedOutsideMask });
 }
 
 export function cpuEvaluateFieldMetrics(candidates, grid = DEFAULT_FRONTIER_GRID) {

@@ -46,6 +46,13 @@ function normalizeGrid(grid = DEFAULT_FRONTIER_GRID) {
   return Object.freeze({ width: value.width, height: value.height, originX: value.originX, originY: value.originY, wordCount: Math.ceil((value.width * value.height) / 32) });
 }
 
+function normalizeMask(mask, wordCount, label) {
+  if (!Array.isArray(mask) && !(mask instanceof Uint32Array)) throw new TypeError(`${label} must be a uint32 word array`);
+  if (mask.length !== wordCount) throw new RangeError(`${label} must contain exactly ${wordCount} words`);
+  for (const word of mask) if (!Number.isSafeInteger(word) || word < 0 || word > 0xffffffff) throw new TypeError(`${label} contains a non-uint32 word`);
+  return mask instanceof Uint32Array ? mask : Uint32Array.from(mask);
+}
+
 function normalizeTerm(value, label) {
   if (!Number.isSafeInteger(value) || value < -0x80000000 || value > 0x7fffffff) throw new TypeError(`${label} must be a signed 32-bit integer`);
   return value;
@@ -55,8 +62,17 @@ function normalizeCandidates(candidates, grid) {
   if (!Array.isArray(candidates) || candidates.length === 0) throw new TypeError('frontier candidates must be a non-empty array');
   return candidates.map((candidate, index) => {
     if (!candidate || typeof candidate !== 'object') throw new TypeError(`frontier candidate ${index} must be an object`);
-    const parentMask = candidate.parentMask instanceof Uint32Array ? Uint32Array.from(candidate.parentMask) : Uint32Array.from(candidate.parentMask || []);
-    const candidateMask = candidate.candidateMask instanceof Uint32Array ? Uint32Array.from(candidate.candidateMask) : Uint32Array.from(candidate.candidateMask || []);
+    const takeMask = (mask, label) => {
+      if (!(mask instanceof Uint32Array) || mask.length !== grid.wordCount) {
+        const normalized = Uint32Array.from(mask || []);
+        if (normalized.length !== grid.wordCount) throw new RangeError(`frontier candidate ${index} masks must contain ${grid.wordCount} words`);
+        return normalized;
+      }
+      for (const word of mask) if (!Number.isSafeInteger(word) || word < 0 || word > 0xffffffff) throw new TypeError(`${label} contains a non-uint32 word`);
+      return mask;
+    };
+    const parentMask = takeMask(candidate.parentMask, `frontier candidate ${index}.parentMask`);
+    const candidateMask = takeMask(candidate.candidateMask, `frontier candidate ${index}.candidateMask`);
     if (parentMask.length !== grid.wordCount || candidateMask.length !== grid.wordCount) throw new RangeError(`frontier candidate ${index} masks must contain ${grid.wordCount} words`);
     const scoreTerms = Array.isArray(candidate.scoreTerms) || candidate.scoreTerms instanceof Int32Array ? Array.from(candidate.scoreTerms) : [];
     if (scoreTerms.length !== FRONTIER_SCORE_TERM_COUNT) throw new RangeError(`frontier candidate ${index}.scoreTerms must contain ${FRONTIER_SCORE_TERM_COUNT} terms`);
@@ -76,11 +92,12 @@ function flattenTerms(candidates) {
   return flat;
 }
 
-export function createFrontierEvaluationCandidate({ parentCells, candidateCells, scoreTerms } = {}, grid = DEFAULT_FRONTIER_GRID) {
+export function createFrontierEvaluationCandidate({ parentCells, candidateCells, scoreTerms, parentMask = null, candidateMask = null } = {}, grid = DEFAULT_FRONTIER_GRID) {
   const normalizedGrid = normalizeGrid(grid);
+  const takeMask = (mask, label) => mask instanceof Uint32Array && mask.length === normalizedGrid.wordCount ? mask : normalizeMask(mask, normalizedGrid.wordCount, label);
   return Object.freeze({
-    parentMask: createFrontierMaskFromCells(parentCells, normalizedGrid),
-    candidateMask: createFrontierMaskFromCells(candidateCells, normalizedGrid),
+    parentMask: parentMask ? takeMask(parentMask, 'parentMask') : createFrontierMaskFromCells(parentCells, normalizedGrid),
+    candidateMask: candidateMask ? takeMask(candidateMask, 'candidateMask') : createFrontierMaskFromCells(candidateCells, normalizedGrid),
     scoreTerms: Array.from(scoreTerms || [], value => normalizeTerm(value, 'scoreTerms entry')),
   });
 }

@@ -9,10 +9,10 @@ const BRANCH_LIMIT = 30;
 const FRONTIER_RANK_QUANTUM = 256;
 function canonicalFrontierRankScore(score) { return Math.round(Math.fround(Number(score)) * FRONTIER_RANK_QUANTUM); }
 
-import { createFrontierEvaluationCandidate } from '../../../packages/search-core/src/webgpu-frontier-evaluator.js?v=20260811-pipelinecache1';
+import { createFrontierEvaluationCandidate } from '../../../packages/search-core/src/webgpu-frontier-evaluator.js?v=20260811-maskcache2';
 import { cpuScoreFrontierCandidate } from '../../../packages/search-core/src/webgpu-frontier-scorer.js?v=20260811-pipelinecache1';
 import { createFrontierMaskFromCells } from '../../../packages/search-core/src/webgpu-frontier-validator.js';
-import { createFrontierMetricsCandidate } from '../../../packages/search-core/src/webgpu-frontier-metrics.js?v=20260811-pipelinecache1';
+import { createFrontierMetricsCandidate } from '../../../packages/search-core/src/webgpu-frontier-metrics.js?v=20260811-maskcache2';
 import { createFieldMetricsCandidate } from '../../../packages/search-core/src/webgpu-field-metrics.js?v=20260811-floodfill3';
 import { createLabeledFrontierStateCandidate } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 import { canonicalSignatureFromLabeledFrontierState } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
@@ -23,6 +23,32 @@ import { createWebGpuFrontierNavigationScheduler, decodeWebGpuFrontierNavigation
 
 function key(x, y) { return `${x},${y}`; }
 function adjacent(p) { return [{ x: p.x + 1, y: p.y }, { x: p.x - 1, y: p.y }, { x: p.x, y: p.y + 1 }, { x: p.x, y: p.y - 1 }]; }
+const frontierMaskCache = new WeakMap();
+const frontierStateInputCache = new WeakMap();
+function cachedFrontierMask(cells) {
+  let mask = frontierMaskCache.get(cells);
+  if (!mask) { mask = createFrontierMaskFromCells(cells); frontierMaskCache.set(cells, mask); }
+  return mask;
+}
+function frontierInputForState(state, centroidId) {
+  let inputs = frontierStateInputCache.get(state);
+  if (!inputs) { inputs = new Map(); frontierStateInputCache.set(state, inputs); }
+  let input = inputs.get(centroidId);
+  if (input) return input;
+  const parentCells = [...state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
+  const centroidCells = state.placements.find(placement => placement.id === centroidId)?.cells || [];
+  const centroidKeys = new Set(centroidCells.map(cell => key(cell.x, cell.y))), ring = new Map();
+  for (const cell of centroidCells) for (const next of adjacent(cell)) if (!centroidKeys.has(key(next.x, next.y))) ring.set(key(next.x, next.y), next);
+  const ringCells = [...ring.values()];
+  input = Object.freeze({ parentCells, parentMask: cachedFrontierMask(parentCells), centroidCells, centroidMask: cachedFrontierMask(centroidCells), ringCells, ringMask: cachedFrontierMask(ringCells) });
+  inputs.set(centroidId, input);
+  return input;
+}
+function unionFrontierMasks(parentMask, candidateMask) {
+  const occupiedMask = new Uint32Array(parentMask.length);
+  for (let index = 0; index < occupiedMask.length; index++) occupiedMask[index] = parentMask[index] | candidateMask[index];
+  return occupiedMask;
+}
 function adjacent8(p) { const result = []; for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) if (dx || dy) result.push({ x: p.x + dx, y: p.y + dy }); return result; }
 function shapeSize(cells) { return { width: Math.max(...cells.map(c => c.x)) + 1, height: Math.max(...cells.map(c => c.y)) + 1 }; }
 function normalize(cells) { const minX = Math.min(...cells.map(c => c.x)), minY = Math.min(...cells.map(c => c.y)); return cells.map(c => ({ x: c.x - minX, y: c.y - minY })); }
@@ -566,11 +592,8 @@ const fieldMetricsAvailability = new WeakMap();
 async function evaluateFrontierGeometry(entries, state, centroidId, frontierMetrics, onMetrics = () => {}) {
   if (!frontierMetrics?.evaluate || !entries.length) return entries;
   try {
-    const parentCells = [...state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
-    const centroidCells = state.placements.find(placement => placement.id === centroidId)?.cells || [];
-    const centroidRing = new Map();
-    for (const cell of centroidCells) for (const next of adjacent(cell)) if (!centroidCells.some(other => other.x === next.x && other.y === next.y)) centroidRing.set(key(next.x, next.y), next);
-    const candidates = entries.map(entry => createFrontierMetricsCandidate({ parentCells, candidateCells: entry.candidate.cells, centroidCells, ringCells: [...centroidRing.values()], bounds: state.bounds }));
+    const input = frontierInputForState(state, centroidId);
+    const candidates = entries.map(entry => createFrontierMetricsCandidate({ ...input, candidateCells: entry.candidate.cells, candidateMask: cachedFrontierMask(entry.candidate.cells), bounds: state.bounds }));
     const result = await frontierMetrics.evaluate(candidates);
     if (result?.status === 'completed' && result.parity === 'verified' && Array.isArray(result.metrics) && result.metrics.length === entries.length) {
       onMetrics({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: entries.length });
@@ -586,11 +609,8 @@ async function evaluateFrontierGeometryAcrossBeam(jobs, centroidId, frontierMetr
   try {
     const pending = [];
     for (const [jobIndex, job] of jobs.entries()) {
-      const parentCells = [...job.state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
-      const centroidCells = job.state.placements.find(placement => placement.id === centroidId)?.cells || [];
-      const centroidRing = new Map();
-      for (const cell of centroidCells) for (const next of adjacent(cell)) if (!centroidCells.some(other => other.x === next.x && other.y === next.y)) centroidRing.set(key(next.x, next.y), next);
-      for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, entry, candidate: createFrontierMetricsCandidate({ parentCells, candidateCells: entry.candidate.cells, centroidCells, ringCells: [...centroidRing.values()], bounds: job.state.bounds }) });
+      const input = frontierInputForState(job.state, centroidId);
+      for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, entry, candidate: createFrontierMetricsCandidate({ ...input, candidateCells: entry.candidate.cells, candidateMask: cachedFrontierMask(entry.candidate.cells), bounds: job.state.bounds }) });
     }
     if (!pending.length) return jobs;
     const result = await frontierMetrics.evaluate(pending.map(item => item.candidate));
@@ -612,9 +632,8 @@ async function evaluateFieldAggregates(entries, state, centroidId, fieldMetricsA
       const availability = await availabilityPromise;
       if (availability?.status !== 'available') { onMetrics({ status: 'fallback', backend: 'cpu-oracle', reason: availability?.reason || 'field-metrics-unavailable', candidateCount: entries.length }); return entries; }
     }
-    const parentCells = [...state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
-    const centroidCells = state.placements.find(placement => placement.id === centroidId)?.cells || [];
-    const candidates = entries.map(entry => createFieldMetricsCandidate({ occupiedCells: [...parentCells, ...entry.candidate.cells], centroidCells }));
+    const input = frontierInputForState(state, centroidId);
+    const candidates = entries.map(entry => createFieldMetricsCandidate({ occupiedMask: unionFrontierMasks(input.parentMask, cachedFrontierMask(entry.candidate.cells)), centroidMask: input.centroidMask }));
     const result = await fieldMetricsAdapter.evaluate(candidates, { verifyParity });
     if (Array.isArray(result?.metrics) && result.metrics.length === entries.length) {
       onMetrics({ status: result.status === 'completed' && result.parity === 'verified' ? 'used' : 'fallback', backend: result.backend || 'cpu-oracle', parity: result.parity, reason: result.reason, candidateCount: entries.length });
@@ -636,9 +655,8 @@ async function evaluateFieldAggregatesAcrossBeam(jobs, centroidId, fieldMetricsA
     }
     const pending = [];
     for (const [jobIndex, job] of jobs.entries()) {
-      const parentCells = [...job.state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
-      const centroidCells = job.state.placements.find(placement => placement.id === centroidId)?.cells || [];
-      for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, candidate: entry, fieldCandidate: createFieldMetricsCandidate({ occupiedCells: [...parentCells, ...entry.candidate.cells], centroidCells }) });
+      const input = frontierInputForState(job.state, centroidId);
+      for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, candidate: entry, fieldCandidate: createFieldMetricsCandidate({ occupiedMask: unionFrontierMasks(input.parentMask, cachedFrontierMask(entry.candidate.cells)), centroidMask: input.centroidMask }) });
     }
     if (!pending.length) return jobs;
     const result = await fieldMetricsAdapter.evaluate(pending.map(item => item.fieldCandidate), { verifyParity });
@@ -731,9 +749,8 @@ async function evaluateFrontierTopology(entries, state, centroidId, frontierTopo
         return entries;
       }
     }
-    const parentCells = [...state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
-    const centroidCells = state.placements.find(placement => placement.id === centroidId)?.cells || [];
-    const inputs = entries.map(entry => ({ parentMask: createFrontierMaskFromCells(parentCells), candidateMask: createFrontierMaskFromCells(entry.candidate.cells), centroidMask: createFrontierMaskFromCells(centroidCells) }));
+    const stateInput = frontierInputForState(state, centroidId);
+    const inputs = entries.map(entry => ({ parentMask: stateInput.parentMask, candidateMask: cachedFrontierMask(entry.candidate.cells), centroidMask: stateInput.centroidMask }));
     const result = frontierTopology.evaluateBatch ? await frontierTopology.evaluateBatch(inputs, { verifyParity: false }) : { status: 'completed', parity: 'deferred', backend: 'compute-shader', results: await Promise.all(inputs.map(input => frontierTopology.evaluate(input))) };
     if (result?.status === 'completed' && ['verified', 'deferred'].includes(result.parity) && Array.isArray(result.results) && result.results.length === entries.length) {
       onTopology({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: entries.length });
@@ -762,10 +779,8 @@ async function evaluateFrontierTopologyAcrossBeam(jobs, centroidId, frontierTopo
     }
     const pending = [];
     for (const [jobIndex, job] of jobs.entries()) {
-      const parentCells = [...job.state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
-      const centroidCells = job.state.placements.find(placement => placement.id === centroidId)?.cells || [];
-      const parentMask = createFrontierMaskFromCells(parentCells), centroidMask = createFrontierMaskFromCells(centroidCells);
-      for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, entry, input: { parentMask, candidateMask: createFrontierMaskFromCells(entry.candidate.cells), centroidMask } });
+      const stateInput = frontierInputForState(job.state, centroidId);
+      for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, entry, input: { parentMask: stateInput.parentMask, candidateMask: cachedFrontierMask(entry.candidate.cells), centroidMask: stateInput.centroidMask } });
     }
     if (!pending.length) return jobs;
     const result = frontierTopology.evaluateBatch
@@ -788,9 +803,9 @@ async function evaluateFrontierTopologyAcrossBeam(jobs, centroidId, frontierTopo
 async function evaluateFrontierOptions(entries, state, centroidId, frontierEvaluator, frontierValidator, onFrontier = () => {}) {
   if (!entries.length) return entries;
   try {
-    const parentCells = [...state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
     if (frontierEvaluator?.evaluate) {
-      const candidates = entries.map(entry => createFrontierEvaluationCandidate({ parentCells, candidateCells: entry.candidate.cells, scoreTerms: entry.metrics ? frontierScoreTerms(entry.metrics) : (entry.gpuGeometry || entry.gpuFieldMetrics) ? [0, 0, 0, 0, 0, 0, 0, 0] : frontierScoreTerms(fieldMetrics([...state.placements, entry.candidate], centroidId)) }));
+      const stateInput = frontierInputForState(state, centroidId);
+      const candidates = entries.map(entry => createFrontierEvaluationCandidate({ parentCells: stateInput.parentCells, candidateCells: entry.candidate.cells, parentMask: stateInput.parentMask, candidateMask: cachedFrontierMask(entry.candidate.cells), scoreTerms: entry.metrics ? frontierScoreTerms(entry.metrics) : (entry.gpuGeometry || entry.gpuFieldMetrics) ? [0, 0, 0, 0, 0, 0, 0, 0] : frontierScoreTerms(fieldMetrics([...state.placements, entry.candidate], centroidId)) }));
       const result = await frontierEvaluator.evaluate(candidates);
       if (Array.isArray(result?.validity) && result.validity.length === entries.length && result.status === 'completed') {
         onFrontier({ status: result.parity === 'verified' ? 'used' : 'fallback', backend: result.backend || 'cpu-oracle', parity: result.parity, candidateCount: entries.length });
@@ -799,7 +814,8 @@ async function evaluateFrontierOptions(entries, state, centroidId, frontierEvalu
       onFrontier({ status: 'fallback', reason: result?.reason || 'frontier-evaluator-unavailable' });
     }
     if (!frontierValidator?.validate) return entries;
-    const candidates = entries.map(entry => ({ parentMask: createFrontierMaskFromCells(parentCells), candidateMask: createFrontierMaskFromCells(entry.candidate.cells) }));
+    const stateInput = frontierInputForState(state, centroidId);
+    const candidates = entries.map(entry => ({ parentMask: stateInput.parentMask, candidateMask: cachedFrontierMask(entry.candidate.cells) }));
     const result = await frontierValidator.validate(candidates);
     if (result?.status === 'completed' && Array.isArray(result.validity) && result.validity.length === entries.length) {
       onFrontier({ status: 'used', backend: result.backend || 'compute-shader', candidateCount: entries.length });
@@ -817,8 +833,8 @@ async function evaluateFrontierOptionsAcrossBeam(jobs, centroidId, frontierEvalu
   try {
     const pending = [];
     for (const [jobIndex, job] of jobs.entries()) {
-      const parentCells = [...job.state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
-      for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, entry, parentCells, candidateCells: entry.candidate.cells, candidate: createFrontierEvaluationCandidate({ parentCells, candidateCells: entry.candidate.cells, scoreTerms: entry.metrics ? frontierScoreTerms(entry.metrics) : (entry.gpuGeometry || entry.gpuFieldMetrics) ? [0, 0, 0, 0, 0, 0, 0, 0] : frontierScoreTerms(fieldMetrics([...job.state.placements, entry.candidate], centroidId)) }) });
+      const stateInput = frontierInputForState(job.state, centroidId);
+      for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, entry, parentCells: stateInput.parentCells, candidateCells: entry.candidate.cells, candidate: createFrontierEvaluationCandidate({ parentCells: stateInput.parentCells, candidateCells: entry.candidate.cells, parentMask: stateInput.parentMask, candidateMask: cachedFrontierMask(entry.candidate.cells), scoreTerms: entry.metrics ? frontierScoreTerms(entry.metrics) : (entry.gpuGeometry || entry.gpuFieldMetrics) ? [0, 0, 0, 0, 0, 0, 0, 0] : frontierScoreTerms(fieldMetrics([...job.state.placements, entry.candidate], centroidId)) }) });
     }
     if (!pending.length) return jobs;
     if (frontierEvaluator?.evaluate) {

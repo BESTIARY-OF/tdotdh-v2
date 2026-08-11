@@ -191,10 +191,8 @@ function normalizeGrid(grid = DEFAULT_FRONTIER_GRID) {
 function normalizeMask(mask, grid, label) {
   if (!Array.isArray(mask) && !(mask instanceof Uint32Array)) throw new TypeError(`${label} must be a uint32 word array`);
   if (mask.length !== grid.wordCount) throw new RangeError(`${label} must contain exactly ${grid.wordCount} words`);
-  return Uint32Array.from(mask, word => {
-    if (!Number.isSafeInteger(word) || word < 0 || word > 0xffffffff) throw new TypeError(`${label} contains a non-uint32 word`);
-    return word;
-  });
+  for (const word of mask) if (!Number.isSafeInteger(word) || word < 0 || word > 0xffffffff) throw new TypeError(`${label} contains a non-uint32 word`);
+  return mask instanceof Uint32Array ? mask : Uint32Array.from(mask);
 }
 
 function bitAt(mask, grid, x, y) {

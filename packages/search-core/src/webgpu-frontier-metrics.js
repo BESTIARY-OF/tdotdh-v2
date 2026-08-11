@@ -123,10 +123,8 @@ function normalizeBounds(bounds = {}) {
 function normalizeMask(mask, wordCount, label) {
   if (!Array.isArray(mask) && !(mask instanceof Uint32Array)) throw new TypeError(`${label} must be a uint32 word array`);
   if (mask.length !== wordCount) throw new RangeError(`${label} must contain exactly ${wordCount} words`);
-  return Uint32Array.from(mask, word => {
-    if (!Number.isSafeInteger(word) || word < 0 || word > 0xffffffff) throw new TypeError(`${label} contains a non-uint32 word`);
-    return word;
-  });
+  for (const word of mask) if (!Number.isSafeInteger(word) || word < 0 || word > 0xffffffff) throw new TypeError(`${label} contains a non-uint32 word`);
+  return mask instanceof Uint32Array ? mask : Uint32Array.from(mask);
 }
 
 function bit(mask, grid, x, y) {
@@ -150,13 +148,14 @@ function normalizeCandidates(candidates, grid) {
   });
 }
 
-export function createFrontierMetricsCandidate({ parentCells, candidateCells, centroidCells, ringCells, bounds } = {}, grid = DEFAULT_FRONTIER_GRID) {
+export function createFrontierMetricsCandidate({ parentCells, candidateCells, centroidCells, ringCells, bounds, parentMask = null, candidateMask = null, centroidMask = null, ringMask = null } = {}, grid = DEFAULT_FRONTIER_GRID) {
   const normalizedGrid = normalizeGrid(grid);
+  const takeMask = (mask, label) => mask instanceof Uint32Array && mask.length === normalizedGrid.wordCount ? mask : normalizeMask(mask, normalizedGrid.wordCount, label);
   return Object.freeze({
-    parentMask: createFrontierMaskFromCells(parentCells, normalizedGrid),
-    candidateMask: createFrontierMaskFromCells(candidateCells, normalizedGrid),
-    centroidMask: createFrontierMaskFromCells(centroidCells, normalizedGrid),
-    ringMask: createFrontierMaskFromCells(ringCells, normalizedGrid),
+    parentMask: parentMask ? takeMask(parentMask, 'parentMask') : createFrontierMaskFromCells(parentCells, normalizedGrid),
+    candidateMask: candidateMask ? takeMask(candidateMask, 'candidateMask') : createFrontierMaskFromCells(candidateCells, normalizedGrid),
+    centroidMask: centroidMask ? takeMask(centroidMask, 'centroidMask') : createFrontierMaskFromCells(centroidCells, normalizedGrid),
+    ringMask: ringMask ? takeMask(ringMask, 'ringMask') : createFrontierMaskFromCells(ringCells, normalizedGrid),
     bounds: normalizeBounds(bounds),
   });
 }
