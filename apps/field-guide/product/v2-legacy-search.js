@@ -974,7 +974,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const knownFamilies = new Set(knownCentroidFamilies);
   const gpuExecution = options.gpuExecution && typeof options.gpuExecution === 'object' ? options.gpuExecution : null;
   const gpuNavigationEnabled = !gpuExecution || gpuExecution.deviceAvailable === true;
-  const gpuFirstSearch = gpuExecution?.deviceAvailable === true;
+  let gpuFirstSearch = options.forceCpuSeedSearch === true ? false : gpuExecution?.deviceAvailable === true;
   const gpuUnavailableReason = gpuExecution?.reason || 'webgpu-device-unavailable';
   const gpuAdapter = adapter => gpuNavigationEnabled ? adapter : null;
   const candidatePrefilter = gpuAdapter(options.candidatePrefilter);
@@ -998,6 +998,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const frontierTargetGeneratorStatus = frontierTargetGenerator?.availability ? await frontierTargetGenerator.availability() : null;
   const frontierTargetPoolStatus = frontierTargetPool?.availability ? await frontierTargetPool.availability() : null;
   const frontierDeduplicatorStatus = frontierDeduplicator?.availability ? await frontierDeduplicator.availability() : null;
+  if (!gpuExecution && options.forceCpuSeedSearch !== true) gpuFirstSearch = [frontierTargetGeneratorStatus, frontierGeneratorStatus, frontierTargetPoolStatus].some(status => status?.status === 'available');
   const initialStageReceipt = () => gpuExecution && !gpuNavigationEnabled ? { status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', reason: gpuUnavailableReason } : { status: 'cpu-oracle' };
   let prefilterReceipt = initialStageReceipt(), frontierReceipt = initialStageReceipt(), frontierGenerationReceipt = initialStageReceipt(), frontierTargetGenerationReceipt = initialStageReceipt(), frontierTargetPoolReceipt = initialStageReceipt(), frontierMetricsReceipt = initialStageReceipt(), fieldMetricsReceipt = initialStageReceipt(), frontierStateReceipt = initialStageReceipt(), frontierTopologyReceipt = initialStageReceipt(), frontierRankerReceipt = initialStageReceipt(), frontierScoreReceipt = initialStageReceipt(), frontierCompactorReceipt = initialStageReceipt(), frontierDedupReceipt = initialStageReceipt();
   if (frontierTargetGeneratorStatus?.status !== 'available' && frontierTargetGeneratorStatus) frontierTargetGenerationReceipt = { status: 'fallback', reason: frontierTargetGeneratorStatus.reason || 'frontier-target-generator-unavailable' };

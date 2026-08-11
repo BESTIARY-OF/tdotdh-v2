@@ -212,6 +212,7 @@ const lockedTargetPool = {
 };
 const lockedResult = await search(lockedPieces, [], {
   ...sharedOptions,
+  forceCpuSeedSearch: true,
   searchStrategy: 'breadth',
   positionLocks: { 1: { dx: 3, dy: 0 } },
   frontierGenerator: singleFrontierGenerator,
