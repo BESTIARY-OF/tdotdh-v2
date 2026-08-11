@@ -54,11 +54,18 @@ async function runGpuProbe() {
 }
 async function runProductSearch(request, context) {
   const steering = request.steering || {};
+  const benchmarkBackend = steering.benchmarkBackend === 'cpu' || steering.benchmarkBackend === 'gpu'
+    ? steering.benchmarkBackend
+    : null;
+  const forceCpuBenchmark = benchmarkBackend === 'cpu';
   residentFrontierState.reset();
-  const gpuExecution = await probeWebGpuExecutionCapabilities({ gpu: globalThis.navigator?.gpu, requiredLimits: { maxStorageBufferBindingSize: 33554432 }, deviceCache });
+  const gpuExecution = forceCpuBenchmark
+    ? { deviceAvailable: false, reason: 'benchmark-forced-cpu', stageAvailability: {} }
+    : await probeWebGpuExecutionCapabilities({ gpu: globalThis.navigator?.gpu, requiredLimits: { maxStorageBufferBindingSize: 33554432 }, deviceCache });
   const navigation = createNavigationCoordinator({ ticket: request.ticket, cursor: request.cursor });
   const frontierNavigator = createWebGpuFrontierNavigator({ stateAdapter: residentFrontierState, ticket: request.ticket, cursor: request.cursor, isCancelled: context.isCancelled });
-  const stageAvailability = await getGpuStageAvailability();
+  const stageAvailability = forceCpuBenchmark ? {} : await getGpuStageAvailability();
+  const stage = (name, adapter = gpuStageAdapters[name]) => forceCpuBenchmark ? null : adapter;
   const result = await search(request.pieces, steering.knownCentroidFamilies || [], {
     ...steering,
     gpuExecution: { ...gpuExecution, stageAvailability },
@@ -69,23 +76,23 @@ async function runProductSearch(request, context) {
     navigationTicket: request.ticket,
     navigationCursor: request.cursor,
     resumeCheckpoint: request.cursor.checkpoint,
-    candidatePrefilter,
-    frontierValidator,
-    frontierEvaluator,
-    frontierGenerator,
-    frontierTargetGenerator,
-    frontierTargetPool,
-    frontierCandidateRecords,
-    frontierScorer,
-    frontierMetrics,
-    fieldMetrics,
-    frontierState,
+    candidatePrefilter: stage('prefilter'),
+    frontierValidator: stage('frontierValidator', frontierValidator),
+    frontierEvaluator: stage('frontier'),
+    frontierGenerator: stage('frontierGeneration'),
+    frontierTargetGenerator: stage('frontierTargetGeneration'),
+    frontierTargetPool: stage('frontierTargetPool'),
+    frontierCandidateRecords: stage('frontierTargetGeneration'),
+    frontierScorer: stage('frontierScore'),
+    frontierMetrics: stage('frontierMetrics'),
+    fieldMetrics: stage('fieldMetrics'),
+    frontierState: stage('frontierState'),
     frontierNavigator,
-    frontierTopology,
-    frontierRanker,
-    frontierCompactor,
-    residentBeamSelector,
-    frontierDeduplicator,
+    frontierTopology: stage('frontierTopology'),
+    frontierRanker: stage('frontierRanker'),
+    frontierCompactor: stage('frontierCompactor'),
+    residentBeamSelector: stage('frontierScore'),
+    frontierDeduplicator: stage('frontierDedup'),
     navigationScheduler: gpuExecution.deviceAvailable ? frontierNavigationScheduler : createWebGpuFrontierNavigationScheduler({ gpu: null }),
     isCancelled: context.isCancelled,
     navigationBatch: details => navigation.beginBatch(details),
@@ -98,6 +105,7 @@ async function runProductSearch(request, context) {
     navigation: navigation.complete({ ...result, gpuExecution }),
     placements: Array.isArray(result?.placements) ? result.placements : [],
     hasPlacement: Array.isArray(result?.placements) && result.placements.length > 0,
+    benchmarkBackend,
     protocolOperation: 'product-search',
   };
 }
