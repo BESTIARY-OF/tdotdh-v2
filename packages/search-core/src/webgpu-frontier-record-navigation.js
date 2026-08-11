@@ -1,6 +1,10 @@
 export const WEBGPU_FRONTIER_RECORD_NAVIGATION_SCHEMA = 'tdotdh.webgpu-frontier-record-navigation.v0';
 export const FRONTIER_RECORD_NAVIGATION_STRIDE = 6;
-export const MAX_FRONTIER_RECORD_NAVIGATION_RECORDS = 16384;
+// This is a protocol safety ceiling, not the device batch size. The scheduler
+// still sizes GPU buffers from the actual device limits; keeping this ceiling
+// above a realistic breadth layer prevents the CPU oracle from rejecting a
+// valid batch before the GPU selector can see it.
+export const MAX_FRONTIER_RECORD_NAVIGATION_RECORDS = 65536;
 
 const RECORD_FIELDS = Object.freeze(['planIndex', 'targetOrdinal', 'pieceId', 'originX', 'originY', 'inputOrdinal']);
 

@@ -38,6 +38,11 @@ assert.throws(() => packFrontierRecords([{ ...records[0], extra: true }]), /inva
 assert.throws(() => packFrontierRecords([{ ...records[0], originX: 0x80000000 }]), /originX/);
 assert.throws(() => cpuSelectFrontierRecordIndices([record(2, 0, 1, 0, 0, 0)], { planCount: 2 }), /planIndex/);
 
+const expandedRecords = Array.from({ length: 16385 }, (_, inputOrdinal) => record(0, inputOrdinal % 2, inputOrdinal + 1, inputOrdinal, 0, inputOrdinal));
+const expandedOracle = cpuSelectFrontierRecordIndices(expandedRecords, { planCount: 1 });
+assert.equal(expandedOracle.recordCount, expandedRecords.length);
+assert.equal(expandedOracle.selectedRecordIndices.length, 8192);
+
 const adapter = createFrontierRecordNavigationAdapter({
   accelerator: async request => {
     assert.equal(request.schema, WEBGPU_FRONTIER_RECORD_NAVIGATION_SCHEMA);
