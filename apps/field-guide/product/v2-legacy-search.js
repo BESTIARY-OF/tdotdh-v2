@@ -13,7 +13,7 @@ import { createFrontierEvaluationCandidate } from '../../../packages/search-core
 import { cpuScoreFrontierCandidate } from '../../../packages/search-core/src/webgpu-frontier-scorer.js?v=20260811-pipelinecache1';
 import { createFrontierMaskFromCells } from '../../../packages/search-core/src/webgpu-frontier-validator.js';
 import { createFrontierMetricsCandidate } from '../../../packages/search-core/src/webgpu-frontier-metrics.js?v=20260811-maskcache2';
-import { createFieldMetricsCandidate } from '../../../packages/search-core/src/webgpu-field-metrics.js?v=20260811-floodfill3';
+import { createFieldMetricsCandidate } from '../../../packages/search-core/src/webgpu-field-metrics.js?v=20260811-floodfill4';
 import { createLabeledFrontierStateCandidate } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 import { canonicalSignatureFromLabeledFrontierState } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 import { DEFAULT_FRONTIER_GRID } from '../../../packages/search-core/src/webgpu-frontier-topology.js';
@@ -80,9 +80,12 @@ function fieldShapeMetrics(placements, map, outside, minX, maxX, minY, maxY, cen
 function fieldMetrics(placements, centroidId = 3, aggregate = null, gpuState = null) {
   const map = occupiedMap(placements), cells = [...map.keys()].map(k => { const [x, y] = k.split(',').map(Number); return { x, y }; });
   const minX = aggregate ? aggregate[2] : Math.min(...cells.map(c => c.x)), maxX = aggregate ? aggregate[3] : Math.max(...cells.map(c => c.x)), minY = aggregate ? aggregate[4] : Math.min(...cells.map(c => c.y)), maxY = aggregate ? aggregate[5] : Math.max(...cells.map(c => c.y));
-  const outside = new Set([key(minX - 1, minY - 1)]), queue = [{ x: minX - 1, y: minY - 1 }];
-  while (queue.length) for (const next of adjacent(queue.shift())) { const k = key(next.x, next.y); if (outside.has(k) || map.has(k) || next.x < minX - 1 || next.x > maxX + 1 || next.y < minY - 1 || next.y > maxY + 1) continue; outside.add(k); queue.push(next); }
-  let holes = 0; for (let y = minY; y <= maxY; y++) for (let x = minX; x <= maxX; x++) if (!map.has(key(x, y)) && !outside.has(key(x, y))) holes++;
+  const outside = aggregate ? null : new Set([key(minX - 1, minY - 1)]), queue = aggregate ? null : [{ x: minX - 1, y: minY - 1 }];
+  if (!aggregate) {
+    while (queue.length) for (const next of adjacent(queue.shift())) { const k = key(next.x, next.y); if (outside.has(k) || map.has(k) || next.x < minX - 1 || next.x > maxX + 1 || next.y < minY - 1 || next.y > maxY + 1) continue; outside.add(k); queue.push(next); }
+  }
+  let holes = aggregate ? Number(aggregate[15]) || 0 : 0;
+  if (!aggregate) for (let y = minY; y <= maxY; y++) for (let x = minX; x <= maxX; x++) if (!map.has(key(x, y)) && !outside.has(key(x, y))) holes++;
   const centroid = cells.filter(c => map.get(key(c.x, c.y)) === centroidId);
   const fieldCenter = aggregate ? { x: aggregate[6] / aggregate[0] + .5, y: aggregate[7] / aggregate[0] + .5 } : { x: cells.reduce((sum, c) => sum + c.x + .5, 0) / cells.length, y: cells.reduce((sum, c) => sum + c.y + .5, 0) / cells.length };
   const centerSquare = [...cells].sort((a, b) => Math.hypot((a.x + .5) - fieldCenter.x, (a.y + .5) - fieldCenter.y) - Math.hypot((b.x + .5) - fieldCenter.x, (b.y + .5) - fieldCenter.y) || a.y - b.y || a.x - b.x)[0];
@@ -1486,8 +1489,12 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       let selectedOptions = job.entries;
       if (!selectedOptions.length) continue;
       const rankedCandidates = selectedOptions.map(({ piece, candidate, gpuGeometry, gpuFieldMetrics, gpuState, gpuTopology }) => {
-        const nextBounds = { minX: Math.min(state.bounds.minX, ...candidate.cells.map(c => c.x)), maxX: Math.max(state.bounds.maxX, ...candidate.cells.map(c => c.x)), minY: Math.min(state.bounds.minY, ...candidate.cells.map(c => c.y)), maxY: Math.max(state.bounds.maxY, ...candidate.cells.map(c => c.y)) };
-        const contact = candidate.cells.reduce((n, c) => n + adjacent(c).filter(a => state.field.has(key(a.x, a.y))).length, 0), centroidContact = candidate.cells.reduce((n, c) => n + adjacent8(c).filter(a => seedSet.has(key(a.x, a.y))).length, 0), ringCoverage = candidate.cells.reduce((n, c) => n + (centroidRing.has(key(c.x, c.y)) ? 1 : 0), 0), openCentroid = [...centroidRing].filter(ringKey => !state.field.has(ringKey) && !candidate.cells.some(c => key(c.x, c.y) === ringKey)).length;
+        const nextBounds = gpuFieldMetrics ? { minX: gpuFieldMetrics[2], maxX: gpuFieldMetrics[3], minY: gpuFieldMetrics[4], maxY: gpuFieldMetrics[5] } : { minX: Math.min(state.bounds.minX, ...candidate.cells.map(c => c.x)), maxX: Math.max(state.bounds.maxX, ...candidate.cells.map(c => c.x)), minY: Math.min(state.bounds.minY, ...candidate.cells.map(c => c.y)), maxY: Math.max(state.bounds.maxY, ...candidate.cells.map(c => c.y)) };
+        const gpuGeometryScore = Number.isFinite(gpuGeometry?.[5]) ? gpuGeometry[5] / 1000 : null;
+        const gpuEvaluatorScore = Number.isFinite(candidate.gpuScore) ? candidate.gpuScore / 1000000 : null;
+        const gpuTopologyScore = Number.isFinite(gpuTopology?.perimeter) ? gpuTopology.perimeter / 1000 : null;
+        const hasGpuGeometryScore = gpuGeometryScore != null || gpuEvaluatorScore != null || gpuTopologyScore != null;
+        const contact = hasGpuGeometryScore ? 0 : candidate.cells.reduce((n, c) => n + adjacent(c).filter(a => state.field.has(key(a.x, a.y))).length, 0), centroidContact = hasGpuGeometryScore ? 0 : candidate.cells.reduce((n, c) => n + adjacent8(c).filter(a => seedSet.has(key(a.x, a.y))).length, 0), ringCoverage = hasGpuGeometryScore ? 0 : candidate.cells.reduce((n, c) => n + (centroidRing.has(key(c.x, c.y)) ? 1 : 0), 0), openCentroid = hasGpuGeometryScore ? 0 : [...centroidRing].filter(ringKey => !state.field.has(ringKey) && !candidate.cells.some(c => key(c.x, c.y) === ringKey)).length;
         nodes++;
         const candidatePlacements = [...state.placements, candidate], candidateMetrics = fieldMetrics(candidatePlacements, centroidId, gpuFieldMetrics, gpuState), candidateFamilyTarget = candidateMetrics.centroidSeed === 'none' || targetSeedCompatible(candidateMetrics.centroidSeed, targetSeed);
         if (targetFamily && !candidateFamilyTarget) return null;
@@ -1497,9 +1504,6 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         const noveltyBonus = searchStrategy === 'breadth' && !targetFamily && familyIsNew ? -220 : 0;
         const neighborTargetBonus = targetNeighborCount == null ? 0 : (candidateMetrics.centroidNeighborCount === targetNeighborCount ? -600 : Math.abs(candidateMetrics.centroidNeighborCount - targetNeighborCount) * 80);
         const qualityPenalty = searchQualityPenalty(candidateMetrics, quality) / 100000;
-        const gpuGeometryScore = Number.isFinite(gpuGeometry?.[5]) ? gpuGeometry[5] / 1000 : null;
-      const gpuEvaluatorScore = Number.isFinite(candidate.gpuScore) ? candidate.gpuScore / 1000000 : null;
-      const gpuTopologyScore = Number.isFinite(gpuTopology?.perimeter) ? gpuTopology.perimeter / 1000 : null;
         const geometryScore = gpuGeometryScore ?? gpuEvaluatorScore ?? gpuTopologyScore ?? (openCentroid * 40 + (nextBounds.maxX - nextBounds.minX + 1) * (nextBounds.maxY - nextBounds.minY + 1) - contact * 2.4 - centroidContact * 2 - ringCoverage * 8);
         const scoreInput = { geometryScore, targetProgress, targetActive: Boolean(targetFamily), novelty: Boolean(noveltyBonus), neighborCount: candidateMetrics.centroidNeighborCount, targetNeighborCount: targetNeighborCount == null ? 0 : targetNeighborCount, neighborActive: targetNeighborCount != null, hint, coastBias: Number(quality.coastBias) || 0, perimeter: candidateMetrics.perimeter, gravityBias: Number(quality.gravityBias) || 0, gravityTension: candidateMetrics.gravityTension, inletBias: Number(quality.inletBias) || 0, inletRisk: candidateMetrics.inletRisk, randomUnit: random(), flags: (targetFamily ? 1 : 0) | (noveltyBonus ? 2 : 0) | (targetNeighborCount != null ? 4 : 0) | (hint ? 8 : 0) };
         const score = cpuScoreFrontierCandidate(scoreInput);

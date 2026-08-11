@@ -1,15 +1,17 @@
 # GPU field metrics receipt — 2026-08-10
 
-The v2 search worker now exposes `tdotdh.webgpu-field-metrics.v0`.
+The v2 search worker now exposes `tdotdh.webgpu-field-metrics.v1`.
 
 - Input: one occupied mask and one centroid mask per surviving branch.
 - GPU aggregate: area, perimeter, integer bounds, coordinate sums, centroid
-  sums, centroid edge/corner coast flags, and exterior-masked inlet-cell/inlet-edge
-  counts.
-- Parity gate: the CPU oracle computes the same 15 integer values and rejects
+  sums, centroid edge/corner coast flags, exterior-masked inlet-cell/inlet-edge
+  counts, and exact hole counts.
+- Parity gate: the CPU oracle computes the same 16 integer values and rejects
   any divergent WebGPU result before the branch uses it.
 - CPU-owned remainder: radius variance, quality weights, centroid family text/
-  hash naming, hole flood semantics, persistence, and cancellation.
+  hash naming, persistence, and cancellation. Hole detection is now part of the
+  parity-gated integer aggregate, so the search does not repeat the host flood
+  fill for each surviving GPU candidate.
 - Product receipt: `fieldMetrics: used` becomes `GPU field aggregates`; an
   unavailable adapter is reported as `fieldMetrics: fallback` and does not
   claim hardware execution.

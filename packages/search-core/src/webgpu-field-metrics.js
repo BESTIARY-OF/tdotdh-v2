@@ -3,8 +3,8 @@ import { DEFAULT_FRONTIER_GRID, createFrontierMaskFromCells } from './webgpu-fro
 import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
 import { createWebGpuPipelineCache } from './webgpu-pipeline-cache.js';
 
-export const WEBGPU_FIELD_METRICS_SCHEMA = 'tdotdh.webgpu-field-metrics.v0';
-export const FIELD_METRIC_COUNT = 15;
+export const WEBGPU_FIELD_METRICS_SCHEMA = 'tdotdh.webgpu-field-metrics.v1';
+export const FIELD_METRIC_COUNT = 16;
 
 /*
  * This pass deliberately emits integer aggregates only.  The search oracle
@@ -58,6 +58,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   var centroidCornerCoast: i32 = 0;
   var inletCells: i32 = 0;
   var inletEdges: i32 = 0;
+  var holes: i32 = 0;
   for (var y: i32 = params.originY; y < params.originY + i32(params.height); y++) {
     for (var x: i32 = params.originX; x < params.originX + i32(params.width); x++) {
     let occupied = occupiedBit(base, x, y);
@@ -84,6 +85,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   for (var y: i32 = minY; y <= maxY; y++) {
     for (var x: i32 = minX; x <= maxX; x++) {
       if (occupiedBit(base, x, y) == 0u && outsideBit(base, x, y) == 0u) {
+        holes += 1;
         var landNeighbors: i32 = 0;
         landNeighbors += i32(occupiedBit(base, x + 1, y)); landNeighbors += i32(occupiedBit(base, x - 1, y)); landNeighbors += i32(occupiedBit(base, x, y + 1)); landNeighbors += i32(occupiedBit(base, x, y - 1));
         if (landNeighbors >= 2) { inletCells += 1; inletEdges += landNeighbors; }
@@ -106,6 +108,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   outputMetrics[output + 12u] = centroidCornerCoast;
   outputMetrics[output + 13u] = inletCells;
   outputMetrics[output + 14u] = inletEdges;
+  outputMetrics[output + 15u] = holes;
 }`;
 
 function normalizeGrid(grid = DEFAULT_FRONTIER_GRID) {
@@ -183,13 +186,14 @@ function cpuMetric(candidate, grid) {
       for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) if ((dx || dy) && Math.abs(dx) === 1 && Math.abs(dy) === 1 && !bit(candidate.occupiedMask, grid, x + dx, y + dy)) centroidCornerCoast = 1;
     }
   }
-  let inletCells = 0, inletEdges = 0;
+  let inletCells = 0, inletEdges = 0, holes = 0;
   if (area) for (let y = minY; y <= maxY; y++) for (let x = minX; x <= maxX; x++) if (!bit(candidate.occupiedMask, grid, x, y)) {
     if (bit(candidate.outsideMask, grid, x, y)) continue;
+    holes++;
     const landNeighbors = bit(candidate.occupiedMask, grid, x + 1, y) + bit(candidate.occupiedMask, grid, x - 1, y) + bit(candidate.occupiedMask, grid, x, y + 1) + bit(candidate.occupiedMask, grid, x, y - 1);
     if (landNeighbors >= 2) { inletCells++; inletEdges += landNeighbors; }
   }
-  return [area, perimeter, Number.isFinite(minX) ? minX : 0, Number.isFinite(maxX) ? maxX : 0, Number.isFinite(minY) ? minY : 0, Number.isFinite(maxY) ? maxY : 0, sumX, sumY, centroidCount, centroidSumX, centroidSumY, centroidEdgeCoast, centroidCornerCoast, inletCells, inletEdges];
+  return [area, perimeter, Number.isFinite(minX) ? minX : 0, Number.isFinite(maxX) ? maxX : 0, Number.isFinite(minY) ? minY : 0, Number.isFinite(maxY) ? maxY : 0, sumX, sumY, centroidCount, centroidSumX, centroidSumY, centroidEdgeCoast, centroidCornerCoast, inletCells, inletEdges, holes];
 }
 
 function normalizeCandidates(candidates, grid) {

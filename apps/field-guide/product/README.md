@@ -78,13 +78,13 @@ breadth mode the CPU derives the existing family round-robin policy as stable
 without changing the policy. The CPU oracle compares every bounded result
 before state remapping.
 
-The next field-wide seam is now explicit as `webgpu-field-metrics.v0`. For every
+The next field-wide seam is now explicit as `webgpu-field-metrics.v1`. For every
 surviving branch it batches the occupied and centroid masks and computes the
 integer aggregates that dominate repeated field scans: area, perimeter, bounds,
-coordinate sums, and edge/corner coast flags. The CPU uses those verified
-  aggregates to finish floating-point quality terms and family naming. The pass
-  includes area, perimeter, bounds, coordinate sums, coast flags, and exact
-  exterior-masked inlet-cell/inlet-edge counts. This keeps
+coordinate sums, edge/corner coast flags, and exact hole counts. The CPU uses those verified
+aggregates to finish floating-point quality terms and family naming. The pass
+includes area, perimeter, bounds, coordinate sums, coast flags, and exact
+exterior-masked inlet-cell/inlet-edge/hole counts. This keeps
   locked-seed and target-family construction on the same batched contract as
   breadth/depth beam expansion, with selected candidates flattened across a
   beam depth before dispatch.
