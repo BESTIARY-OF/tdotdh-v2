@@ -1,5 +1,6 @@
 import { probeWebGpuCapabilities } from './webgpu-capability-probe.js';
 import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
+import { createWebGpuPipelineCache } from './webgpu-pipeline-cache.js';
 
 export const WEBGPU_FRONTIER_SCORER_SCHEMA = 'tdotdh.webgpu-frontier-scorer.v0';
 export const MAX_FRONTIER_SCORE_ROWS = 65536;
@@ -127,7 +128,7 @@ function packRows(rows) {
   return buffer;
 }
 
-async function runGpu(device, rows, shaderSource) {
+async function runGpu(device, rows, shaderSource, pipelineCache) {
   const inputBytes = Math.max(48, rows.length * FRONTIER_SCORE_INPUT_STRIDE * 4), outputBytes = Math.max(4, rows.length * 4);
   const inputs = device.createBuffer({ size: inputBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   const scores = device.createBuffer({ size: outputBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
@@ -136,7 +137,7 @@ async function runGpu(device, rows, shaderSource) {
   try {
     device.queue.writeBuffer(inputs, 0, packRows(rows));
     device.queue.writeBuffer(params, 0, new Uint32Array([rows.length, 0, 0, 0]));
-    const module = device.createShaderModule({ code: shaderSource }), pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+    const pipeline = pipelineCache.get(device, shaderSource);
     const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: inputs } }, { binding: 1, resource: { buffer: scores } }, { binding: 2, resource: { buffer: params } }] });
     const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
     pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(rows.length / FRONTIER_SCORE_WORKGROUP_SIZE)); pass.end();
@@ -148,6 +149,7 @@ async function runGpu(device, rows, shaderSource) {
 export function createWebGpuFrontierScorer({ gpu = globalThis.navigator?.gpu, requiredLimits = { maxComputeWorkgroupSizeX: FRONTIER_SCORE_WORKGROUP_SIZE }, shaderSource = DEFAULT_SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
   if (typeof shaderSource !== 'string' || !shaderSource.trim()) throw new TypeError('shaderSource must be a non-empty string');
   let availabilityPromise = null;
+  const pipelineCache = createWebGpuPipelineCache();
   const availability = async () => {
     if (!availabilityPromise) availabilityPromise = probeWebGpuCapabilities({ gpu, requiredLimits }).then(probe => probe.adapterAvailable && probe.requiredLimitsSatisfied
       ? Object.freeze({ schema: WEBGPU_FRONTIER_SCORER_SCHEMA, status: 'available', backend: 'webgpu' })
@@ -160,7 +162,7 @@ export function createWebGpuFrontierScorer({ gpu = globalThis.navigator?.gpu, re
       const normalized = normalizeRows(rows), cpu = cpuScoreFrontierCandidates(normalized), status = await availability();
       if (status.status !== 'available') return unavailable(status.reason, cpu);
       try {
-        const gpuScores = await runGpu(await deviceCache.getDevice(), normalized, shaderSource);
+        const gpuScores = await runGpu(await deviceCache.getDevice(), normalized, shaderSource, pipelineCache);
         const parity = gpuScores.every((value, index) => Math.abs(value - cpu.scores[index]) <= Math.max(0.0005, Math.abs(cpu.scores[index]) * 0.00001));
         if (!parity) return unavailable('oracle-parity-mismatch', cpu);
         return Object.freeze({ ...cpu, status: 'completed', backend: 'webgpu', parity: 'verified', algorithm: 'parallel-score-map', scores: Object.freeze(gpuScores) });

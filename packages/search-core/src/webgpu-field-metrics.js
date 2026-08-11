@@ -1,6 +1,7 @@
 import { probeWebGpuCapabilities } from './webgpu-capability-probe.js';
 import { DEFAULT_FRONTIER_GRID, createFrontierMaskFromCells } from './webgpu-frontier-validator.js';
 import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
+import { createWebGpuPipelineCache } from './webgpu-pipeline-cache.js';
 
 export const WEBGPU_FIELD_METRICS_SCHEMA = 'tdotdh.webgpu-field-metrics.v0';
 export const FIELD_METRIC_COUNT = 15;
@@ -198,7 +199,7 @@ export function cpuEvaluateFieldMetrics(candidates, grid = DEFAULT_FRONTIER_GRID
 function unavailable(reason, grid, cpu) { return Object.freeze({ schema: WEBGPU_FIELD_METRICS_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: String(reason), grid, metrics: cpu.metrics, candidateCount: cpu.candidateCount, wordCount: cpu.wordCount, parity: 'oracle' }); }
 function flatten(candidates, property, wordCount) { const flat = new Uint32Array(candidates.length * wordCount); candidates.forEach((candidate, index) => flat.set(candidate[property], index * wordCount)); return flat; }
 
-async function runGpuBatch(device, normalized, grid, shaderSource) {
+async function runGpuBatch(device, normalized, grid, shaderSource, pipelineCache) {
   const count = normalized.length, maskBytes = Math.max(4, count * grid.wordCount * 4), outputBytes = Math.max(4, count * FIELD_METRIC_COUNT * 4);
   const buffers = {
     occupied: device.createBuffer({ size: maskBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
@@ -211,7 +212,7 @@ async function runGpuBatch(device, normalized, grid, shaderSource) {
   try {
     device.queue.writeBuffer(buffers.occupied, 0, flatten(normalized, 'occupiedMask', grid.wordCount)); device.queue.writeBuffer(buffers.centroid, 0, flatten(normalized, 'centroidMask', grid.wordCount)); device.queue.writeBuffer(buffers.outside, 0, flatten(normalized, 'outsideMask', grid.wordCount));
     device.queue.writeBuffer(buffers.params, 0, new Int32Array([count, grid.wordCount, grid.width, grid.height, grid.originX, grid.originY, 0, 0]));
-    const module = device.createShaderModule({ code: shaderSource }), pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } }), bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.occupied } }, { binding: 1, resource: { buffer: buffers.centroid } }, { binding: 2, resource: { buffer: buffers.outside } }, { binding: 3, resource: { buffer: buffers.output } }, { binding: 4, resource: { buffer: buffers.params } }] });
+    const pipeline = pipelineCache.get(device, shaderSource), bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.occupied } }, { binding: 1, resource: { buffer: buffers.centroid } }, { binding: 2, resource: { buffer: buffers.outside } }, { binding: 3, resource: { buffer: buffers.output } }, { binding: 4, resource: { buffer: buffers.params } }] });
     const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end(); encoder.copyBufferToBuffer(buffers.output, 0, buffers.readback, 0, outputBytes); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone(); await buffers.readback.mapAsync(GPUMapMode.READ);
     const values = Array.from(new Int32Array(buffers.readback.getMappedRange().slice(0, count * FIELD_METRIC_COUNT * 4))); buffers.readback.unmap();
     return Array.from({ length: count }, (_, index) => values.slice(index * FIELD_METRIC_COUNT, (index + 1) * FIELD_METRIC_COUNT));
@@ -220,12 +221,12 @@ async function runGpuBatch(device, normalized, grid, shaderSource) {
 
 export function createWebGpuFieldMetrics({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 65536 }, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
   if (typeof shaderSource !== 'string' || !shaderSource.trim()) throw new TypeError('shaderSource must be a non-empty string');
-  const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits };
+  const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits }, pipelineCache = createWebGpuPipelineCache();
   return Object.freeze({
     async availability() { const probe = await probeWebGpuCapabilities({ gpu, requiredLimits: limits }); if (!probe.adapterAvailable) return Object.freeze({ schema: WEBGPU_FIELD_METRICS_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: 'webgpu-adapter-unavailable', grid: normalizedGrid }); if (!probe.requiredLimitsSatisfied) return Object.freeze({ schema: WEBGPU_FIELD_METRICS_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: 'webgpu-required-limits-unsatisfied', grid: normalizedGrid }); return Object.freeze({ schema: WEBGPU_FIELD_METRICS_SCHEMA, status: 'available', backend: 'webgpu', grid: normalizedGrid }); },
     async evaluate(candidates) {
       const normalized = normalizeCandidates(candidates, normalizedGrid), cpu = cpuEvaluateFieldMetrics(normalized, normalizedGrid), status = await this.availability(); if (status.status !== 'available') return unavailable(status.reason, normalizedGrid, cpu);
-      try { const device = await deviceCache.getDevice(), maxBinding = Number(device.limits?.maxStorageBufferBindingSize) || limits.maxStorageBufferBindingSize, maxBatch = Math.max(1, Math.floor(maxBinding / Math.max(normalizedGrid.wordCount * 8, 4))), metrics = []; for (let offset = 0; offset < normalized.length; offset += maxBatch) metrics.push(...await runGpuBatch(device, normalized.slice(offset, offset + maxBatch), normalizedGrid, shaderSource)); if (JSON.stringify(metrics) !== JSON.stringify(cpu.metrics)) return unavailable('oracle-parity-mismatch', normalizedGrid, cpu); return Object.freeze({ schema: WEBGPU_FIELD_METRICS_SCHEMA, status: 'completed', backend: 'webgpu', metrics, candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, parity: 'verified' }); } catch (error) { deviceCache.reset(); return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid, cpu); }
+      try { const device = await deviceCache.getDevice(), maxBinding = Number(device.limits?.maxStorageBufferBindingSize) || limits.maxStorageBufferBindingSize, maxBatch = Math.max(1, Math.floor(maxBinding / Math.max(normalizedGrid.wordCount * 8, 4))), metrics = []; for (let offset = 0; offset < normalized.length; offset += maxBatch) metrics.push(...await runGpuBatch(device, normalized.slice(offset, offset + maxBatch), normalizedGrid, shaderSource, pipelineCache)); if (JSON.stringify(metrics) !== JSON.stringify(cpu.metrics)) return unavailable('oracle-parity-mismatch', normalizedGrid, cpu); return Object.freeze({ schema: WEBGPU_FIELD_METRICS_SCHEMA, status: 'completed', backend: 'webgpu', metrics, candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, parity: 'verified' }); } catch (error) { deviceCache.reset(); return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid, cpu); }
     },
   });
 }

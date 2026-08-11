@@ -1,6 +1,7 @@
 import { probeWebGpuCapabilities } from './webgpu-capability-probe.js';
 import { DEFAULT_FRONTIER_GRID, createFrontierMaskFromCells } from './webgpu-frontier-validator.js';
 import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
+import { createWebGpuPipelineCache } from './webgpu-pipeline-cache.js';
 
 export const WEBGPU_FRONTIER_EVALUATOR_SCHEMA = 'tdotdh.webgpu-frontier-evaluator.v0';
 export const FRONTIER_SCORE_TERM_COUNT = 8;
@@ -99,7 +100,7 @@ function unavailable(reason, grid) {
   return Object.freeze({ schema: WEBGPU_FRONTIER_EVALUATOR_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: String(reason), grid });
 }
 
-async function evaluateGpuBatch(device, normalized, grid, shaderSource) {
+async function evaluateGpuBatch(device, normalized, grid, shaderSource, pipelineCache) {
   const parent = flattenMasks(normalized, 'parentMask', grid.wordCount);
   const candidate = flattenMasks(normalized, 'candidateMask', grid.wordCount);
   const terms = flattenTerms(normalized);
@@ -119,8 +120,7 @@ async function evaluateGpuBatch(device, normalized, grid, shaderSource) {
     device.queue.writeBuffer(candidateBuffer, 0, candidate);
     device.queue.writeBuffer(termsBuffer, 0, terms);
     device.queue.writeBuffer(paramsBuffer, 0, new Uint32Array([normalized.length, grid.wordCount, FRONTIER_SCORE_TERM_COUNT, 0]));
-    const module = device.createShaderModule({ code: shaderSource });
-    const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+    const pipeline = pipelineCache.get(device, shaderSource);
     const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
       { binding: 0, resource: { buffer: parentBuffer } }, { binding: 1, resource: { buffer: candidateBuffer } }, { binding: 2, resource: { buffer: termsBuffer } },
       { binding: 3, resource: { buffer: validityBuffer } }, { binding: 4, resource: { buffer: scoresBuffer } }, { binding: 5, resource: { buffer: paramsBuffer } },
@@ -139,7 +139,7 @@ async function evaluateGpuBatch(device, normalized, grid, shaderSource) {
 
 export function createWebGpuFrontierEvaluator({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 65536 }, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
   if (typeof shaderSource !== 'string' || !shaderSource.trim()) throw new TypeError('shaderSource must be a non-empty string');
-  const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits };
+  const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits }, pipelineCache = createWebGpuPipelineCache();
   return Object.freeze({
     async availability() {
       const probe = await probeWebGpuCapabilities({ gpu, requiredLimits: limits });
@@ -160,7 +160,7 @@ export function createWebGpuFrontierEvaluator({ gpu = globalThis.navigator?.gpu,
         const maxBatch = Math.max(1, Math.floor(maxBinding / Math.max(bytesPerMaskCandidate, 4)));
         const validity = [], scores = [];
         for (let offset = 0; offset < normalized.length; offset += maxBatch) {
-          const result = await evaluateGpuBatch(device, normalized.slice(offset, offset + maxBatch), normalizedGrid, shaderSource);
+          const result = await evaluateGpuBatch(device, normalized.slice(offset, offset + maxBatch), normalizedGrid, shaderSource, pipelineCache);
           validity.push(...result.validity); scores.push(...result.scores);
         }
         const parity = JSON.stringify(validity) === JSON.stringify(cpu.validity) && JSON.stringify(scores) === JSON.stringify(cpu.scores);

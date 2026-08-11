@@ -1,5 +1,6 @@
 import { probeWebGpuCapabilities } from './webgpu-capability-probe.js';
 import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
+import { createWebGpuPipelineCache } from './webgpu-pipeline-cache.js';
 
 export const WEBGPU_FRONTIER_COMPACTOR_SCHEMA = 'tdotdh.webgpu-frontier-compactor.v0';
 export const MAX_FRONTIER_COMPACTOR_ROWS = 65536;
@@ -68,12 +69,12 @@ function packRows(rows, paddedCount) {
   return packed;
 }
 
-async function runGpu(device, rows, retain, shaderSource) {
+async function runGpu(device, rows, retain, shaderSource, pipelineCache) {
   const paddedCount = nextPowerOfTwo(rows.length), bytes = paddedCount * 16, readbackBytes = Math.max(1, retain) * 16, initial = packRows(rows, paddedCount);
   const input = device.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }), output = device.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }), params = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }), readback = device.createBuffer({ size: readbackBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
   try {
     device.queue.writeBuffer(input, 0, initial);
-    const module = device.createShaderModule({ code: shaderSource }), pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+    const pipeline = pipelineCache.get(device, shaderSource);
     let source = input, destination = output;
     for (let k = 2; k <= paddedCount; k *= 2) for (let j = k / 2; j >= 1; j /= 2) {
       device.queue.writeBuffer(params, 0, new Uint32Array([paddedCount, rows.length, j, k]));
@@ -85,14 +86,13 @@ async function runGpu(device, rows, retain, shaderSource) {
   } finally { for (const buffer of [input, output, params, readback]) buffer.destroy(); }
 }
 
-function createPersistentResources(device, capacity, shaderSource) {
+function createPersistentResources(device, capacity, shaderSource, pipelineCache) {
   const paddedCapacity = nextPowerOfTwo(capacity), bytes = paddedCapacity * 16;
   const input = device.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
   const output = device.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
   const params = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const readback = device.createBuffer({ size: Math.max(1, capacity) * 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-  const module = device.createShaderModule({ code: shaderSource });
-  const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+  const pipeline = pipelineCache.get(device, shaderSource);
   return { capacity, paddedCapacity, input, output, params, readback, pipeline };
 }
 
@@ -121,7 +121,7 @@ async function runGpuPersistent(device, resources, rows, retain) {
 }
 
 export function createWebGpuFrontierCompactor({ gpu = globalThis.navigator?.gpu, requiredLimits = { maxComputeWorkgroupSizeX: FRONTIER_COMPACTOR_WORKGROUP_SIZE }, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
-  const limits = { ...requiredLimits }; let availabilityPromise = null;
+  const limits = { ...requiredLimits }; let availabilityPromise = null; const pipelineCache = createWebGpuPipelineCache();
   const availability = async () => {
     if (!availabilityPromise) availabilityPromise = probeWebGpuCapabilities({ gpu, requiredLimits: limits }).then(probe => probe.adapterAvailable && probe.requiredLimitsSatisfied ? Object.freeze({ schema: WEBGPU_FRONTIER_COMPACTOR_SCHEMA, status: 'available', backend: 'webgpu', algorithm: 'multi-pass-bitonic-top-k' }) : Object.freeze({ schema: WEBGPU_FRONTIER_COMPACTOR_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: probe.adapterAvailable ? 'webgpu-required-limits-unsatisfied' : 'webgpu-adapter-unavailable' }));
     return availabilityPromise;
@@ -134,7 +134,7 @@ export function createWebGpuFrontierCompactor({ gpu = globalThis.navigator?.gpu,
       try {
         const device = await deviceCache.getDevice(), maxRows = Math.floor((Number(device.limits?.maxStorageBufferBindingSize) || 0) / 16);
         if (maxRows < nextPowerOfTwo(normalized.length)) return makeResult('unavailable', 'webgpu', 'oracle', normalized, cpu.indices, { reason: 'frontier-compactor-storage-capacity' });
-        const indices = await runGpu(device, normalized, limit, shaderSource), parity = JSON.stringify(indices) === JSON.stringify(cpu.indices);
+        const indices = await runGpu(device, normalized, limit, shaderSource, pipelineCache), parity = JSON.stringify(indices) === JSON.stringify(cpu.indices);
         return parity ? makeResult('completed', 'webgpu', 'verified', normalized, indices, { algorithm: 'multi-pass-bitonic-top-k' }) : makeResult('unavailable', 'webgpu', 'oracle', normalized, cpu.indices, { reason: 'oracle-parity-mismatch' });
       } catch (error) { deviceCache.reset(); return makeResult('unavailable', 'webgpu', 'oracle', normalized, cpu.indices, { reason: `webgpu-execution-failed:${error?.message || String(error)}` }); }
     },
@@ -143,7 +143,7 @@ export function createWebGpuFrontierCompactor({ gpu = globalThis.navigator?.gpu,
 
 export function createWebGpuPersistentFrontierCompactor({ gpu = globalThis.navigator?.gpu, capacity = MAX_FRONTIER_COMPACTOR_ROWS, requiredLimits = { maxComputeWorkgroupSizeX: FRONTIER_COMPACTOR_WORKGROUP_SIZE }, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
   if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > MAX_FRONTIER_COMPACTOR_ROWS) throw new TypeError(`persistent frontier compactor capacity must be 1-${MAX_FRONTIER_COMPACTOR_ROWS}`);
-  const limits = { ...requiredLimits }; let availabilityPromise = null, resources = null;
+  const limits = { ...requiredLimits }; let availabilityPromise = null, resources = null; const pipelineCache = createWebGpuPipelineCache();
   const availability = async () => {
     if (!availabilityPromise) availabilityPromise = probeWebGpuCapabilities({ gpu, requiredLimits: limits }).then(probe => probe.adapterAvailable && probe.requiredLimitsSatisfied ? Object.freeze({ schema: WEBGPU_FRONTIER_COMPACTOR_SCHEMA, status: 'available', backend: 'webgpu', algorithm: 'persistent-multi-pass-bitonic-top-k', capacity }) : Object.freeze({ schema: WEBGPU_FRONTIER_COMPACTOR_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: probe.adapterAvailable ? 'webgpu-required-limits-unsatisfied' : 'webgpu-adapter-unavailable', capacity }));
     return availabilityPromise;
@@ -159,7 +159,7 @@ export function createWebGpuPersistentFrontierCompactor({ gpu = globalThis.navig
       try {
         const device = await deviceCache.getDevice(), maxStorageRows = Math.floor((Number(device.limits?.maxStorageBufferBindingSize) || 0) / 16), maxBufferRows = Math.floor((Number(device.limits?.maxBufferSize) || 0) / 16);
         if (maxStorageRows < nextPowerOfTwo(capacity) || (maxBufferRows > 0 && maxBufferRows < nextPowerOfTwo(capacity))) return makeResult('unavailable', 'webgpu', 'oracle', normalized, cpu.indices, { reason: 'persistent-frontier-storage-capacity', persistent: true, bufferCapacity: capacity });
-        if (!resources) resources = createPersistentResources(device, capacity, shaderSource);
+        if (!resources) resources = createPersistentResources(device, capacity, shaderSource, pipelineCache);
         const indices = await runGpuPersistent(device, resources, normalized, limit), parity = JSON.stringify(indices) === JSON.stringify(cpu.indices);
         return parity ? makeResult('completed', 'webgpu', 'verified', normalized, indices, { algorithm: 'persistent-multi-pass-bitonic-top-k', persistent: true, bufferCapacity: capacity }) : makeResult('unavailable', 'webgpu', 'oracle', normalized, cpu.indices, { reason: 'oracle-parity-mismatch', persistent: true, bufferCapacity: capacity });
       } catch (error) { reset(); return makeResult('unavailable', 'webgpu', 'oracle', normalized, cpu.indices, { reason: `webgpu-execution-failed:${error?.message || String(error)}`, persistent: true, bufferCapacity: capacity }); }

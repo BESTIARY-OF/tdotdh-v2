@@ -1,6 +1,7 @@
 import { probeWebGpuCapabilities } from './webgpu-capability-probe.js';
 import { DEFAULT_FRONTIER_GRID, createFrontierMaskFromCells } from './webgpu-frontier-validator.js';
 import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
+import { createWebGpuPipelineCache } from './webgpu-pipeline-cache.js';
 
 export const WEBGPU_FRONTIER_METRICS_SCHEMA = 'tdotdh.webgpu-frontier-metrics.v0';
 export const FRONTIER_METRIC_COUNT = 6;
@@ -193,7 +194,7 @@ function flattenMasks(candidates, property, wordCount) {
   return flat;
 }
 
-async function runGpuBatch(device, normalized, grid, shaderSource) {
+async function runGpuBatch(device, normalized, grid, shaderSource, pipelineCache) {
   const count = normalized.length, maskBytes = Math.max(4, count * grid.wordCount * 4), outputBytes = Math.max(4, count * FRONTIER_METRIC_COUNT * 4);
   const buffers = {
     parent: device.createBuffer({ size: maskBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
@@ -211,7 +212,7 @@ async function runGpuBatch(device, normalized, grid, shaderSource) {
     device.queue.writeBuffer(buffers.ring, 0, flattenMasks(normalized, 'ringMask', grid.wordCount));
     const bounds = normalized[0].bounds;
     device.queue.writeBuffer(buffers.params, 0, new Int32Array([count, grid.wordCount, grid.width, grid.height, grid.originX, grid.originY, bounds.minX, bounds.maxX, bounds.minY, bounds.maxY, 0, 0]));
-    const module = device.createShaderModule({ code: shaderSource }), pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+    const pipeline = pipelineCache.get(device, shaderSource);
     const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
       { binding: 0, resource: { buffer: buffers.parent } }, { binding: 1, resource: { buffer: buffers.candidate } }, { binding: 2, resource: { buffer: buffers.centroid } }, { binding: 3, resource: { buffer: buffers.ring } }, { binding: 4, resource: { buffer: buffers.output } }, { binding: 5, resource: { buffer: buffers.params } },
     ] });
@@ -224,7 +225,7 @@ async function runGpuBatch(device, normalized, grid, shaderSource) {
 
 export function createWebGpuFrontierMetrics({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 262144 }, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
   if (typeof shaderSource !== 'string' || !shaderSource.trim()) throw new TypeError('shaderSource must be a non-empty string');
-  const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits };
+  const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits }, pipelineCache = createWebGpuPipelineCache();
   return Object.freeze({
     async availability() {
       const probe = await probeWebGpuCapabilities({ gpu, requiredLimits: limits });
@@ -237,7 +238,7 @@ export function createWebGpuFrontierMetrics({ gpu = globalThis.navigator?.gpu, g
       if (status.status !== 'available') return unavailable(status.reason, normalizedGrid, cpu);
       try {
         const device = await deviceCache.getDevice(), maxBinding = Number(device.limits?.maxStorageBufferBindingSize) || limits.maxStorageBufferBindingSize, maxBatch = Math.max(1, Math.floor(maxBinding / Math.max(normalizedGrid.wordCount * 4, 4))), metrics = [];
-        for (let offset = 0; offset < normalized.length; offset += maxBatch) metrics.push(...await runGpuBatch(device, normalized.slice(offset, offset + maxBatch), normalizedGrid, shaderSource));
+        for (let offset = 0; offset < normalized.length; offset += maxBatch) metrics.push(...await runGpuBatch(device, normalized.slice(offset, offset + maxBatch), normalizedGrid, shaderSource, pipelineCache));
         const parity = JSON.stringify(metrics) === JSON.stringify(cpu.metrics);
         if (!parity) return unavailable('oracle-parity-mismatch', normalizedGrid, cpu);
         return Object.freeze({ schema: WEBGPU_FRONTIER_METRICS_SCHEMA, status: 'completed', backend: 'webgpu', metrics, candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, parity: 'verified' });
