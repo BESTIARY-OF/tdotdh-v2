@@ -61,29 +61,24 @@ function packRowsBatches(batches, paddedCount) {
   return packed;
 }
 
-async function runGpuMany(device, batches, shaderSource, paddedCount) {
+async function runGpuMany(device, batches, pipeline, bindGroupLayout, paddedCount) {
   const segmentCount = batches.length, bytes = segmentCount * paddedCount * 16, initial = packRowsBatches(batches, paddedCount);
-  const input = device.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST }), output = device.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }), params = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }), readback = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  const input = device.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST }), output = device.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }), readback = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }), paramsBuffers = [];
   try {
     device.queue.writeBuffer(input, 0, initial);
-    const module = device.createShaderModule({ code: shaderSource }), pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
-    let source = input, destination = output;
+    const encoder = device.createCommandEncoder(); let source = input, destination = output;
     for (let k = 2; k <= paddedCount; k *= 2) for (let j = k / 2; j >= 1; j /= 2) {
-      device.queue.writeBuffer(params, 0, new Uint32Array([paddedCount, segmentCount, j, k]));
-      const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: source } }, { binding: 1, resource: { buffer: destination } }, { binding: 2, resource: { buffer: params } }] });
-      const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil((paddedCount * segmentCount) / FRONTIER_RANK_WORKGROUP_SIZE)); pass.end(); device.queue.submit([encoder.finish()]); [source, destination] = [destination, source];
+      const params = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }); paramsBuffers.push(params); device.queue.writeBuffer(params, 0, new Uint32Array([paddedCount, segmentCount, j, k]));
+      const bindGroup = device.createBindGroup({ layout: bindGroupLayout, entries: [{ binding: 0, resource: { buffer: source } }, { binding: 1, resource: { buffer: destination } }, { binding: 2, resource: { buffer: params } }] });
+      const pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil((paddedCount * segmentCount) / FRONTIER_RANK_WORKGROUP_SIZE)); pass.end(); [source, destination] = [destination, source];
     }
-    const encoder = device.createCommandEncoder(); encoder.copyBufferToBuffer(source, 0, readback, 0, bytes); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone(); await readback.mapAsync(GPUMapMode.READ);
+    encoder.copyBufferToBuffer(source, 0, readback, 0, bytes); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone(); await readback.mapAsync(GPUMapMode.READ);
     const view = new DataView(readback.getMappedRange()), indices = batches.map((rows, segment) => rows.map((row, index) => view.getUint32((segment * paddedCount + index) * 16 + 8, true))); readback.unmap(); return indices;
-  } finally { for (const buffer of [input, output, params, readback]) buffer.destroy(); }
-}
-
-async function runGpu(device, rows, shaderSource) {
-  return (await runGpuMany(device, [rows], shaderSource, nextPowerOfTwo(rows.length)))[0];
+  } finally { for (const buffer of [input, output, readback, ...paramsBuffers]) buffer.destroy(); }
 }
 
 export function createWebGpuFrontierRanker({ gpu = globalThis.navigator?.gpu, requiredLimits = { maxComputeWorkgroupSizeX: FRONTIER_RANK_WORKGROUP_SIZE }, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
-  const limits = { ...requiredLimits }; let availabilityPromise = null;
+  const limits = { ...requiredLimits }; let availabilityPromise = null, pipelineDevice = null, pipeline = null, bindGroupLayout = null;
   const fallback = (reason, rows, diagnostics = null) => Object.freeze({ ...cpuRankFrontierRows(rows), schema: WEBGPU_FRONTIER_RANKER_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: String(reason), ...(diagnostics ? { diagnostics } : {}) });
   const fallbackMany = (reason, batches) => batches.map(rows => fallback(reason, rows));
   const availability = async () => {
@@ -96,10 +91,11 @@ export function createWebGpuFrontierRanker({ gpu = globalThis.navigator?.gpu, re
     if (status.status !== 'available') return fallbackMany(status.reason || 'webgpu-unavailable', normalizedBatches);
     try {
       const device = await deviceCache.getDevice(), maxRows = Math.floor((Number(device.limits?.maxStorageBufferBindingSize) || 0) / 16), groups = new Map(), results = new Array(normalizedBatches.length);
+      if (pipelineDevice !== device) { const module = device.createShaderModule({ code: shaderSource }); pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } }); bindGroupLayout = pipeline.getBindGroupLayout(0); pipelineDevice = device; }
       normalizedBatches.forEach((rows, index) => { const paddedCount = nextPowerOfTwo(rows.length), group = groups.get(paddedCount) || []; group.push({ index, rows }); groups.set(paddedCount, group); });
       for (const [paddedCount, group] of groups) {
         if (paddedCount * group.length > maxRows) { for (const item of group) results[item.index] = fallback('frontier-ranker-storage-capacity', item.rows); continue; }
-        const gpuIndices = await runGpuMany(device, group.map(item => item.rows), shaderSource, paddedCount);
+        const gpuIndices = await runGpuMany(device, group.map(item => item.rows), pipeline, bindGroupLayout, paddedCount);
         for (const [groupIndex, item] of group.entries()) {
           const indices = gpuIndices[groupIndex], parity = JSON.stringify(indices) === JSON.stringify(cpuResults[item.index].indices);
           results[item.index] = parity
@@ -108,7 +104,7 @@ export function createWebGpuFrontierRanker({ gpu = globalThis.navigator?.gpu, re
         }
       }
       return results;
-    } catch (error) { deviceCache.reset(); return fallbackMany(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedBatches); }
+    } catch (error) { pipelineDevice = null; pipeline = null; bindGroupLayout = null; deviceCache.reset(); return fallbackMany(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedBatches); }
   };
   return Object.freeze({
     availability,
