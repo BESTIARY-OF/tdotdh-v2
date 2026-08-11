@@ -48,6 +48,10 @@ async function getGpuStageAvailability() {
   if (!gpuStageAvailabilityPromise) gpuStageAvailabilityPromise = Promise.all(Object.entries(gpuStageAdapters).map(async ([name, adapter]) => [name, adapter?.availability ? await adapter.availability() : { status: 'unavailable', reason: 'stage-does-not-expose-availability' }])).then(entries => Object.freeze(Object.fromEntries(entries)));
   return gpuStageAvailabilityPromise;
 }
+async function runGpuProbe() {
+  const gpuExecution = await probeWebGpuExecutionCapabilities({ gpu: globalThis.navigator?.gpu, requiredLimits: { maxStorageBufferBindingSize: 33554432 }, deviceCache });
+  return { type: 'gpu-probe', gpuExecution, stageAvailability: await getGpuStageAvailability(), workerNavigatorGpu: typeof globalThis.navigator?.gpu !== 'undefined' };
+}
 async function runProductSearch(request, context) {
   const steering = request.steering || {};
   residentFrontierState.reset();
@@ -106,6 +110,10 @@ const protocolHandle = installCpuWorker(self, {
 
 self.onmessage = event => {
   const message = event?.data;
+  if (message?.type === 'probe') {
+    void runGpuProbe().then(result => self.postMessage(result)).catch(error => self.postMessage({ type: 'gpu-probe-failed', error: { message: error?.message || String(error) } }));
+    return;
+  }
   if (message?.type === 'start' || message?.type === 'cancel') {
     void protocolHandle(message);
     return;

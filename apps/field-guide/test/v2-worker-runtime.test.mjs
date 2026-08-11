@@ -70,4 +70,20 @@ assert.ok(result.navigation.progressCount >= 1);
 assert.ok(result.navigation.batchCount >= 1);
 assert.ok(result.navigation.cancellationChecks >= 2);
 assert.equal(result.navigation.cursor.rootChoice, 0);
+
+const probeWorker = new Worker(wrapper, { eval: true });
+const probe = await new Promise((resolveProbe, rejectProbe) => {
+  const timer = setTimeout(() => rejectProbe(new Error('GPU probe timed out')), 5000);
+  probeWorker.on('message', event => {
+    if (event.type === 'gpu-probe') { clearTimeout(timer); resolveProbe(event); }
+    if (event.type === 'gpu-probe-failed') { clearTimeout(timer); rejectProbe(new Error(event.error?.message || 'GPU probe failed')); }
+  });
+  probeWorker.on('error', error => { clearTimeout(timer); rejectProbe(error); });
+  probeWorker.postMessage({ type: 'probe' });
+});
+await probeWorker.terminate();
+assert.equal(probe.type, 'gpu-probe');
+assert.equal(probe.gpuExecution.deviceAvailable, false);
+assert.equal(probe.workerNavigatorGpu, false);
+assert.equal(probe.stageAvailability.prefilter.status, 'unavailable');
 console.log('v2 product worker runtime receipt passed');
