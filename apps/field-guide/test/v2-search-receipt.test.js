@@ -134,6 +134,19 @@ const residentNavigator = {
 };
 const singleResult = await search(pieces, [], { ...sharedOptions, frontierGenerator: singleFrontierGenerator });
 const result = await search(pieces, [], { ...sharedOptions, frontierGenerator });
+let residentScoreCalls = 0;
+const residentScoreSelector = {
+  selectScoreInputs: async (inputs, retain) => {
+    residentScoreCalls += 1;
+    return { status: 'completed', backend: 'webgpu', parity: 'verified', algorithm: 'resident-score-input-rank', readback: 'selected-indices', indices: inputs.map((_, index) => index).slice(0, retain), scores: inputs.map((input, index) => index) };
+  },
+};
+const residentScoreResult = await search(pieces, [], { ...sharedOptions, frontierGenerator, residentBeamSelector: residentScoreSelector });
+assert.ok(residentScoreCalls > 0);
+assert.equal(residentScoreResult.frontierScore.status, 'used');
+assert.equal(residentScoreResult.frontierScore.backend, 'webgpu');
+assert.equal(residentScoreResult.frontierScore.resident, true);
+assert.equal(residentScoreResult.frontierRanker.backend, 'webgpu');
 const targetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator, frontierCandidateRecords });
 const flatTargetResult = await search(pieces, [], { ...sharedOptions, frontierTargetGenerator, frontierCandidateRecords, navigationScheduler: flatNavigationScheduler });
 let residentNavigationSelectCalls = 0;

@@ -1,5 +1,6 @@
 import { probeWebGpuCapabilities } from './webgpu-capability-probe.js';
 import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
+import { cpuScoreFrontierCandidates } from './webgpu-frontier-scorer.js';
 
 export const WEBGPU_RESIDENT_BEAM_SELECTOR_SCHEMA = 'tdotdh.webgpu-resident-beam-selector.v0';
 export const MAX_RESIDENT_BEAM_ROWS = 65536;
@@ -20,6 +21,56 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x < params.rowCount) {
     let input = inputs[id.x];
     rows[id.x] = Row(input.score, input.tie, id.x, 0u);
+  } else {
+    rows[id.x] = Row(${PAD_SCORE}, 0xffffffffu, id.x, 0u);
+  }
+}`;
+
+const SCORE_INPUT_SHADER = `
+struct Input {
+  geometryScore: f32,
+  targetProgress: f32,
+  neighborCount: f32,
+  targetNeighborCount: f32,
+  coastBias: f32,
+  perimeter: f32,
+  gravityBias: f32,
+  gravityTension: f32,
+  inletBias: f32,
+  inletRisk: f32,
+  randomUnit: f32,
+  flags: u32,
+};
+struct Row { score: f32, tie: u32, index: u32, reserved: u32, };
+struct Params { rowCount: u32, paddedCount: u32, reserved0: u32, reserved1: u32, };
+@group(0) @binding(0) var<storage, read> inputs: array<Input>;
+@group(0) @binding(1) var<storage, read_write> rows: array<Row>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+fn score(input: Input) -> f32 {
+  let targetActive = (input.flags & 1u) != 0u;
+  let novelty = (input.flags & 2u) != 0u;
+  let neighborActive = (input.flags & 4u) != 0u;
+  let hint = (input.flags & 8u) != 0u;
+  var value = input.geometryScore;
+  if (targetActive) { value = value - 320.0 * input.targetProgress; }
+  if (novelty) { value = value - 220.0; }
+  if (neighborActive) {
+    if (input.neighborCount == input.targetNeighborCount) { value = value - 600.0; }
+    else { value = value + abs(input.neighborCount - input.targetNeighborCount) * 80.0; }
+  }
+  if (hint) { value = value - 220.0; }
+  value = value + input.coastBias * input.perimeter * 2.5;
+  value = value + input.gravityBias * input.gravityTension * 0.025;
+  value = value + input.inletBias * input.inletRisk * 5.0;
+  return value + input.randomUnit * 12.0;
+}
+
+@compute @workgroup_size(${RESIDENT_BEAM_WORKGROUP_SIZE})
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= params.paddedCount) { return; }
+  if (id.x < params.rowCount) {
+    rows[id.x] = Row(score(inputs[id.x]), id.x, id.x, 0u);
   } else {
     rows[id.x] = Row(${PAD_SCORE}, 0xffffffffu, id.x, 0u);
   }
@@ -58,6 +109,30 @@ function normalizeRows(rows) {
   });
 }
 
+function normalizeScoreInputs(rows) {
+  if (!Array.isArray(rows) || rows.length === 0 || rows.length > MAX_RESIDENT_BEAM_ROWS) throw new TypeError(`resident beam score inputs must contain 1-${MAX_RESIDENT_BEAM_ROWS} rows`);
+  return rows.map((row, index) => {
+    if (!row || typeof row !== 'object') throw new TypeError(`resident beam score input ${index} must be an object`);
+    const normalized = Object.freeze({
+      geometryScore: Number(row.geometryScore),
+      targetProgress: Number(row.targetProgress ?? 0),
+      neighborCount: Number(row.neighborCount ?? 0),
+      targetNeighborCount: Number(row.targetNeighborCount ?? 0),
+      coastBias: Number(row.coastBias ?? 0),
+      perimeter: Number(row.perimeter ?? 0),
+      gravityBias: Number(row.gravityBias ?? 0),
+      gravityTension: Number(row.gravityTension ?? 0),
+      inletBias: Number(row.inletBias ?? 0),
+      inletRisk: Number(row.inletRisk ?? 0),
+      randomUnit: Number(row.randomUnit ?? 0),
+      flags: Number(row.flags ?? 0),
+    });
+    for (const key of ['geometryScore', 'targetProgress', 'neighborCount', 'targetNeighborCount', 'coastBias', 'perimeter', 'gravityBias', 'gravityTension', 'inletBias', 'inletRisk', 'randomUnit']) if (!Number.isFinite(normalized[key])) throw new TypeError(`resident beam score input ${index}.${key} must be finite`);
+    if (!Number.isSafeInteger(normalized.flags) || normalized.flags < 0 || normalized.flags > 0xffffffff) throw new TypeError(`resident beam score input ${index}.flags must be a uint32`);
+    return normalized;
+  });
+}
+
 function nextPowerOfTwo(value) {
   let result = 1;
   while (result < value) result *= 2;
@@ -70,8 +145,17 @@ export function cpuSelectResidentBeam(rows, retain) {
   return Object.freeze({ schema: WEBGPU_RESIDENT_BEAM_SELECTOR_SCHEMA, status: 'completed', backend: 'cpu-oracle', parity: 'oracle', algorithm: 'resident-score-rank', indices: Object.freeze(indices), rowCount: normalized.length, selectedCount: indices.length });
 }
 
+export function cpuSelectResidentScoreInputs(rows, retain) {
+  const normalized = normalizeScoreInputs(rows), scores = cpuScoreFrontierCandidates(normalized).scores, selection = cpuSelectResidentBeam(scores.map(score => ({ score, tie: 0 })), retain);
+  return Object.freeze({ ...selection, scores: Object.freeze([...scores]), algorithm: 'resident-score-input-rank' });
+}
+
 function unavailable(reason, rows, retain) {
   return Object.freeze({ ...cpuSelectResidentBeam(rows, retain), schema: WEBGPU_RESIDENT_BEAM_SELECTOR_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: String(reason), readback: 'cpu-fallback' });
+}
+
+function unavailableScoreInputs(reason, rows, retain) {
+  return Object.freeze({ ...cpuSelectResidentScoreInputs(rows, retain), schema: WEBGPU_RESIDENT_BEAM_SELECTOR_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: String(reason), readback: 'cpu-fallback' });
 }
 
 function packRows(rows) {
@@ -80,8 +164,28 @@ function packRows(rows) {
   return packed;
 }
 
-async function runGpu(device, rows, retain, signal, isCancelled) {
-  const paddedCount = nextPowerOfTwo(rows.length), rowBytes = paddedCount * 16, inputBytes = rows.length * 8;
+function packScoreInputs(rows) {
+  const packed = new ArrayBuffer(rows.length * 48), view = new DataView(packed);
+  rows.forEach((row, index) => {
+    const base = index * 48;
+    view.setFloat32(base, row.geometryScore, true);
+    view.setFloat32(base + 4, row.targetProgress, true);
+    view.setFloat32(base + 8, row.neighborCount, true);
+    view.setFloat32(base + 12, row.targetNeighborCount, true);
+    view.setFloat32(base + 16, row.coastBias, true);
+    view.setFloat32(base + 20, row.perimeter, true);
+    view.setFloat32(base + 24, row.gravityBias, true);
+    view.setFloat32(base + 28, row.gravityTension, true);
+    view.setFloat32(base + 32, row.inletBias, true);
+    view.setFloat32(base + 36, row.inletRisk, true);
+    view.setFloat32(base + 40, row.randomUnit, true);
+    view.setUint32(base + 44, row.flags, true);
+  });
+  return packed;
+}
+
+async function runGpu(device, rows, retain, signal, isCancelled, { scoreInputs = false } = {}) {
+  const paddedCount = nextPowerOfTwo(rows.length), rowBytes = paddedCount * 16, inputBytes = scoreInputs ? rows.length * 48 : rows.length * 8;
   const inputs = device.createBuffer({ size: Math.max(8, inputBytes), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   const rowsA = device.createBuffer({ size: rowBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
   const rowsB = device.createBuffer({ size: rowBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
@@ -90,9 +194,9 @@ async function runGpu(device, rows, retain, signal, isCancelled) {
   const checkCancelled = () => { if (signal?.aborted || isCancelled?.()) { const error = new Error('resident beam selection cancelled'); error.name = 'AbortError'; throw error; } };
   try {
     checkCancelled();
-    device.queue.writeBuffer(inputs, 0, packRows(rows));
+    device.queue.writeBuffer(inputs, 0, scoreInputs ? packScoreInputs(rows) : packRows(rows));
     device.queue.writeBuffer(params, 0, new Uint32Array([rows.length, paddedCount, 0, 0]));
-    const scoreModule = device.createShaderModule({ code: SCORE_SHADER }), scorePipeline = device.createComputePipeline({ layout: 'auto', compute: { module: scoreModule, entryPoint: 'main' } });
+    const scoreModule = device.createShaderModule({ code: scoreInputs ? SCORE_INPUT_SHADER : SCORE_SHADER }), scorePipeline = device.createComputePipeline({ layout: 'auto', compute: { module: scoreModule, entryPoint: 'main' } });
     let encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
     pass.setPipeline(scorePipeline); pass.setBindGroup(0, device.createBindGroup({ layout: scorePipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: inputs } }, { binding: 1, resource: { buffer: rowsA } }, { binding: 2, resource: { buffer: params } }] })); pass.dispatchWorkgroups(Math.ceil(paddedCount / RESIDENT_BEAM_WORKGROUP_SIZE)); pass.end(); device.queue.submit([encoder.finish()]);
     const sortModule = device.createShaderModule({ code: SORT_SHADER }), sortPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: sortModule, entryPoint: 'main' } });
@@ -126,7 +230,17 @@ export function createWebGpuResidentBeamSelector({ gpu = globalThis.navigator?.g
         return parity ? Object.freeze({ ...cpu, status: 'completed', backend: 'webgpu', parity: 'verified', readback: 'selected-indices', algorithm: 'resident-score-rank' }) : unavailable('oracle-parity-mismatch', normalized, retain);
       } catch (error) { deviceCache.reset(); if (error?.name === 'AbortError') return Object.freeze({ ...cpu, status: 'cancelled', backend: 'webgpu', parity: 'deferred', reason: 'resident-beam-selection-cancelled' }); return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalized, retain); }
     },
+    async selectScoreInputs(rows, retain, { signal, isCancelled } = {}) {
+      const normalized = normalizeScoreInputs(rows), cpu = cpuSelectResidentScoreInputs(normalized, retain), status = await availability();
+      if (status.status !== 'available') return unavailableScoreInputs(status.reason, normalized, retain);
+      try {
+        const device = await deviceCache.getDevice(), paddedCount = nextPowerOfTwo(normalized.length), maxRows = Math.floor((Number(device.limits?.maxStorageBufferBindingSize) || 0) / 16);
+        if (maxRows < paddedCount) return unavailableScoreInputs('resident-beam-storage-capacity', normalized, retain);
+        const indices = await runGpu(device, normalized, cpu.selectedCount, signal, isCancelled, { scoreInputs: true }), parity = JSON.stringify(indices) === JSON.stringify(cpu.indices);
+        return parity ? Object.freeze({ ...cpu, status: 'completed', backend: 'webgpu', parity: 'verified', readback: 'selected-indices', algorithm: 'resident-score-input-rank' }) : unavailableScoreInputs('oracle-parity-mismatch', normalized, retain);
+      } catch (error) { deviceCache.reset(); if (error?.name === 'AbortError') return Object.freeze({ ...cpu, status: 'cancelled', backend: 'webgpu', parity: 'deferred', reason: 'resident-score-rank-cancelled' }); return unavailableScoreInputs(`webgpu-execution-failed:${error?.message || String(error)}`, normalized, retain); }
+    },
   });
 }
 
-export { SCORE_SHADER as RESIDENT_BEAM_SCORE_SHADER, SORT_SHADER as RESIDENT_BEAM_SORT_SHADER };
+export { SCORE_SHADER as RESIDENT_BEAM_SCORE_SHADER, SCORE_INPUT_SHADER as RESIDENT_BEAM_SCORE_INPUT_SHADER, SORT_SHADER as RESIDENT_BEAM_SORT_SHADER };

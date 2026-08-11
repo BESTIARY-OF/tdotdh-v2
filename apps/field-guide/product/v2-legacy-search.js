@@ -794,16 +794,27 @@ async function rankFrontierOptions(entries, frontierRanker, onRank = () => {}) {
   return (await orderFrontierRows(entries, frontierRanker, onRank)).slice(0, BRANCH_LIMIT);
 }
 
-async function scoreFrontierCandidates(entries, frontierScorer, onScore = () => {}) {
-  if (!entries.length) return entries;
-  if (!frontierScorer?.score) { onScore({ status: 'fallback', backend: 'cpu-oracle', reason: 'frontier-scorer-unavailable', candidateCount: entries.length }); return entries; }
+async function scoreFrontierCandidates(entries, frontierScorer, onScore = () => {}, residentBeamSelector = null, onRank = () => {}, isCancelled = () => {}) {
+  if (!entries.length) return { entries, residentRanked: false };
+  if (residentBeamSelector?.selectScoreInputs && entries.every(entry => entry.scoreInput && typeof entry.scoreInput === 'object')) {
+    const result = await residentBeamSelector.selectScoreInputs(entries.map(entry => entry.scoreInput), Math.min(BRANCH_LIMIT, entries.length), { isCancelled });
+    if (result?.status === 'completed' && result.backend === 'webgpu' && result.parity === 'verified' && Array.isArray(result.indices)) {
+      const selected = result.indices.map(index => ({ entry: entries[index], score: result.scores?.[index] })).filter(row => row.entry);
+      onScore({ status: 'used', backend: result.backend, parity: result.parity, algorithm: result.algorithm, candidateCount: entries.length, selectedCount: selected.length, batch: 'beam', resident: true, readback: result.readback });
+      onRank({ status: 'used', backend: result.backend, parity: result.parity, algorithm: result.algorithm, candidateCount: entries.length, selectedCount: selected.length, batch: 'beam', resident: true, readback: result.readback });
+      return { entries: selected.map(({ entry, score }) => ({ ...entry, score })), residentRanked: true };
+    }
+    onScore({ status: result?.status === 'cancelled' ? 'cancelled' : 'fallback', backend: result?.backend || 'cpu-oracle', parity: result?.parity, algorithm: result?.algorithm, candidateCount: entries.length, selectedCount: result?.selectedCount || 0, resident: true, readback: result?.readback, reason: result?.reason || 'resident-score-rank-unavailable' });
+    if (result?.status === 'cancelled') return { entries: [], residentRanked: true };
+  }
+  if (!frontierScorer?.score) { onScore({ status: 'fallback', backend: 'cpu-oracle', reason: 'frontier-scorer-unavailable', candidateCount: entries.length }); return { entries, residentRanked: false }; }
   const result = await frontierScorer.score(entries.map(entry => entry.scoreInput));
   if (result?.status === 'completed' && result.parity === 'verified' && Array.isArray(result.scores) && result.scores.length === entries.length) {
     onScore({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, algorithm: result.algorithm, candidateCount: entries.length, batch: 'beam' });
-    return entries.map((entry, index) => ({ ...entry, score: result.scores[index] }));
+    return { entries: entries.map((entry, index) => ({ ...entry, score: result.scores[index] })), residentRanked: false };
   }
   onScore({ status: 'fallback', backend: 'cpu-oracle', parity: result?.parity, reason: result?.reason || 'frontier-scorer-unavailable', candidateCount: entries.length, batch: 'beam' });
-  return entries;
+  return { entries, residentRanked: false };
 }
 
 async function compactFrontierRows(entries, retain, frontierCompactor, onCompact = () => {}, residentBeamSelector = null, isCancelled = () => false) {
@@ -1248,8 +1259,8 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         const scoreInput = { geometryScore, targetProgress, targetActive: Boolean(targetFamily), novelty: Boolean(noveltyBonus), neighborCount: candidateMetrics.centroidNeighborCount, targetNeighborCount: targetNeighborCount == null ? 0 : targetNeighborCount, neighborActive: targetNeighborCount != null, hint, coastBias: Number(quality.coastBias) || 0, perimeter: candidateMetrics.perimeter, gravityBias: Number(quality.gravityBias) || 0, gravityTension: candidateMetrics.gravityTension, inletBias: Number(quality.inletBias) || 0, inletRisk: candidateMetrics.inletRisk, randomUnit: random(), flags: (targetFamily ? 1 : 0) | (noveltyBonus ? 2 : 0) | (targetNeighborCount != null ? 4 : 0) | (hint ? 8 : 0) };
         return { piece, candidate, gpuState, metrics: candidateMetrics, score: cpuScoreFrontierCandidate(scoreInput), scoreInput, nextBounds, hintMatches };
       }).filter(Boolean);
-      const scoredCandidates = await scoreFrontierCandidates(rankedCandidates, frontierScorer, receipt => { frontierScoreReceipt = receipt; });
-      const ranked = await rankFrontierOptions(scoredCandidates, frontierRanker, receipt => { frontierRankerReceipt = receipt; });
+      const scoredCandidates = await scoreFrontierCandidates(rankedCandidates, frontierScorer, receipt => { frontierScoreReceipt = receipt; }, residentBeamSelector, receipt => { frontierRankerReceipt = receipt; }, isCancelled);
+      const ranked = scoredCandidates.residentRanked ? scoredCandidates.entries : await rankFrontierOptions(scoredCandidates.entries, frontierRanker, receipt => { frontierRankerReceipt = receipt; });
       const deduplicated = await deduplicateRankedOptions(ranked, state);
       for (const option of deduplicated) {
         const placements = [...state.placements, option.candidate], metrics = option.metrics, field = new Set(state.field); option.candidate.cells.forEach(c => field.add(key(c.x, c.y)));
