@@ -230,6 +230,16 @@ function nextCapacity(required) {
   return capacity;
 }
 
+function cancellationError() {
+  const error = new Error('frontier target generation cancelled');
+  error.name = 'AbortError';
+  return error;
+}
+
+function assertNotCancelled(isCancelled) {
+  if (typeof isCancelled === 'function' && isCancelled()) throw cancellationError();
+}
+
 function createPersistentGpuTargetRunner(device, grid, shaderSource) {
   const usage = globalThis.GPUBufferUsage, mapMode = globalThis.GPUMapMode;
   let resources = null, retiredResources = [], dispatchCount = 0;
@@ -277,14 +287,18 @@ function createPersistentGpuTargetRunner(device, grid, shaderSource) {
   };
   return Object.freeze({
     reset: destroy,
-    async run(normalized, { readback = true } = {}) {
+    async run(normalized, { readback = true, isCancelled = null } = {}) {
+      assertNotCancelled(isCancelled);
       const current = ensure(normalized), { resources, layout } = current, { buffers } = resources;
       device.queue.writeBuffer(buffers.targets, 0, layout.targetValues); device.queue.writeBuffer(buffers.pieces, 0, layout.pieceValues); device.queue.writeBuffer(buffers.masks, 0, layout.fieldMasks); device.queue.writeBuffer(buffers.metas, 0, layout.metaValues); device.queue.writeBuffer(buffers.params, 0, new Int32Array([layout.itemCount, layout.candidateCount, grid.width, grid.height, grid.originX, grid.originY, 0, 0]));
+      assertNotCancelled(isCancelled);
       const originBytes = Math.max(4, normalized.candidateCount * 2 * 4), countBytes = Math.max(4, normalized.candidateCount * 4);
       const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(resources.pipeline); pass.setBindGroup(0, resources.bindGroup); pass.dispatchWorkgroups(Math.ceil(normalized.candidateCount / 64)); pass.end(); encoder.copyBufferToBuffer(buffers.origins, 0, buffers.originsReadback, 0, originBytes); encoder.copyBufferToBuffer(buffers.validity, 0, buffers.validityReadback, 0, countBytes); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
+      assertNotCancelled(isCancelled);
       let items = null;
       if (readback) {
         await buffers.originsReadback.mapAsync(mapMode.READ); const rawOrigins = Array.from(new Int32Array(buffers.originsReadback.getMappedRange().slice(0, normalized.candidateCount * 2 * 4))); buffers.originsReadback.unmap(); await buffers.validityReadback.mapAsync(mapMode.READ); const validity = Array.from(new Uint32Array(buffers.validityReadback.getMappedRange().slice(0, normalized.candidateCount * 4))); buffers.validityReadback.unmap();
+        assertNotCancelled(isCancelled);
         items = normalized.items.map(item => { const start = item.candidateOffset, origins = Array.from({ length: item.candidateCount }, (_, index) => ({ x: rawOrigins[(start + index) * 2], y: rawOrigins[(start + index) * 2 + 1] })), itemValidity = validity.slice(start, start + item.candidateCount); return { pieceId: item.pieceId, targetCount: item.targetCells.length, pieceCount: item.pieceCells.length, origins, validity: itemValidity, candidateCount: item.candidateCount }; });
       }
       dispatchCount += 1;
@@ -315,29 +329,31 @@ export function createWebGpuFrontierTargetGenerator({ gpu = globalThis.navigator
         return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'verified', targetCount: result.targetCount, pieceCount: result.pieceCount, origins: result.origins, validity: result.validity, acceptedIndices: result.validity.flatMap((value, index) => value ? [index] : []), candidateCount: result.candidateCount, ...(resident?.persistent ? { persistent: true, dispatch: resident.dispatch, dispatchCount: resident.dispatchCount, residentHandle: resident.residentHandle, bufferCapacity: resident.bufferCapacity } : {}) });
       } catch (error) { persistentRunner?.reset(); persistentRunner = null; deviceCache.reset(); return Object.freeze({ ...status, status: 'unavailable', reason: `webgpu-execution-failed:${error?.message || String(error)}`, targetCount: cpu.items[0].targetCount, pieceCount: cpu.items[0].pieceCount, origins: cpu.items[0].origins, validity: cpu.items[0].validity, acceptedIndices: cpu.items[0].acceptedIndices, candidateCount: cpu.candidateCount }); }
     },
-    async generateBatch(inputs) {
+    async generateBatch(inputs, { isCancelled = null } = {}) {
       const normalized = normalizeBatchInput(inputs, normalizedGrid), cpu = cpuGenerateFrontierTargetBatch(inputs, normalizedGrid), status = await availability();
+      if (typeof isCancelled === 'function' && isCancelled()) return Object.freeze({ ...status, status: 'cancelled', backend: 'webgpu', parity: 'deferred', reason: 'frontier-target-generation-cancelled', candidateCount: normalized.candidateCount, items: cpu.items, readback: 'deferred' });
       if (status.status !== 'available') return Object.freeze({ ...status, candidateCount: normalized.candidateCount, items: cpu.items });
       try {
         const device = await deviceCache.getDevice();
         if (persistent && !persistentRunner) persistentRunner = createPersistentGpuTargetRunner(device, normalizedGrid, shaderSource);
-        const resident = persistentRunner ? await persistentRunner.run(normalized) : null;
+        const resident = persistentRunner ? await persistentRunner.run(normalized, { isCancelled }) : null;
         const result = resident?.items || await runGpuBatch(device, normalized, normalizedGrid, shaderSource), parity = result.length === cpu.items.length && result.every((item, index) => JSON.stringify(item.origins) === JSON.stringify(cpu.items[index].origins) && JSON.stringify(item.validity) === JSON.stringify(cpu.items[index].validity));
         if (!parity) return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'rejected', backend: 'webgpu', reason: parityMismatchReason(result, cpu.items), candidateCount: normalized.candidateCount, items: cpu.items });
         return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'verified', batch: 'verified', candidateCount: normalized.candidateCount, items: result, ...(resident?.persistent ? { persistent: true, dispatch: resident.dispatch, dispatchCount: resident.dispatchCount, residentHandle: resident.residentHandle, bufferCapacity: resident.bufferCapacity } : {}) });
-      } catch (error) { persistentRunner?.reset(); persistentRunner = null; deviceCache.reset(); return Object.freeze({ ...status, status: 'unavailable', reason: `webgpu-batch-execution-failed:${error?.message || String(error)}`, candidateCount: normalized.candidateCount, items: cpu.items }); }
-    },
-    async generateBatchResident(inputs) {
+      } catch (error) { if (error?.name === 'AbortError' || isCancelled?.()) return Object.freeze({ ...status, status: 'cancelled', backend: 'webgpu', parity: 'deferred', reason: 'frontier-target-generation-cancelled', candidateCount: normalized.candidateCount, items: cpu.items, readback: 'deferred' }); persistentRunner?.reset(); persistentRunner = null; deviceCache.reset(); return Object.freeze({ ...status, status: 'unavailable', reason: `webgpu-batch-execution-failed:${error?.message || String(error)}`, candidateCount: normalized.candidateCount, items: cpu.items }); }
+      },
+    async generateBatchResident(inputs, { isCancelled = null } = {}) {
       const normalized = normalizeBatchInput(inputs, normalizedGrid), cpu = cpuGenerateFrontierTargetBatch(inputs, normalizedGrid), status = await availability();
+      if (typeof isCancelled === 'function' && isCancelled()) return Object.freeze({ ...status, status: 'cancelled', backend: 'webgpu', parity: 'deferred', reason: 'frontier-target-generation-cancelled', candidateCount: normalized.candidateCount, items: cpu.items, readback: 'deferred' });
       if (status.status !== 'available') return Object.freeze({ ...status, candidateCount: normalized.candidateCount, items: cpu.items, readback: 'cpu-fallback' });
       try {
         const device = await deviceCache.getDevice();
         if (persistent && !persistentRunner) persistentRunner = createPersistentGpuTargetRunner(device, normalizedGrid, shaderSource);
         if (!persistentRunner) return Object.freeze({ ...status, status: 'unavailable', reason: 'resident-target-runner-unavailable', candidateCount: normalized.candidateCount, items: cpu.items, readback: 'cpu-fallback' });
-        const resident = await persistentRunner.run(normalized, { readback: false });
+        const resident = await persistentRunner.run(normalized, { readback: false, isCancelled });
         return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'deferred', batch: 'resident', candidateCount: normalized.candidateCount, items: cpu.items, readback: 'deferred', persistent: true, dispatch: resident.dispatch, dispatchCount: resident.dispatchCount, residentHandle: resident.residentHandle, bufferCapacity: resident.bufferCapacity });
-      } catch (error) { persistentRunner?.reset(); persistentRunner = null; deviceCache.reset(); return Object.freeze({ ...status, status: 'unavailable', reason: `webgpu-resident-batch-execution-failed:${error?.message || String(error)}`, candidateCount: normalized.candidateCount, items: cpu.items, readback: 'cpu-fallback' }); }
-    },
+      } catch (error) { if (error?.name === 'AbortError' || isCancelled?.()) return Object.freeze({ ...status, status: 'cancelled', backend: 'webgpu', parity: 'deferred', reason: 'frontier-target-generation-cancelled', candidateCount: normalized.candidateCount, items: cpu.items, readback: 'deferred' }); persistentRunner?.reset(); persistentRunner = null; deviceCache.reset(); return Object.freeze({ ...status, status: 'unavailable', reason: `webgpu-resident-batch-execution-failed:${error?.message || String(error)}`, candidateCount: normalized.candidateCount, items: cpu.items, readback: 'cpu-fallback' }); }
+      },
   });
 }
 

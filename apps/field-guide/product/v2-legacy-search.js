@@ -219,7 +219,7 @@ async function generateFrontierTranslationsAcrossBeam(plans, frontierGenerator, 
   onGeneration({ status: items.length === inputCount ? 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? parity : 'oracle', reason: items.length === inputCount ? undefined : (fallbackReason || 'frontier-generator-batch-fallback'), candidateCount: totalCandidateCount, batches, batch: 'beam', candidateRecords: { backend: recordBackend, parity: recordParity, inputCount: recordInputCount, outputCount: recordOutputCount, ...(recordPersistent ? { persistent: true, dispatch: 'webgpu-frontier-record-compaction-resident', dispatchCount: recordDispatchCount, bufferCapacity: recordBufferCapacity } : {}) } });
   return generated;
 }
-async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTargetGenerator, positionLocks, seedOrigin, onGeneration = () => {}, availabilityStatus = null, frontierCandidateRecords = null, materializeCandidates = true) {
+async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTargetGenerator, positionLocks, seedOrigin, onGeneration = () => {}, availabilityStatus = null, frontierCandidateRecords = null, materializeCandidates = true, isCancelled = () => false) {
   const generated = plans.map(() => new Map());
   if (!plans.length) return generated;
   if (!frontierTargetGenerator?.generateBatch) {
@@ -258,8 +258,8 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
   let totalCandidateCount = 0, batches = 0, backend = 'compute-shader', generationParity = 'verified', fallbackReason = null, recordBackend = 'cpu-oracle', recordParity = 'oracle', recordInputCount = 0, recordOutputCount = 0, persistent = false, persistentDispatchCount = 0, persistentBufferCapacity = null, recordPersistent = false, recordDispatchCount = 0, recordBufferCapacity = null;
   for (const chunk of chunks) {
     const result = !materializeCandidates && typeof frontierTargetGenerator.generateBatchResident === 'function'
-      ? await frontierTargetGenerator.generateBatchResident(chunk.inputs)
-      : await frontierTargetGenerator.generateBatch(chunk.inputs);
+      ? await frontierTargetGenerator.generateBatchResident(chunk.inputs, { isCancelled })
+      : await frontierTargetGenerator.generateBatch(chunk.inputs, { isCancelled });
     if (result?.backend) backend = result.backend;
     if (result?.parity === 'deferred') generationParity = 'deferred';
     if (result?.reason) fallbackReason = result.reason;
@@ -1116,7 +1116,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     for (let index = beamPlans.length - 1; index >= 0; index--) if (!beamPlans[index].targetPool?.length) beamPlans.splice(index, 1);
     const useTargetGeneratedFrontier = frontierTargetGeneratorStatus?.status === 'available';
     const generatedByTargetBeam = useTargetGeneratedFrontier
-      ? await generateFrontierTargetTranslationsAcrossBeam(beamPlans, frontierTargetGenerator, positionLocks, seedOrigin, receipt => { frontierTargetGenerationReceipt = receipt; }, frontierTargetGeneratorStatus, frontierCandidateRecords, navigationAvailability?.status !== 'available')
+      ? await generateFrontierTargetTranslationsAcrossBeam(beamPlans, frontierTargetGenerator, positionLocks, seedOrigin, receipt => { frontierTargetGenerationReceipt = receipt; }, frontierTargetGeneratorStatus, frontierCandidateRecords, navigationAvailability?.status !== 'available', isCancelled)
       : null;
     const useGeneratedFrontier = !useTargetGeneratedFrontier && frontierGeneratorStatus?.status === 'available';
     const generatedByBeam = useGeneratedFrontier

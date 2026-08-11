@@ -30,6 +30,10 @@ const residentFallback = await adapter.generateBatchResident([{ pieceId: 'a', ..
 assert.equal(residentFallback.status, 'unavailable');
 assert.equal(residentFallback.readback, 'cpu-fallback');
 assert.deepEqual(residentFallback.items[0].validity, single.validity);
+const cancelledBeforeDispatch = await adapter.generateBatchResident([{ pieceId: 'a', ...input }], { isCancelled: () => true });
+assert.equal(cancelledBeforeDispatch.status, 'cancelled');
+assert.equal(cancelledBeforeDispatch.parity, 'deferred');
+assert.equal(cancelledBeforeDispatch.readback, 'deferred');
 
 {
   const previousBufferUsage = globalThis.GPUBufferUsage, previousMapMode = globalThis.GPUMapMode;
