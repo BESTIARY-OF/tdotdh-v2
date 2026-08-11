@@ -158,8 +158,51 @@ async function runGpu(device, inputs, grid, shaderSource) {
   } finally { for (const buffer of [parent, centroid, frontier, ring, params, frontierReadback, ringReadback]) buffer.destroy(); }
 }
 
+function nextCapacity(required) {
+  let capacity = 1;
+  while (capacity < required) capacity *= 2;
+  return capacity;
+}
+
+function createPersistentGpuRunner(device, grid, shaderSource) {
+  let resources = null;
+  const destroy = bundle => { if (bundle) Object.values(bundle.buffers).forEach(buffer => buffer.destroy()); };
+  const reset = () => { destroy(resources); resources = null; };
+  const ensure = count => {
+    if (resources && resources.stateCapacity >= count) return resources;
+    destroy(resources);
+    const stateCapacity = nextCapacity(Math.max(1, count)), maskBytes = Math.max(4, stateCapacity * grid.wordCount * 4), flagBytes = Math.max(4, stateCapacity * grid.cellCount * 4);
+    const buffers = {
+      parent: device.createBuffer({ size: maskBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+      centroid: device.createBuffer({ size: maskBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+      frontier: device.createBuffer({ size: flagBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
+      ring: device.createBuffer({ size: flagBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
+      params: device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }),
+      frontierReadback: device.createBuffer({ size: flagBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
+      ringReadback: device.createBuffer({ size: flagBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
+    };
+    const module = device.createShaderModule({ code: shaderSource }), pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } }), bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: { buffer: buffers.parent } }, { binding: 1, resource: { buffer: buffers.centroid } },
+      { binding: 2, resource: { buffer: buffers.frontier } }, { binding: 3, resource: { buffer: buffers.ring } },
+      { binding: 4, resource: { buffer: buffers.params } },
+    ] });
+    resources = { stateCapacity, buffers, pipeline, bindGroup };
+    return resources;
+  };
+  return {
+    async run(inputs) {
+      const current = ensure(inputs.length), { buffers, pipeline, bindGroup } = current, maskValues = flattenMasks(inputs, 'fieldCells', grid), centroidValues = flattenMasks(inputs, 'centroidCells', grid), maskBytes = inputs.length * grid.wordCount * 4, flagBytes = inputs.length * grid.cellCount * 4;
+      device.queue.writeBuffer(buffers.parent, 0, maskValues); device.queue.writeBuffer(buffers.centroid, 0, centroidValues); device.queue.writeBuffer(buffers.params, 0, new Int32Array([inputs.length, grid.cellCount, grid.wordCount, grid.width, grid.height, grid.originX, grid.originY, 0]));
+      const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(inputs.length * grid.cellCount / FRONTIER_TARGET_POOL_WORKGROUP_SIZE)); pass.end(); encoder.copyBufferToBuffer(buffers.frontier, 0, buffers.frontierReadback, 0, flagBytes); encoder.copyBufferToBuffer(buffers.ring, 0, buffers.ringReadback, 0, flagBytes); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
+      await buffers.frontierReadback.mapAsync(GPUMapMode.READ); const frontierFlags = Array.from(new Uint32Array(buffers.frontierReadback.getMappedRange().slice(0, flagBytes))); buffers.frontierReadback.unmap(); await buffers.ringReadback.mapAsync(GPUMapMode.READ); const ringFlags = Array.from(new Uint32Array(buffers.ringReadback.getMappedRange().slice(0, flagBytes))); buffers.ringReadback.unmap();
+      return { frontierFlags, ringFlags };
+    },
+    reset,
+  };
+}
+
 export function createWebGpuFrontierTargetPool({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxComputeWorkgroupSizeX: FRONTIER_TARGET_POOL_WORKGROUP_SIZE }, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
-  const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits }; let availabilityPromise = null;
+  const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits }; let availabilityPromise = null, persistentRunner = null;
   const availability = async () => {
     if (!availabilityPromise) availabilityPromise = probeWebGpuCapabilities({ gpu, requiredLimits: limits }).then(probe => probe.adapterAvailable && probe.requiredLimitsSatisfied ? Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_POOL_SCHEMA, status: 'available', backend: 'webgpu' }) : Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_POOL_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: probe.adapterAvailable ? 'webgpu-required-limits-unsatisfied' : 'webgpu-adapter-unavailable' }));
     return availabilityPromise;
@@ -172,10 +215,11 @@ export function createWebGpuFrontierTargetPool({ gpu = globalThis.navigator?.gpu
       try {
         const device = await deviceCache.getDevice(), maxBinding = Number(device.limits?.maxStorageBufferBindingSize) || 0, requiredBytes = Math.max(normalized.length * normalizedGrid.wordCount * 4, normalized.length * normalizedGrid.cellCount * 4);
         if (maxBinding < requiredBytes) return unavailable('frontier-target-pool-storage-capacity', normalizedGrid, cpu);
-        const result = await runGpu(device, normalized, normalizedGrid, shaderSource), items = normalized.map((input, index) => ({ schema: WEBGPU_FRONTIER_TARGET_POOL_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'verified', stateId: input.stateId, frontierCells: cellsFromFlags(result.frontierFlags, index, normalizedGrid), ringCells: cellsFromFlags(result.ringFlags, index, normalizedGrid), cellCount: normalizedGrid.cellCount }));
+        if (!persistentRunner) persistentRunner = createPersistentGpuRunner(device, normalizedGrid, shaderSource);
+        const result = await persistentRunner.run(normalized), items = normalized.map((input, index) => ({ schema: WEBGPU_FRONTIER_TARGET_POOL_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'verified', stateId: input.stateId, frontierCells: cellsFromFlags(result.frontierFlags, index, normalizedGrid), ringCells: cellsFromFlags(result.ringFlags, index, normalizedGrid), cellCount: normalizedGrid.cellCount }));
         const parity = items.every((item, index) => JSON.stringify(item.frontierCells) === JSON.stringify(cpu.items[index].frontierCells) && JSON.stringify(item.ringCells) === JSON.stringify(cpu.items[index].ringCells));
         return parity ? Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_POOL_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'verified', cellCount: normalizedGrid.cellCount, items }) : unavailable('oracle-parity-mismatch', normalizedGrid, cpu);
-      } catch (error) { deviceCache.reset(); return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid, cpu); }
+      } catch (error) { persistentRunner?.reset(); persistentRunner = null; deviceCache.reset(); return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid, cpu); }
     },
   });
 }
