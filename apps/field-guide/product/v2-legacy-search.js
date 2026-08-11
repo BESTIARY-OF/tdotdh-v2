@@ -276,31 +276,38 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
       if (directResidentNavigation) {
         const firstItem = result.items?.[0];
         residentItemShape = firstItem ? { keys: Object.keys(firstItem), originCount: Array.isArray(firstItem.origins) ? firstItem.origins.length : null, validityCount: firstItem.validity?.length ?? null, pieceCount: firstItem.pieceCount ?? null, targetCount: firstItem.targetCount ?? null } : null;
-        const expectedRecords = [];
-        if (verifyResidentNavigation) result.items.forEach((item, itemOrdinal) => (item.origins || []).forEach((origin, index) => {
-          if (item.validity?.[index] === 1 && origin && Number.isSafeInteger(origin.x) && Number.isSafeInteger(origin.y)) { const pieceCount = Number(item.pieceCount) || 1; expectedRecords.push({ pieceId: itemOrdinal, targetOrdinal: Math.floor(index / pieceCount), originX: origin.x, originY: origin.y, inputOrdinal: index % pieceCount }); }
-        }));
-        const compacted = frontierCandidateRecords?.compactResident ? await frontierCandidateRecords.compactResident(result.residentHandle, verifyResidentNavigation ? { expectedRecords } : {}) : null;
-        const cpuCandidateKeys = verifyResidentNavigation ? chunk.refs.flatMap((ref, itemOrdinal) => ref.plan.targetPool.flatMap((target, targetOrdinal) => candidateTranslationsForTarget(ref.piece, ref.plan.state.field, ref.plan.state.bounds, target, positionLocks, seedOrigin).map(candidate => `${itemOrdinal}:${targetOrdinal}:${candidate.origin.x}:${candidate.origin.y}`))) : null;
-        const residentCandidateKeys = verifyResidentNavigation && compacted?.records ? compacted.records.map(record => `${record.pieceId}:${record.targetOrdinal}:${record.originX}:${record.originY}`) : null;
-        const residentCandidateParity = !verifyResidentNavigation || JSON.stringify(residentCandidateKeys) === JSON.stringify(cpuCandidateKeys);
-        if (compacted?.status === 'completed' && compacted.residentHandle && (compacted.parity === 'verified' || compacted.parity === 'deferred') && residentCandidateParity) {
-          recordBackend = compacted.backend || 'webgpu'; recordParity = compacted.parity; recordPersistent = Boolean(compacted.persistent); recordDispatchCount = compacted.dispatchCount; recordBufferCapacity = compacted.bufferCapacity;
-          const residentHandle = Object.freeze({ ...compacted.residentHandle, itemMetadata: Object.freeze(result.items.map(item => Object.freeze({ pieceId: item.pieceId, pieceCount: Number(item.pieceCount) || 0, targetCount: Number(item.targetCount) || 0 }))) });
-          const expectedRows = verifyResidentNavigation ? (compacted.records || []).flatMap(record => {
-            const ref = chunk.refs[record.pieceId], target = ref?.plan.targetPool[record.targetOrdinal];
-            const item = result.items[record.pieceId], pieceCount = Number(item?.pieceCount) || 1;
-            return ref && target ? [{ planIndex: ref.planIndex, targetOrdinal: record.targetOrdinal, pieceId: ref.piece.id, candidateIndex: record.targetOrdinal * pieceCount + record.inputOrdinal, originX: record.originX, originY: record.originY, targetX: target.x, targetY: target.y }] : [];
-          }) : [];
-          residentNavigationEntries.push({ residentHandle, piecePlans: chunk.refs.map(ref => ref.planIndex), expectedRows });
-          if (verifyResidentNavigation) {
+        if (!verifyResidentNavigation) {
+          // The target-generator record layout is already accepted by the
+          // resident navigation scheduler. Avoid a second GPU compaction pass
+          // unless diagnostic parity explicitly asks for a CPU replay.
+          recordBackend = 'webgpu'; recordParity = 'deferred'; recordPersistent = true; recordDispatchCount = result.dispatchCount; recordBufferCapacity = result.bufferCapacity;
+          const residentHandle = Object.freeze({ ...result.residentHandle, itemMetadata: Object.freeze(result.items.map(item => Object.freeze({ pieceId: item.pieceId, pieceCount: Number(item.pieceCount) || 0, targetCount: Number(item.targetCount) || 0 }))) });
+          residentNavigationEntries.push({ residentHandle, piecePlans: chunk.refs.map(ref => ref.planIndex), expectedRows: [] });
+        } else {
+          const expectedRecords = [];
+          result.items.forEach((item, itemOrdinal) => (item.origins || []).forEach((origin, index) => {
+            if (item.validity?.[index] === 1 && origin && Number.isSafeInteger(origin.x) && Number.isSafeInteger(origin.y)) { const pieceCount = Number(item.pieceCount) || 1; expectedRecords.push({ pieceId: itemOrdinal, targetOrdinal: Math.floor(index / pieceCount), originX: origin.x, originY: origin.y, inputOrdinal: index % pieceCount }); }
+          }));
+          const compacted = frontierCandidateRecords?.compactResident ? await frontierCandidateRecords.compactResident(result.residentHandle, { expectedRecords }) : null;
+          const cpuCandidateKeys = chunk.refs.flatMap((ref, itemOrdinal) => ref.plan.targetPool.flatMap((target, targetOrdinal) => candidateTranslationsForTarget(ref.piece, ref.plan.state.field, ref.plan.state.bounds, target, positionLocks, seedOrigin).map(candidate => `${itemOrdinal}:${targetOrdinal}:${candidate.origin.x}:${candidate.origin.y}`)));
+          const residentCandidateKeys = compacted?.records ? compacted.records.map(record => `${record.pieceId}:${record.targetOrdinal}:${record.originX}:${record.originY}`) : null;
+          const residentCandidateParity = JSON.stringify(residentCandidateKeys) === JSON.stringify(cpuCandidateKeys);
+          if (compacted?.status === 'completed' && compacted.residentHandle && (compacted.parity === 'verified' || compacted.parity === 'deferred') && residentCandidateParity) {
+            recordBackend = compacted.backend || 'webgpu'; recordParity = compacted.parity; recordPersistent = Boolean(compacted.persistent); recordDispatchCount = compacted.dispatchCount; recordBufferCapacity = compacted.bufferCapacity;
+            const residentHandle = Object.freeze({ ...compacted.residentHandle, itemMetadata: Object.freeze(result.items.map(item => Object.freeze({ pieceId: item.pieceId, pieceCount: Number(item.pieceCount) || 0, targetCount: Number(item.targetCount) || 0 }))) });
+            const expectedRows = (compacted.records || []).flatMap(record => {
+              const ref = chunk.refs[record.pieceId], target = ref?.plan.targetPool[record.targetOrdinal];
+              const item = result.items[record.pieceId], pieceCount = Number(item?.pieceCount) || 1;
+              return ref && target ? [{ planIndex: ref.planIndex, targetOrdinal: record.targetOrdinal, pieceId: ref.piece.id, candidateIndex: record.targetOrdinal * pieceCount + record.inputOrdinal, originX: record.originX, originY: record.originY, targetX: target.x, targetY: target.y }] : [];
+            });
+            residentNavigationEntries.push({ residentHandle, piecePlans: chunk.refs.map(ref => ref.planIndex), expectedRows });
             residentRecordsByItem = new Map();
             for (const record of compacted.records || []) { const records = residentRecordsByItem.get(record.pieceId) || []; records.push(record); residentRecordsByItem.set(record.pieceId, records); }
+          } else {
+            directResidentNavigation = false;
+            recordReason = compacted?.reason || (residentCandidateParity ? 'resident-record-compaction-fallback' : 'resident-record-candidate-parity-mismatch');
+            fallbackReason = recordReason;
           }
-        } else {
-          directResidentNavigation = false;
-          recordReason = compacted?.reason || (residentCandidateParity ? 'resident-record-compaction-fallback' : 'resident-record-candidate-parity-mismatch');
-          fallbackReason = recordReason;
         }
       } else if (result.residentHandle && frontierCandidateRecords?.compactResident && !materializeCandidates) {
         const expectedRecords = [];
