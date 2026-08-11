@@ -174,6 +174,23 @@ function createPersistentGpuCandidateRecordRunner(device, shaderSource) {
     resources = { buffers, markPipeline, markGroup, scanPipeline, scanGroup, compactPipeline, compactGroup, recordCapacity, groupCapacity };
     return resources;
   };
+  const runResident = async handle => {
+    if (!handle || handle.schema !== 'tdotdh.webgpu-frontier-target-records.v0' || handle.device !== device) throw new TypeError('resident target-record handle is incompatible with this device');
+    const recordCount = Number(handle.recordCount);
+    if (!Number.isSafeInteger(recordCount) || recordCount < 0 || recordCount > MAX_FRONTIER_CANDIDATE_RECORDS) throw new RangeError('resident target-record handle has an invalid recordCount');
+    if (!recordCount) return { records: [], persistent: true, dispatch: 'webgpu-frontier-record-compaction-resident', dispatchCount, bufferCapacity: { records: 1, groups: 1 } };
+    const current = ensure(recordCount), { buffers } = current, groupCount = Math.ceil(recordCount / 64), groupBytes = Math.max(4, groupCount * 4);
+    const scanGroup = device.createBindGroup({ layout: current.scanPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: handle.validityBuffer } }, { binding: 1, resource: { buffer: buffers.prefixes } }, { binding: 2, resource: { buffer: buffers.groupTotals } }, { binding: 3, resource: { buffer: buffers.scanParams } }] });
+    const compactGroup = device.createBindGroup({ layout: current.compactPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: handle.recordsBuffer } }, { binding: 1, resource: { buffer: handle.validityBuffer } }, { binding: 2, resource: { buffer: buffers.prefixes } }, { binding: 3, resource: { buffer: buffers.groupOffsets } }, { binding: 4, resource: { buffer: buffers.outputRecords } }, { binding: 5, resource: { buffer: buffers.compactParams } }] });
+    device.queue.writeBuffer(buffers.scanParams, 0, new Uint32Array([recordCount, groupCount, 0, 0]));
+    const scanEncoder = device.createCommandEncoder(), scanPass = scanEncoder.beginComputePass(); scanPass.setPipeline(current.scanPipeline); scanPass.setBindGroup(0, scanGroup); scanPass.dispatchWorkgroups(groupCount); scanPass.end(); scanEncoder.copyBufferToBuffer(buffers.groupTotals, 0, buffers.groupReadback, 0, groupBytes); device.queue.submit([scanEncoder.finish()]); await device.queue.onSubmittedWorkDone();
+    await buffers.groupReadback.mapAsync(mapMode.READ); const groupTotals = Array.from(new Uint32Array(buffers.groupReadback.getMappedRange().slice(0, groupBytes))); buffers.groupReadback.unmap(); const groupOffsets = new Uint32Array(groupCount); let outputCount = 0; for (let index = 0; index < groupTotals.length; index += 1) { groupOffsets[index] = outputCount; outputCount += groupTotals[index]; }
+    device.queue.writeBuffer(buffers.groupOffsets, 0, groupOffsets); device.queue.writeBuffer(buffers.compactParams, 0, new Uint32Array([recordCount, 0, 0, 0]));
+    const compactEncoder = device.createCommandEncoder(), compactPass = compactEncoder.beginComputePass(); compactPass.setPipeline(current.compactPipeline); compactPass.setBindGroup(0, compactGroup); compactPass.dispatchWorkgroups(groupCount); compactPass.end(); compactEncoder.copyBufferToBuffer(buffers.outputRecords, 0, buffers.outputReadback, 0, Math.max(4, outputCount * FRONTIER_CANDIDATE_RECORD_STRIDE * 4)); device.queue.submit([compactEncoder.finish()]); await device.queue.onSubmittedWorkDone();
+    const compacted = []; if (outputCount) { await buffers.outputReadback.mapAsync(mapMode.READ); const values = new Int32Array(buffers.outputReadback.getMappedRange().slice(0, outputCount * FRONTIER_CANDIDATE_RECORD_STRIDE * 4)); buffers.outputReadback.unmap(); for (let index = 0; index < outputCount; index += 1) { const base = index * FRONTIER_CANDIDATE_RECORD_STRIDE; compacted.push({ pieceId: values[base] >>> 0, targetOrdinal: values[base + 1] >>> 0, originX: values[base + 2], originY: values[base + 3], inputOrdinal: values[base + 4] >>> 0 }); } }
+    dispatchCount += 1;
+    return { records: compacted, persistent: true, dispatch: 'webgpu-frontier-record-compaction-resident', dispatchCount, bufferCapacity: { records: current.recordCapacity, groups: current.groupCapacity } };
+  };
   return Object.freeze({
     reset: destroy,
     async run(records) {
@@ -190,6 +207,7 @@ function createPersistentGpuCandidateRecordRunner(device, shaderSource) {
       dispatchCount += 1;
       return { records: compacted, persistent: true, dispatch: 'webgpu-frontier-record-compaction-resident', dispatchCount, bufferCapacity: { records: current.recordCapacity, groups: current.groupCapacity } };
     },
+    compactResident: runResident,
   });
 }
 function unavailable(reason, cpu) { return Object.freeze({ ...cpu, schema: WEBGPU_FRONTIER_CANDIDATE_RECORDS_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: String(reason) }); }
@@ -211,6 +229,18 @@ export function createWebGpuFrontierCandidateRecords({ gpu = globalThis.navigato
         if (JSON.stringify(gpuRecords) !== JSON.stringify(cpu.records)) return unavailable('oracle-parity-mismatch', cpu);
         return Object.freeze({ ...cpu, status: 'completed', backend: 'webgpu', parity: 'verified', compaction: 'gpu-stable-prefix-scan', records: Object.freeze(gpuRecords), ...(resident?.persistent ? { persistent: true, dispatch: resident.dispatch, dispatchCount: resident.dispatchCount, bufferCapacity: resident.bufferCapacity } : {}) });
       } catch (error) { persistentRunner?.reset(); persistentRunner = null; deviceCache.reset(); return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, cpu); }
+    },
+    async compactResident(handle, { expectedRecords = null } = {}) {
+      const cpu = expectedRecords ? cpuCompactFrontierCandidateRecords(expectedRecords) : cpuCompactFrontierCandidateRecords([]), status = await availability();
+      if (status.status !== 'available') return unavailable(status.reason, cpu);
+      try {
+        const device = await deviceCache.getDevice();
+        if (persistent && !persistentRunner) persistentRunner = createPersistentGpuCandidateRecordRunner(device, shaderSource);
+        if (!persistentRunner) throw new Error('resident-compaction-requires-persistent-runner');
+        const resident = await persistentRunner.compactResident(handle), parity = expectedRecords ? JSON.stringify(resident.records) === JSON.stringify(cpu.records) : null;
+        if (parity === false) return Object.freeze({ ...cpu, status: 'rejected', backend: 'webgpu', reason: 'oracle-parity-mismatch', compaction: 'gpu-resident-stable-prefix-scan' });
+        return Object.freeze({ ...cpu, status: 'completed', backend: 'webgpu', parity: parity === true ? 'verified' : 'deferred', compaction: 'gpu-resident-stable-prefix-scan', records: Object.freeze(resident.records), ...(resident.persistent ? { persistent: true, dispatch: resident.dispatch, dispatchCount: resident.dispatchCount, bufferCapacity: resident.bufferCapacity } : {}) });
+      } catch (error) { persistentRunner?.reset(); persistentRunner = null; deviceCache.reset(); return unavailable(`webgpu-resident-execution-failed:${error?.message || String(error)}`, cpu); }
     },
   });
 }

@@ -260,7 +260,22 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
     if (result?.backend) backend = result.backend;
     if (result?.reason) fallbackReason = result.reason;
     if (result?.persistent) { persistent = true; persistentDispatchCount = result.dispatchCount; persistentBufferCapacity = result.bufferCapacity; }
-    if (result?.status === 'completed' && Array.isArray(result.items) && result.items.length === chunk.inputs.length) result.items.forEach((item, offset) => items.push({ item, ref: chunk.refs[offset] }));
+    if (result?.status === 'completed' && Array.isArray(result.items) && result.items.length === chunk.inputs.length) {
+      let residentRecordsByItem = null;
+      if (result.residentHandle && frontierCandidateRecords?.compactResident) {
+        const expectedRecords = [];
+        result.items.forEach((item, itemOrdinal) => (item.origins || []).forEach((origin, index) => {
+          if (item.validity?.[index] === 1 && origin && Number.isSafeInteger(origin.x) && Number.isSafeInteger(origin.y)) expectedRecords.push({ pieceId: itemOrdinal, targetOrdinal: Math.floor(index / (Number(item.pieceCount) || 1)), originX: origin.x, originY: origin.y, inputOrdinal: index });
+        }));
+        const compacted = await frontierCandidateRecords.compactResident(result.residentHandle, { expectedRecords });
+        if (compacted.status === 'completed' && compacted.parity === 'verified') {
+          recordBackend = compacted.backend || recordBackend; recordParity = compacted.parity || recordParity; recordPersistent = Boolean(compacted.persistent); recordDispatchCount = compacted.dispatchCount; recordBufferCapacity = compacted.bufferCapacity;
+          residentRecordsByItem = new Map();
+          for (const record of compacted.records || []) { const records = residentRecordsByItem.get(record.pieceId) || []; records.push(record); residentRecordsByItem.set(record.pieceId, records); }
+        } else fallbackReason = compacted.reason || 'resident-record-compaction-fallback';
+      }
+      result.items.forEach((item, offset) => items.push({ item, ref: chunk.refs[offset], residentRecords: residentRecordsByItem?.get(offset) || null }));
+    }
     else for (const ref of chunk.refs) {
       const byTarget = generated[ref.planIndex] || new Map();
       if (!Array.isArray(byTarget.records)) byTarget.records = [];
@@ -273,16 +288,16 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
     }
     totalCandidateCount += Number(result?.candidateCount) || chunk.candidateCount; batches += 1;
   }
-  for (const { item, ref } of items) {
-    const byTarget = generated[ref.planIndex] || new Map(), piece = ref.piece, pieceCount = Number(item.pieceCount) || applyLock(piece).length, records = [];
+  for (const { item, ref, residentRecords } of items) {
+    const byTarget = generated[ref.planIndex] || new Map(), piece = ref.piece, pieceCount = Number(item.pieceCount) || applyLock(piece).length, records = residentRecords ? residentRecords.map(record => ({ ...record, pieceId: piece.id })) : [];
     if (!Array.isArray(byTarget.records)) byTarget.records = [];
-    for (let index = 0; index < (item.origins || []).length; index++) {
+    for (let index = 0; !residentRecords && index < (item.origins || []).length; index++) {
       if (item.validity?.[index] !== 1) continue;
       const origin = item.origins[index];
       if (!origin || !Number.isSafeInteger(origin.x) || !Number.isSafeInteger(origin.y)) continue;
       records.push({ pieceId: piece.id, targetOrdinal: Math.floor(index / pieceCount), originX: origin.x, originY: origin.y, inputOrdinal: index });
     }
-    const compacted = frontierCandidateRecords?.compact ? await frontierCandidateRecords.compact(records) : { status: 'completed', backend: 'cpu-oracle', parity: 'oracle', inputCount: records.length, outputCount: records.length, records };
+    const compacted = residentRecords ? { status: 'completed', backend: 'webgpu', parity: 'verified', persistent: true, dispatch: 'webgpu-frontier-record-compaction-resident', dispatchCount: recordDispatchCount, bufferCapacity: recordBufferCapacity, inputCount: item.candidateCount, outputCount: records.length, records } : frontierCandidateRecords?.compact ? await frontierCandidateRecords.compact(records) : { status: 'completed', backend: 'cpu-oracle', parity: 'oracle', inputCount: records.length, outputCount: records.length, records };
     recordBackend = compacted.backend || recordBackend; recordParity = compacted.parity || recordParity; recordInputCount += Number(compacted.inputCount) || records.length; recordOutputCount += Number(compacted.outputCount) || compacted.records?.length || 0; if (compacted.persistent) { recordPersistent = true; recordDispatchCount = compacted.dispatchCount; recordBufferCapacity = compacted.bufferCapacity; }
     for (const record of compacted.records || []) {
       const target = ref.plan.targetPool[record.targetOrdinal];

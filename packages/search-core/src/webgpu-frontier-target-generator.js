@@ -5,6 +5,7 @@ import { createWebGpuFrontierBatchLayout } from './webgpu-frontier-batch-layout.
 
 export const WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA = 'tdotdh.webgpu-frontier-target-generator.v0';
 export const MAX_FRONTIER_TARGET_GENERATION_CANDIDATES = 16384;
+export const FRONTIER_TARGET_RECORD_STRIDE = 5;
 
 const SHADER = `
 struct Params {
@@ -42,6 +43,7 @@ struct Meta {
 @group(0) @binding(4) var<storage, read_write> origins: array<i32>;
 @group(0) @binding(5) var<storage, read_write> validity: array<u32>;
 @group(0) @binding(6) var<uniform> params: Params;
+@group(0) @binding(7) var<storage, read_write> records: array<i32>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -106,6 +108,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   origins[id.x * 2u] = originX;
   origins[id.x * 2u + 1u] = originY;
   validity[id.x] = select(0u, 1u, valid);
+  let recordBase = id.x * ${FRONTIER_TARGET_RECORD_STRIDE}u;
+  records[recordBase] = i32(batchIndex);
+  records[recordBase + 1u] = i32(targetIndex);
+  records[recordBase + 2u] = originX;
+  records[recordBase + 3u] = originY;
+  records[recordBase + 4u] = i32(id.x);
 }`;
 
 function normalizeGrid(grid = DEFAULT_FRONTIER_GRID) {
@@ -237,7 +245,7 @@ function createPersistentGpuTargetRunner(device, grid, shaderSource) {
     const metas = nextCapacity(Math.max(1, layout.metaValues.length));
     if (resources && resources.rowCapacity >= rows && resources.itemCapacity >= items && resources.targetCapacity >= targets && resources.pieceCapacity >= pieces && resources.maskCapacity >= masks && resources.metaCapacity >= metas) return { resources, layout };
     destroy();
-    const originBytes = Math.max(4, rows * 2 * 4), countBytes = Math.max(4, rows * 4);
+    const originBytes = Math.max(4, rows * 2 * 4), countBytes = Math.max(4, rows * 4), recordBytes = Math.max(4, rows * FRONTIER_TARGET_RECORD_STRIDE * 4);
     const buffers = {
       targets: device.createBuffer({ size: Math.max(4, targets * 4), usage: usage.STORAGE | usage.COPY_DST }),
       pieces: device.createBuffer({ size: Math.max(4, pieces * 4), usage: usage.STORAGE | usage.COPY_DST }),
@@ -246,12 +254,13 @@ function createPersistentGpuTargetRunner(device, grid, shaderSource) {
       origins: device.createBuffer({ size: originBytes, usage: usage.STORAGE | usage.COPY_SRC }),
       validity: device.createBuffer({ size: countBytes, usage: usage.STORAGE | usage.COPY_SRC }),
       params: device.createBuffer({ size: 32, usage: usage.UNIFORM | usage.COPY_DST }),
+      records: device.createBuffer({ size: recordBytes, usage: usage.STORAGE | usage.COPY_SRC }),
       originsReadback: device.createBuffer({ size: originBytes, usage: usage.MAP_READ | usage.COPY_DST }),
       validityReadback: device.createBuffer({ size: countBytes, usage: usage.MAP_READ | usage.COPY_DST }),
     };
     const module = device.createShaderModule({ code: shaderSource });
     const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
-    const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [0, 1, 2, 3, 4, 5, 6].map((binding, index) => ({ binding, resource: { buffer: [buffers.targets, buffers.pieces, buffers.masks, buffers.metas, buffers.origins, buffers.validity, buffers.params][index] } })) });
+    const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [0, 1, 2, 3, 4, 5, 6, 7].map((binding, index) => ({ binding, resource: { buffer: [buffers.targets, buffers.pieces, buffers.masks, buffers.metas, buffers.origins, buffers.validity, buffers.params, buffers.records][index] } })) });
     resources = { buffers, pipeline, bindGroup, rowCapacity: rows, itemCapacity: items, targetCapacity: targets, pieceCapacity: pieces, maskCapacity: masks, metaCapacity: metas };
     return { resources, layout };
   };
@@ -264,7 +273,7 @@ function createPersistentGpuTargetRunner(device, grid, shaderSource) {
       const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(resources.pipeline); pass.setBindGroup(0, resources.bindGroup); pass.dispatchWorkgroups(Math.ceil(normalized.candidateCount / 64)); pass.end(); encoder.copyBufferToBuffer(buffers.origins, 0, buffers.originsReadback, 0, originBytes); encoder.copyBufferToBuffer(buffers.validity, 0, buffers.validityReadback, 0, countBytes); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
       await buffers.originsReadback.mapAsync(mapMode.READ); const rawOrigins = Array.from(new Int32Array(buffers.originsReadback.getMappedRange().slice(0, normalized.candidateCount * 2 * 4))); buffers.originsReadback.unmap(); await buffers.validityReadback.mapAsync(mapMode.READ); const validity = Array.from(new Uint32Array(buffers.validityReadback.getMappedRange().slice(0, normalized.candidateCount * 4))); buffers.validityReadback.unmap(); dispatchCount += 1;
       const items = normalized.items.map(item => { const start = item.candidateOffset, origins = Array.from({ length: item.candidateCount }, (_, index) => ({ x: rawOrigins[(start + index) * 2], y: rawOrigins[(start + index) * 2 + 1] })), itemValidity = validity.slice(start, start + item.candidateCount); return { pieceId: item.pieceId, targetCount: item.targetCells.length, pieceCount: item.pieceCells.length, origins, validity: itemValidity, candidateCount: item.candidateCount }; });
-      return { items, persistent: true, dispatch: 'webgpu-frontier-target-resident', dispatchCount, bufferCapacity: { rows: resources.rowCapacity, items: resources.itemCapacity, targets: resources.targetCapacity, pieces: resources.pieceCapacity, masks: resources.maskCapacity, metas: resources.metaCapacity } };
+      return { items, persistent: true, dispatch: 'webgpu-frontier-target-resident', dispatchCount, residentHandle: Object.freeze({ schema: 'tdotdh.webgpu-frontier-target-records.v0', device, recordsBuffer: buffers.records, validityBuffer: buffers.validity, recordCount: normalized.candidateCount, itemCount: normalized.items.length, itemMetadata: Object.freeze(normalized.items.map((item, index) => Object.freeze({ itemOrdinal: index, pieceId: item.pieceId, targetCount: item.targetCells.length, pieceCount: item.pieceCells.length, candidateOffset: item.candidateOffset }))), generation: dispatchCount }), bufferCapacity: { rows: resources.rowCapacity, items: resources.itemCapacity, targets: resources.targetCapacity, pieces: resources.pieceCapacity, masks: resources.maskCapacity, metas: resources.metaCapacity } };
     },
   });
 }
@@ -288,7 +297,7 @@ export function createWebGpuFrontierTargetGenerator({ gpu = globalThis.navigator
         const resident = persistentRunner ? await persistentRunner.run(normalized) : null;
         const result = (resident || { items: await runGpuBatch(device, normalized, normalizedGrid, shaderSource) }).items[0], expected = cpu.items[0], parity = JSON.stringify(result.origins) === JSON.stringify(expected.origins) && JSON.stringify(result.validity) === JSON.stringify(expected.validity);
         if (!parity) return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'rejected', backend: 'webgpu', reason: parityMismatchReason([result], [expected]), targetCount: expected.targetCount, pieceCount: expected.pieceCount, origins: expected.origins, validity: expected.validity, acceptedIndices: expected.acceptedIndices, candidateCount: expected.candidateCount });
-        return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'verified', targetCount: result.targetCount, pieceCount: result.pieceCount, origins: result.origins, validity: result.validity, acceptedIndices: result.validity.flatMap((value, index) => value ? [index] : []), candidateCount: result.candidateCount, ...(resident?.persistent ? { persistent: true, dispatch: resident.dispatch, dispatchCount: resident.dispatchCount, bufferCapacity: resident.bufferCapacity } : {}) });
+        return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'verified', targetCount: result.targetCount, pieceCount: result.pieceCount, origins: result.origins, validity: result.validity, acceptedIndices: result.validity.flatMap((value, index) => value ? [index] : []), candidateCount: result.candidateCount, ...(resident?.persistent ? { persistent: true, dispatch: resident.dispatch, dispatchCount: resident.dispatchCount, residentHandle: resident.residentHandle, bufferCapacity: resident.bufferCapacity } : {}) });
       } catch (error) { persistentRunner?.reset(); persistentRunner = null; deviceCache.reset(); return Object.freeze({ ...status, status: 'unavailable', reason: `webgpu-execution-failed:${error?.message || String(error)}`, targetCount: cpu.items[0].targetCount, pieceCount: cpu.items[0].pieceCount, origins: cpu.items[0].origins, validity: cpu.items[0].validity, acceptedIndices: cpu.items[0].acceptedIndices, candidateCount: cpu.candidateCount }); }
     },
     async generateBatch(inputs) {
@@ -300,7 +309,7 @@ export function createWebGpuFrontierTargetGenerator({ gpu = globalThis.navigator
         const resident = persistentRunner ? await persistentRunner.run(normalized) : null;
         const result = resident?.items || await runGpuBatch(device, normalized, normalizedGrid, shaderSource), parity = result.length === cpu.items.length && result.every((item, index) => JSON.stringify(item.origins) === JSON.stringify(cpu.items[index].origins) && JSON.stringify(item.validity) === JSON.stringify(cpu.items[index].validity));
         if (!parity) return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'rejected', backend: 'webgpu', reason: parityMismatchReason(result, cpu.items), candidateCount: normalized.candidateCount, items: cpu.items });
-        return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'verified', batch: 'verified', candidateCount: normalized.candidateCount, items: result, ...(resident?.persistent ? { persistent: true, dispatch: resident.dispatch, dispatchCount: resident.dispatchCount, bufferCapacity: resident.bufferCapacity } : {}) });
+        return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'verified', batch: 'verified', candidateCount: normalized.candidateCount, items: result, ...(resident?.persistent ? { persistent: true, dispatch: resident.dispatch, dispatchCount: resident.dispatchCount, residentHandle: resident.residentHandle, bufferCapacity: resident.bufferCapacity } : {}) });
       } catch (error) { persistentRunner?.reset(); persistentRunner = null; deviceCache.reset(); return Object.freeze({ ...status, status: 'unavailable', reason: `webgpu-batch-execution-failed:${error?.message || String(error)}`, candidateCount: normalized.candidateCount, items: cpu.items }); }
     },
   });

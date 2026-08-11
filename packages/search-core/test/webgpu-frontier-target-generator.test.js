@@ -37,7 +37,8 @@ assert.deepEqual(batchReceipt.items[0].validity, single.validity);
     createBuffer() {
       const index = ++createdBuffers;
       return { destroy() {}, async mapAsync() {}, getMappedRange() {
-        if (index === 8) return Int32Array.from([1, 0, 0, 0, 0, 1, -1, 1]).buffer;
+        if (index === 9) return Int32Array.from([1, 0, 0, 0, 0, 1, -1, 1]).buffer;
+        if (index === 10) return Uint32Array.from([1, 0, 1, 1]).buffer;
         return Uint32Array.from([1, 0, 1, 1]).buffer;
       }, unmap() {} };
     },
@@ -55,8 +56,10 @@ assert.deepEqual(batchReceipt.items[0].validity, single.validity);
   assert.equal(firstPersistent.persistent, true);
   assert.equal(firstPersistent.dispatch, 'webgpu-frontier-target-resident');
   assert.equal(firstPersistent.dispatchCount, 1);
+  assert.equal(firstPersistent.residentHandle.schema, 'tdotdh.webgpu-frontier-target-records.v0');
+  assert.equal(firstPersistent.residentHandle.recordCount, 4);
   assert.equal(secondPersistent.dispatchCount, 2);
-  assert.equal(createdBuffers, 9, 'persistent target generation reuses its nine GPU buffers');
+  assert.equal(createdBuffers, 10, 'persistent target generation reuses its ten GPU buffers');
   if (previousBufferUsage === undefined) delete globalThis.GPUBufferUsage; else globalThis.GPUBufferUsage = previousBufferUsage;
   if (previousMapMode === undefined) delete globalThis.GPUMapMode; else globalThis.GPUMapMode = previousMapMode;
 }

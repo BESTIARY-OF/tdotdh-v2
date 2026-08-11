@@ -53,6 +53,12 @@ assert.deepEqual(receipt.records, oracle.records);
   assert.equal(firstPersistent.dispatchCount, 1);
   assert.equal(secondPersistent.dispatchCount, 2);
   assert.equal(createdBuffers, 11, 'persistent candidate compaction reuses its eleven GPU buffers');
+  const residentHandle = { schema: 'tdotdh.webgpu-frontier-target-records.v0', device: fakeDevice, recordsBuffer: fakeDevice.createBuffer(), validityBuffer: fakeDevice.createBuffer(), recordCount: records.length };
+  const residentReceipt = await persistentGenerator.compactResident(residentHandle, { expectedRecords: records });
+  assert.equal(residentReceipt.status, 'completed');
+  assert.equal(residentReceipt.parity, 'verified');
+  assert.equal(residentReceipt.persistent, true);
+  assert.equal(residentReceipt.dispatchCount, 3);
   if (previousBufferUsage === undefined) delete globalThis.GPUBufferUsage; else globalThis.GPUBufferUsage = previousBufferUsage;
   if (previousMapMode === undefined) delete globalThis.GPUMapMode; else globalThis.GPUMapMode = previousMapMode;
 }
