@@ -1306,6 +1306,10 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       }
       if (searchStrategy !== 'breadth' && retained.length < BEAM_LIMIT) for (const state of nextBeam) { if (retainedSet.has(state)) continue; retained.push(state); if (retained.length >= BEAM_LIMIT) break; }
     }
+    if (isCancelled()) {
+      const checkpoint = serializeCheckpoint(beam, depth, restoredNodeOffset + nodes);
+      return { type: 'done', placements: null, metrics: null, nodes, cursor: { depth, nodeOffset: restoredNodeOffset + nodes, rootChoice: Number(options.rootChoice || 0), checkpoint }, prefilter: prefilterReceipt, frontier: frontierReceipt, navigationPlan: navigationPlanReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierRanker: frontierRankerReceipt, frontierScore: frontierScoreReceipt, frontierCompactor: frontierCompactorReceipt, frontierDedup: frontierDedupReceipt };
+    }
     beam.splice(0, beam.length, ...retained);
     const checkpoint = serializeCheckpoint(beam, depth + 1, restoredNodeOffset + nodes);
     reportProgress({ depth: depth + 1, nodes, beam: beam.length, families: seedCounts.size, frontier: nextBeam.length, cursor: { depth: depth + 1, nodeOffset: restoredNodeOffset + nodes, rootChoice: Number(options.rootChoice || 0), checkpoint } });

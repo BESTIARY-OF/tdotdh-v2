@@ -14,4 +14,21 @@ assert.equal(result.type, 'done');
 assert.equal(result.placements, null);
 assert.ok(checks > 2);
 assert.ok(Number.isSafeInteger(result.nodes));
+
+let residentCancelled = false;
+const residentResult = await search(pieces, [], {
+  searchStrategy: 'depth',
+  reportProgress: () => {},
+  isCancelled: () => residentCancelled,
+  residentBeamSelector: {
+    select: async () => {
+      residentCancelled = true;
+      return { status: 'cancelled', backend: 'webgpu', parity: 'deferred', reason: 'test-resident-cancellation' };
+    },
+  },
+  frontierCompactor: null,
+});
+assert.equal(residentResult.placements, null);
+assert.equal(residentResult.frontierCompactor.status, 'cancelled');
+assert.ok(residentResult.cursor?.checkpoint?.beam?.length > 0);
 console.log('v2 product search cancellation test passed');
