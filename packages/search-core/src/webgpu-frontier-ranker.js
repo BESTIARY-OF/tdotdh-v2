@@ -87,15 +87,24 @@ export function createWebGpuFrontierRanker({ gpu = globalThis.navigator?.gpu, re
   };
   const rankMany = async batches => {
     if (!Array.isArray(batches) || batches.length === 0 || batches.some(rows => !Array.isArray(rows) || rows.length === 0)) throw new TypeError('frontier rank batches must contain non-empty row arrays');
-    const normalizedBatches = batches.map(normalizeRows), cpuResults = normalizedBatches.map(rows => cpuRankFrontierRows(rows)), status = await availability();
+    const normalizedBatches = batches.map(normalizeRows), status = await availability();
     if (status.status !== 'available') return fallbackMany(status.reason || 'webgpu-unavailable', normalizedBatches);
     try {
       const device = await deviceCache.getDevice(), maxRows = Math.floor((Number(device.limits?.maxStorageBufferBindingSize) || 0) / 16), groups = new Map(), results = new Array(normalizedBatches.length);
       if (pipelineDevice !== device) { const module = device.createShaderModule({ code: shaderSource }); pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } }); bindGroupLayout = pipeline.getBindGroupLayout(0); pipelineDevice = device; }
       normalizedBatches.forEach((rows, index) => { const paddedCount = nextPowerOfTwo(rows.length), group = groups.get(paddedCount) || []; group.push({ index, rows }); groups.set(paddedCount, group); });
+      const gpuJobs = [];
       for (const [paddedCount, group] of groups) {
         if (paddedCount * group.length > maxRows) { for (const item of group) results[item.index] = fallback('frontier-ranker-storage-capacity', item.rows); continue; }
-        const gpuIndices = await runGpuMany(device, group.map(item => item.rows), pipeline, bindGroupLayout, paddedCount);
+        // Submit every eligible GPU batch before running the CPU oracle. The
+        // oracle remains mandatory for exact parity, but its synchronous sort
+        // can now overlap the device queue's submitted work instead of
+        // delaying all dispatches up front.
+        gpuJobs.push({ group, promise: runGpuMany(device, group.map(item => item.rows), pipeline, bindGroupLayout, paddedCount) });
+      }
+      const cpuResults = normalizedBatches.map(rows => cpuRankFrontierRows(rows));
+      for (const { group, promise } of gpuJobs) {
+        const gpuIndices = await promise;
         for (const [groupIndex, item] of group.entries()) {
           const indices = gpuIndices[groupIndex], parity = JSON.stringify(indices) === JSON.stringify(cpuResults[item.index].indices);
           results[item.index] = parity
