@@ -6,7 +6,7 @@ import { createWebGpuFrontierGenerator } from '../../../packages/search-core/src
 import { createWebGpuFrontierTargetGenerator } from '../../../packages/search-core/src/webgpu-frontier-target-generator.js?v=20260811-resident10';
 import { createWebGpuFrontierTargetPool } from '../../../packages/search-core/src/webgpu-frontier-target-pool.js?v=20260811-resident2';
 import { createWebGpuFrontierMetrics } from '../../../packages/search-core/src/webgpu-frontier-metrics.js?v=20260811-pipelinecache1';
-import { createWebGpuFieldMetrics } from '../../../packages/search-core/src/webgpu-field-metrics.js';
+import { createWebGpuFieldMetrics } from '../../../packages/search-core/src/webgpu-field-metrics.js?v=20260811-floodfill3';
 import { createWebGpuLabeledFrontierState } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js?v=20260810-state3';
 import { createWebGpuFrontierTopology } from '../../../packages/search-core/src/webgpu-frontier-topology.js?v=20260811-topology5';
 import { createWebGpuFrontierRanker } from '../../../packages/search-core/src/webgpu-frontier-ranker.js?v=20260811-gpu6';
@@ -14,14 +14,14 @@ import { createWebGpuPersistentFrontierCompactor } from '../../../packages/searc
 import { createWebGpuResidentBeamSelector } from '../../../packages/search-core/src/webgpu-resident-beam-selector.js?v=20260811-beam4';
 import { createWebGpuFrontierDeduplicator } from '../../../packages/search-core/src/webgpu-frontier-deduplicator.js?v=20260811-gpu5';
 import { createWebGpuFrontierNavigator } from '../../../packages/search-core/src/webgpu-frontier-navigator.js?v=20260811-digest1';
-import { createWebGpuResidentFrontierState } from '../../../packages/search-core/src/webgpu-resident-frontier-state.js?v=20260811-gpu41';
+import { createWebGpuResidentFrontierState } from '../../../packages/search-core/src/webgpu-resident-frontier-state.js?v=20260811-gpu42';
 import { createWebGpuFrontierCandidateRecords } from '../../../packages/search-core/src/webgpu-frontier-candidate-records.js?v=20260811-resident2';
 import { createWebGpuFrontierScorer } from '../../../packages/search-core/src/webgpu-frontier-scorer.js?v=20260811-pipelinecache1';
 import { createWebGpuFrontierNavigationScheduler } from '../../../packages/search-core/src/webgpu-frontier-navigation-plan.js?v=20260811-resident21';
 import { createWebGpuDeviceCache } from '../../../packages/search-core/src/webgpu-device-cache.js?v=20260811-lifecycle1';
 import { probeWebGpuExecutionCapabilities } from '../../../packages/search-core/src/webgpu-execution-probe.js?v=20260810-gpu35';
 import { createNavigationCoordinator } from '../../../packages/search-worker/src/navigation-coordinator.js?v=20260811-gpu-expansion4';
-import { search } from './v2-legacy-search.js?v=20260811-gpufirst68';
+import { search } from './v2-legacy-search.js?v=20260811-gpufirst75';
 
 const deviceCache = createWebGpuDeviceCache({ gpu: globalThis.navigator?.gpu });
 const candidatePrefilter = createWebGpuCandidatePrefilter({ gpu: globalThis.navigator?.gpu, deviceCache });
@@ -110,6 +110,10 @@ async function runProductSearch(request, context) {
     // canonical replay remains the CPU correctness boundary; the diagnostic
     // verify-resident-navigation mode opts back into per-depth readback.
     verifyGpuResidentNavigation: steering.verifyGpuResidentNavigation === true,
+    // Intermediate resident transitions carry GPU digests only. The search
+    // loop enables full CPU canonical-label parity for the terminal layer;
+    // callers can opt into per-depth parity for diagnostics.
+    verifyGpuTransitionParity: steering.verifyGpuTransitionParity === true,
     // The CPU frontier coordinates are a small control-plane input. When GPU
     // target generation is available, recomputing the identical 64x64 target
     // pool and reading it back only adds a synchronization barrier; candidate
@@ -134,7 +138,7 @@ async function runProductSearch(request, context) {
     frontierMetrics: stage('frontierMetrics'),
     fieldMetrics: stage('fieldMetrics'),
     frontierState: stage('frontierState'),
-    frontierNavigator,
+    frontierNavigator: timedStage('frontierState', frontierNavigator),
     frontierTopology: stage('frontierTopology'),
     frontierRanker: stage('frontierRanker'),
     frontierCompactor: stage('frontierCompactor'),

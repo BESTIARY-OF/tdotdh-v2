@@ -13,7 +13,7 @@ import { createFrontierEvaluationCandidate } from '../../../packages/search-core
 import { cpuScoreFrontierCandidate } from '../../../packages/search-core/src/webgpu-frontier-scorer.js?v=20260811-pipelinecache1';
 import { createFrontierMaskFromCells } from '../../../packages/search-core/src/webgpu-frontier-validator.js';
 import { createFrontierMetricsCandidate } from '../../../packages/search-core/src/webgpu-frontier-metrics.js?v=20260811-pipelinecache1';
-import { createFieldMetricsCandidate } from '../../../packages/search-core/src/webgpu-field-metrics.js';
+import { createFieldMetricsCandidate } from '../../../packages/search-core/src/webgpu-field-metrics.js?v=20260811-floodfill3';
 import { createLabeledFrontierStateCandidate } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 import { canonicalSignatureFromLabeledFrontierState } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 import { DEFAULT_FRONTIER_GRID } from '../../../packages/search-core/src/webgpu-frontier-topology.js';
@@ -603,7 +603,7 @@ async function evaluateFrontierGeometryAcrossBeam(jobs, centroidId, frontierMetr
   return jobs;
 }
 
-async function evaluateFieldAggregates(entries, state, centroidId, fieldMetricsAdapter, onMetrics = () => {}) {
+async function evaluateFieldAggregates(entries, state, centroidId, fieldMetricsAdapter, onMetrics = () => {}, verifyParity = true) {
   if (!fieldMetricsAdapter?.evaluate || !entries.length) return entries;
   try {
     if (fieldMetricsAdapter.availability) {
@@ -615,7 +615,7 @@ async function evaluateFieldAggregates(entries, state, centroidId, fieldMetricsA
     const parentCells = [...state.field].map(value => { const [x, y] = value.split(',').map(Number); return { x, y }; });
     const centroidCells = state.placements.find(placement => placement.id === centroidId)?.cells || [];
     const candidates = entries.map(entry => createFieldMetricsCandidate({ occupiedCells: [...parentCells, ...entry.candidate.cells], centroidCells }));
-    const result = await fieldMetricsAdapter.evaluate(candidates);
+    const result = await fieldMetricsAdapter.evaluate(candidates, { verifyParity });
     if (Array.isArray(result?.metrics) && result.metrics.length === entries.length) {
       onMetrics({ status: result.status === 'completed' && result.parity === 'verified' ? 'used' : 'fallback', backend: result.backend || 'cpu-oracle', parity: result.parity, reason: result.reason, candidateCount: entries.length });
       return entries.map((entry, index) => ({ ...entry, gpuFieldMetrics: result.metrics[index] }));
@@ -625,7 +625,7 @@ async function evaluateFieldAggregates(entries, state, centroidId, fieldMetricsA
   return entries;
 }
 
-async function evaluateFieldAggregatesAcrossBeam(jobs, centroidId, fieldMetricsAdapter, onMetrics = () => {}) {
+async function evaluateFieldAggregatesAcrossBeam(jobs, centroidId, fieldMetricsAdapter, onMetrics = () => {}, verifyParity = true) {
   if (!fieldMetricsAdapter?.evaluate || !jobs.length) return jobs;
   try {
     if (fieldMetricsAdapter.availability) {
@@ -641,7 +641,7 @@ async function evaluateFieldAggregatesAcrossBeam(jobs, centroidId, fieldMetricsA
       for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, candidate: entry, fieldCandidate: createFieldMetricsCandidate({ occupiedCells: [...parentCells, ...entry.candidate.cells], centroidCells }) });
     }
     if (!pending.length) return jobs;
-    const result = await fieldMetricsAdapter.evaluate(pending.map(item => item.fieldCandidate));
+    const result = await fieldMetricsAdapter.evaluate(pending.map(item => item.fieldCandidate), { verifyParity });
     if (Array.isArray(result?.metrics) && result.metrics.length === pending.length) {
       for (const [index, item] of pending.entries()) jobs[item.jobIndex].entries[item.entryIndex] = { ...item.candidate, gpuFieldMetrics: result.metrics[index] };
       onMetrics({ status: result.status === 'completed' && result.parity === 'verified' ? 'used' : 'fallback', backend: result.backend || 'cpu-oracle', parity: result.parity, reason: result.reason, candidateCount: pending.length, batch: 'beam' });
@@ -1420,16 +1420,23 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       }
     }
     markDepthTiming('candidatePreparationMs');
-    await evaluateFrontierGeometryAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateGeometry ? null : frontierMetrics, receipt => { frontierMetricsReceipt = receipt; stageHistory.frontierMetrics.push({ depth, ...receipt }); });
-    await evaluateFieldAggregatesAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateFieldMetrics ? null : fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; stageHistory.fieldMetrics.push({ depth, ...receipt }); });
-    await evaluateFrontierOptionsAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateValidity ? null : frontierEvaluator, options.disableGpuCandidateValidity ? null : options.frontierValidator, receipt => { frontierReceipt = { ...receipt, ...(navigationTicket ? { ticket: navigationTicket } : {}), ...(navigationCursor ? { cursor: { ...navigationCursor, depth, nodeOffset: navigationCursor.nodeOffset + nodes } } : {}) }; stageHistory.frontier.push({ depth, ...frontierReceipt }); });
+    const gpuSubstageTimings = {};
+    const timeGpuSubstage = async (name, operation) => {
+      const started = performance.now();
+      try { return await operation(); }
+      finally { gpuSubstageTimings[name] = Number((performance.now() - started).toFixed(2)); }
+    };
+    const terminalTransition = depth === pieceCount - 2;
+    await timeGpuSubstage('frontierMetrics', () => evaluateFrontierGeometryAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateGeometry ? null : frontierMetrics, receipt => { frontierMetricsReceipt = receipt; stageHistory.frontierMetrics.push({ depth, ...receipt }); }));
+    await timeGpuSubstage('fieldMetrics', () => evaluateFieldAggregatesAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateFieldMetrics ? null : fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; stageHistory.fieldMetrics.push({ depth, ...receipt }); }, verifyGpuTransitionParity || terminalTransition));
+    await timeGpuSubstage('frontierValidity', () => evaluateFrontierOptionsAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateValidity ? null : frontierEvaluator, options.disableGpuCandidateValidity ? null : options.frontierValidator, receipt => { frontierReceipt = { ...receipt, ...(navigationTicket ? { ticket: navigationTicket } : {}), ...(navigationCursor ? { cursor: { ...navigationCursor, depth, nodeOffset: navigationCursor.nodeOffset + nodes } } : {}) }; stageHistory.frontier.push({ depth, ...frontierReceipt }); }));
     frontierNavigator?.beginLayer?.();
-    await evaluateFrontierStateAcrossBeam(beamJobs, frontierNavigator || frontierState, receipt => { frontierStateReceipt = receipt; stageHistory.frontierState.push({ depth, ...receipt }); }, { verifyParity: verifyGpuTransitionParity });
+    await timeGpuSubstage('frontierState', () => evaluateFrontierStateAcrossBeam(beamJobs, frontierNavigator || frontierState, receipt => { frontierStateReceipt = receipt; stageHistory.frontierState.push({ depth, ...receipt }); }, { verifyParity: verifyGpuTransitionParity || terminalTransition }));
     frontierNavigator?.commitLayer?.();
     const cancelledAfterGpu = isCancelled();
     if (navigationCancellation) navigationCancellation(cancelledAfterGpu);
     if (cancelledAfterGpu) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierDedup: frontierDedupReceipt };
-    await evaluateFrontierTopologyAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateTopology ? null : frontierTopology, receipt => { frontierTopologyReceipt = receipt; stageHistory.frontierTopology.push({ depth, ...receipt }); }, frontierTopologyAvailabilityReceipt);
+    await timeGpuSubstage('frontierTopology', () => evaluateFrontierTopologyAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateTopology ? null : frontierTopology, receipt => { frontierTopologyReceipt = receipt; stageHistory.frontierTopology.push({ depth, ...receipt }); }, frontierTopologyAvailabilityReceipt));
     markDepthTiming('gpuEvaluationMs');
     const rankedJobs = [];
     for (const job of beamJobs) {
@@ -1486,7 +1493,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     navigationPlanReceipt = { ...navigationPlanReceipt, expansion: { ...(navigationPlanReceipt.expansion || {}), beamJobCount: beamJobs.length, nextBeamCount: nextBeam.length } };
     const historyEntry = navigationPlanHistory[navigationPlanHistory.length - 1];
     markDepthTiming('rankingRetentionMs');
-    if (historyEntry) Object.assign(historyEntry, { beamJobCount: beamJobs.length, nextBeamCount: nextBeam.length, nextBeamSample: nextBeam.slice(0, 8).map(state => ({ placements: state.placements.map(placement => placement.id), family: state.centroidFamilyId, score: state.score })), controlPlaneMs: Number((performance.now() - depthTimingStarted).toFixed(2)), ...depthTimings });
+    if (historyEntry) Object.assign(historyEntry, { beamJobCount: beamJobs.length, nextBeamCount: nextBeam.length, nextBeamSample: nextBeam.slice(0, 8).map(state => ({ placements: state.placements.map(placement => placement.id), family: state.centroidFamilyId, score: state.score })), controlPlaneMs: Number((performance.now() - depthTimingStarted).toFixed(2)), ...depthTimings, gpuSubstageTimings });
     navigationPlanReceipt = { ...navigationPlanReceipt, history: navigationPlanHistory.slice(-64), stageHistory };
     for (const state of nextBeam) { if (!familyBuckets.has(state.centroidFamilyId)) familyBuckets.set(state.centroidFamilyId, []); familyBuckets.get(state.centroidFamilyId).push(state); }
     if (searchStrategy === 'breadth') {

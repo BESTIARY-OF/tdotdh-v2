@@ -138,22 +138,35 @@ function bit(mask, grid, x, y) {
   return (mask[Math.floor(offset / 32)] >>> (offset % 32)) & 1;
 }
 
+const floodFillScratch = new Map();
+
 function outsideMaskFromOccupied(occupiedMask, grid) {
-  const outside = new Uint32Array(grid.wordCount), queue = [], visited = new Set();
-  const enqueue = (x, y) => {
-    const localX = x - grid.originX, localY = y - grid.originY;
-    if (localX < 0 || localY < 0 || localX >= grid.width || localY >= grid.height || bit(occupiedMask, grid, x, y)) return;
-    const id = `${x},${y}`;
-    if (visited.has(id)) return;
-    visited.add(id); queue.push({ x, y });
+  const outside = new Uint32Array(grid.wordCount), cellCount = grid.width * grid.height;
+  // Candidate preparation runs once for every branch, so avoid strings,
+  // objects, Set hashing, and repeated coordinate normalization. A flat
+  // index queue keeps the same four-neighbor flood-fill semantics while
+  // making the work data-oriented and allocation-light.
+  let scratch = floodFillScratch.get(cellCount);
+  if (!scratch) {
+    scratch = { visited: new Uint8Array(cellCount), queue: new Int32Array(cellCount) };
+    floodFillScratch.set(cellCount, scratch);
+  }
+  const { visited, queue } = scratch;
+  visited.fill(0);
+  let head = 0, tail = 0;
+  const enqueue = (localX, localY) => {
+    if (localX < 0 || localY < 0 || localX >= grid.width || localY >= grid.height) return;
+    const offset = localY * grid.width + localX;
+    if (visited[offset] || ((occupiedMask[offset >>> 5] >>> (offset & 31)) & 1)) return;
+    visited[offset] = 1;
+    queue[tail++] = offset;
   };
-  for (let x = grid.originX; x < grid.originX + grid.width; x++) { enqueue(x, grid.originY); enqueue(x, grid.originY + grid.height - 1); }
-  for (let y = grid.originY + 1; y < grid.originY + grid.height - 1; y++) { enqueue(grid.originX, y); enqueue(grid.originX + grid.width - 1, y); }
-  while (queue.length) {
-    const current = queue.shift();
-    const offset = (current.y - grid.originY) * grid.width + current.x - grid.originX;
-    outside[Math.floor(offset / 32)] |= 1 << (offset % 32);
-    enqueue(current.x + 1, current.y); enqueue(current.x - 1, current.y); enqueue(current.x, current.y + 1); enqueue(current.x, current.y - 1);
+  for (let x = 0; x < grid.width; x++) { enqueue(x, 0); enqueue(x, grid.height - 1); }
+  for (let y = 1; y < grid.height - 1; y++) { enqueue(0, y); enqueue(grid.width - 1, y); }
+  while (head < tail) {
+    const offset = queue[head++], localX = offset % grid.width, localY = Math.floor(offset / grid.width);
+    outside[offset >>> 5] |= 1 << (offset & 31);
+    enqueue(localX + 1, localY); enqueue(localX - 1, localY); enqueue(localX, localY + 1); enqueue(localX, localY - 1);
   }
   return outside;
 }
@@ -224,9 +237,21 @@ export function createWebGpuFieldMetrics({ gpu = globalThis.navigator?.gpu, grid
   const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits }, pipelineCache = createWebGpuPipelineCache();
   return Object.freeze({
     async availability() { const probe = await probeWebGpuCapabilities({ gpu, requiredLimits: limits }); if (!probe.adapterAvailable) return Object.freeze({ schema: WEBGPU_FIELD_METRICS_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: 'webgpu-adapter-unavailable', grid: normalizedGrid }); if (!probe.requiredLimitsSatisfied) return Object.freeze({ schema: WEBGPU_FIELD_METRICS_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: 'webgpu-required-limits-unsatisfied', grid: normalizedGrid }); return Object.freeze({ schema: WEBGPU_FIELD_METRICS_SCHEMA, status: 'available', backend: 'webgpu', grid: normalizedGrid }); },
-    async evaluate(candidates) {
-      const normalized = normalizeCandidates(candidates, normalizedGrid), cpu = cpuEvaluateFieldMetrics(normalized, normalizedGrid), status = await this.availability(); if (status.status !== 'available') return unavailable(status.reason, normalizedGrid, cpu);
-      try { const device = await deviceCache.getDevice(), maxBinding = Number(device.limits?.maxStorageBufferBindingSize) || limits.maxStorageBufferBindingSize, maxBatch = Math.max(1, Math.floor(maxBinding / Math.max(normalizedGrid.wordCount * 8, 4))), metrics = []; for (let offset = 0; offset < normalized.length; offset += maxBatch) metrics.push(...await runGpuBatch(device, normalized.slice(offset, offset + maxBatch), normalizedGrid, shaderSource, pipelineCache)); if (JSON.stringify(metrics) !== JSON.stringify(cpu.metrics)) return unavailable('oracle-parity-mismatch', normalizedGrid, cpu); return Object.freeze({ schema: WEBGPU_FIELD_METRICS_SCHEMA, status: 'completed', backend: 'webgpu', metrics, candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, parity: 'verified' }); } catch (error) { deviceCache.reset(); return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid, cpu); }
+    async evaluate(candidates, { verifyParity = true } = {}) {
+      const normalized = normalizeCandidates(candidates, normalizedGrid), status = await this.availability();
+      if (status.status !== 'available') return unavailable(status.reason, normalizedGrid, cpuEvaluateFieldMetrics(normalized, normalizedGrid));
+      try {
+        const device = await deviceCache.getDevice(), maxBinding = Number(device.limits?.maxStorageBufferBindingSize) || limits.maxStorageBufferBindingSize, maxBatch = Math.max(1, Math.floor(maxBinding / Math.max(normalizedGrid.wordCount * 8, 4))), metrics = [];
+        for (let offset = 0; offset < normalized.length; offset += maxBatch) metrics.push(...await runGpuBatch(device, normalized.slice(offset, offset + maxBatch), normalizedGrid, shaderSource, pipelineCache));
+        if (verifyParity) {
+          const cpu = cpuEvaluateFieldMetrics(normalized, normalizedGrid);
+          if (JSON.stringify(metrics) !== JSON.stringify(cpu.metrics)) return unavailable('oracle-parity-mismatch', normalizedGrid, cpu);
+        }
+        return Object.freeze({ schema: WEBGPU_FIELD_METRICS_SCHEMA, status: 'completed', backend: 'webgpu', metrics, candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, parity: verifyParity ? 'verified' : 'deferred' });
+      } catch (error) {
+        deviceCache.reset();
+        return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid, cpuEvaluateFieldMetrics(normalized, normalizedGrid));
+      }
     },
   });
 }
