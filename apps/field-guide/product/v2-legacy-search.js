@@ -1310,8 +1310,11 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     const cpuStateKeys = new Set();
     const beamJobs = [];
     const beamPlans = [];
-    for (const state of beam) {
-      await yieldToEventLoop();
+    for (const [stateIndex, state] of beam.entries()) {
+      // Keep cancellation responsive without paying a zero-delay timer turn
+      // for every beam state. The old per-state yield dominated the host-side
+      // candidate-preparation budget on the realistic SEDLEC fixture.
+      if (stateIndex % 16 === 0) await yieldToEventLoop();
       if (isCancelled()) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierDedup: frontierDedupReceipt };
       if (nodes - mainNodeStart >= NODE_LIMIT) break;
       beamPlans.push({ state });
