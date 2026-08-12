@@ -1252,20 +1252,20 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   }
   async function deduplicateRankedOptions(entries, state) {
     if (!frontierDeduplicator?.deduplicate || !entries.length || frontierDeduplicatorStatus?.status !== 'available') return entries;
-    const eligible = entries.filter(entry => entry.gpuState);
-    const fallback = entries.length - eligible.length;
-    if (!eligible.length) {
-      if (frontierDedupReceipt.status === 'cpu-oracle') frontierDedupReceipt = { status: 'fallback', reason: 'gpu-state-unavailable', candidateCount: entries.length };
-      return entries;
-    }
-    const rows = eligible.map(entry => ({ hash: (Number.isSafeInteger(entry.gpuState.absoluteHash) ? entry.gpuState.absoluteHash : entry.gpuState.stateKeyHash) >>> 0, signature: arrangementSignature([...state.placements, entry.candidate]) }));
+    const rows = entries.map(entry => {
+      const signature = arrangementSignature([...state.placements, entry.candidate]);
+      const hash = entry.gpuState
+        ? (Number.isSafeInteger(entry.gpuState.absoluteHash) ? entry.gpuState.absoluteHash : entry.gpuState.stateKeyHash)
+        : stateKeyHash(absoluteStateKey([...state.placements, entry.candidate], state.remaining.filter(piece => piece.id !== entry.piece.id)));
+      return { hash: hash >>> 0, signature };
+    });
+    const oracleHashCount = entries.reduce((count, entry) => count + (entry.gpuState ? 0 : 1), 0);
     const result = await frontierDeduplicator.deduplicate(rows);
-    if (result?.status === 'completed' && result?.parity === 'verified' && Array.isArray(result.keep) && result.keep.length === eligible.length) {
-      const kept = new Set(eligible.filter((entry, index) => result.keep[index] === 1));
-      frontierDedupReceipt = { status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: eligible.length, batch: 'beam', ...(fallback ? { fallbackCount: fallback } : {}) };
-      return entries.filter(entry => !entry.gpuState || kept.has(entry));
+    if (result?.status === 'completed' && result?.parity === 'verified' && Array.isArray(result.keep) && result.keep.length === entries.length) {
+      frontierDedupReceipt = { status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: entries.length, batch: 'beam', ...(oracleHashCount ? { hashSource: 'cpu-canonical-signature', oracleHashCount } : {}) };
+      return entries.filter((entry, index) => result.keep[index] === 1);
     }
-    if (frontierDedupReceipt.status === 'cpu-oracle') frontierDedupReceipt = { status: 'fallback', reason: result?.reason || 'frontier-deduplicator-unavailable', candidateCount: eligible.length, ...(fallback ? { fallbackCount: fallback } : {}) };
+    if (frontierDedupReceipt.status === 'cpu-oracle') frontierDedupReceipt = { status: 'fallback', reason: result?.reason || 'frontier-deduplicator-unavailable', candidateCount: entries.length, ...(oracleHashCount ? { hashSource: 'cpu-canonical-signature', oracleHashCount } : {}) };
     return entries;
   }
   async function deduplicateRankedOptionsMany(jobs) {
@@ -1281,25 +1281,25 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       if (job.entries.length && job.entries.every(entry => entry.gpuState)) eligible.push(jobIndex);
       else fallback.push(jobIndex);
     }
-    frontierDedupTrace.push({ eligibleGroups: eligible.length, fallbackGroups: fallback.length, candidateCount: jobs.reduce((sum, job) => sum + job.entries.length, 0) });
-    let residentResult = null, residentSucceeded = false;
-    if (eligible.length) {
-      const residentGroups = eligible.map(jobIndex => jobs[jobIndex].entries.map(entry => ({ signature: arrangementSignature([...jobs[jobIndex].state.placements, entry.candidate]), ...(entry.gpuState.digestRef ? { digestRef: entry.gpuState.digestRef, digestIndex: entry.gpuState.digestIndex } : {}) })));
-      const canConsumeResidentDigests = options.enableGpuResidentDigestConsumer === true && residentGroups.every(group => group.every(row => row.digestRef));
-      const groups = canConsumeResidentDigests ? residentGroups : eligible.map((jobIndex, groupIndex) => jobs[jobIndex].entries.map((entry, entryIndex) => ({ hash: (Number.isSafeInteger(entry.gpuState.absoluteHash) ? entry.gpuState.absoluteHash : entry.gpuState.stateKeyHash) >>> 0, signature: residentGroups[groupIndex][entryIndex].signature })));
-      residentResult = canConsumeResidentDigests && frontierDeduplicator.deduplicateResidentMany ? await frontierDeduplicator.deduplicateResidentMany(groups) : await frontierDeduplicator.deduplicateMany(groups);
-      frontierDedupTrace[frontierDedupTrace.length - 1].result = { status: residentResult?.status || null, parity: residentResult?.parity || null, resident: residentResult?.resident === true, reason: residentResult?.reason || null, mode: canConsumeResidentDigests ? 'resident' : 'hash' };
-      const total = groups.reduce((sum, group) => sum + group.length, 0);
-      if (residentResult?.status === 'completed' && residentResult?.parity === 'verified' && Array.isArray(residentResult.keep) && residentResult.keep.length === eligible.length && residentResult.keep.every((keep, index) => Array.isArray(keep) && keep.length === jobs[eligible[index]].entries.length)) {
-        residentSucceeded = true;
-        for (const [groupIndex, jobIndex] of eligible.entries()) output[jobIndex].entries = jobs[jobIndex].entries.filter((entry, entryIndex) => residentResult.keep[groupIndex][entryIndex] === 1);
-        frontierDedupReceipt = { status: 'used', backend: residentResult.backend || 'compute-shader', parity: residentResult.parity, candidateCount: total, batch: 'beam-groups', groupCount: eligible.length, ...(residentResult.resident ? { resident: true } : {}), fallbackGroupCount: fallback.length, trace: frontierDedupTrace.slice(-64) };
-      } else {
-        residentResult = null;
-      }
+    const residentGroups = jobs.map(job => job.entries.map(entry => ({ signature: arrangementSignature([...job.state.placements, entry.candidate]), ...(entry.gpuState?.digestRef ? { digestRef: entry.gpuState.digestRef, digestIndex: entry.gpuState.digestIndex } : {}) })));
+    let oracleHashCount = 0;
+    const hashGroups = jobs.map((job, jobIndex) => job.entries.map((entry, entryIndex) => {
+      if (entry.gpuState) return { hash: (Number.isSafeInteger(entry.gpuState.absoluteHash) ? entry.gpuState.absoluteHash : entry.gpuState.stateKeyHash) >>> 0, signature: residentGroups[jobIndex][entryIndex].signature };
+      oracleHashCount += 1;
+      return { hash: stateKeyHash(absoluteStateKey([...job.state.placements, entry.candidate], job.state.remaining.filter(piece => piece.id !== entry.piece.id))), signature: residentGroups[jobIndex][entryIndex].signature };
+    }));
+    const canConsumeResidentDigests = options.enableGpuResidentDigestConsumer === true && residentGroups.every(group => group.every(row => row.digestRef));
+    const groups = canConsumeResidentDigests ? residentGroups : hashGroups;
+    const candidateCount = groups.reduce((sum, group) => sum + group.length, 0);
+    frontierDedupTrace.push({ eligibleGroups: eligible.length, fallbackGroups: fallback.length, candidateCount, oracleHashCount, mode: canConsumeResidentDigests ? 'resident' : 'hash' });
+    const result = canConsumeResidentDigests && frontierDeduplicator.deduplicateResidentMany ? await frontierDeduplicator.deduplicateResidentMany(groups) : await frontierDeduplicator.deduplicateMany(groups);
+    frontierDedupTrace[frontierDedupTrace.length - 1].result = { status: result?.status || null, parity: result?.parity || null, resident: result?.resident === true, reason: result?.reason || null };
+    if (result?.status === 'completed' && result?.parity === 'verified' && Array.isArray(result.keep) && result.keep.length === jobs.length && result.keep.every((keep, index) => Array.isArray(keep) && keep.length === jobs[index].entries.length)) {
+      for (const [jobIndex, job] of jobs.entries()) output[jobIndex].entries = job.entries.filter((entry, entryIndex) => result.keep[jobIndex][entryIndex] === 1);
+      frontierDedupReceipt = { status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount, batch: 'beam-groups', groupCount: jobs.length, ...(result.resident ? { resident: true } : {}), ...(oracleHashCount ? { hashSource: 'cpu-canonical-signature', oracleHashCount } : {}), trace: frontierDedupTrace.slice(-64) };
+      return output;
     }
-    for (const jobIndex of fallback) output[jobIndex].entries = await deduplicateRankedOptions(jobs[jobIndex].entries, jobs[jobIndex].state);
-    if (!residentSucceeded) for (const jobIndex of eligible) output[jobIndex].entries = await deduplicateRankedOptions(jobs[jobIndex].entries, jobs[jobIndex].state);
+    for (const [jobIndex, job] of jobs.entries()) output[jobIndex].entries = await deduplicateRankedOptions(job.entries, job.state);
     return output;
   }
   const searchHints = Boolean(options.searchHints);
