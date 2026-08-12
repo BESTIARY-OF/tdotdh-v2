@@ -21,7 +21,7 @@ import { createWebGpuFrontierNavigationScheduler } from '../../../packages/searc
 import { createWebGpuDeviceCache } from '../../../packages/search-core/src/webgpu-device-cache.js?v=20260811-lifecycle1';
 import { probeWebGpuExecutionCapabilities } from '../../../packages/search-core/src/webgpu-execution-probe.js?v=20260810-gpu35';
 import { createNavigationCoordinator } from '../../../packages/search-worker/src/navigation-coordinator.js?v=20260811-gpu-expansion4';
-import { search } from './v2-legacy-search.js?v=20260812-target-timing3';
+import { search } from './v2-legacy-search.js?v=20260812-metrictiming1';
 
 const deviceCache = createWebGpuDeviceCache({ gpu: globalThis.navigator?.gpu });
 const candidatePrefilter = createWebGpuCandidatePrefilter({ gpu: globalThis.navigator?.gpu, deviceCache });

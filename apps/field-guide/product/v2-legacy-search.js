@@ -18,7 +18,7 @@ import { createLabeledFrontierStateCandidate, createLabeledFrontierStateCandidat
 import { canonicalSignatureFromLabeledFrontierState } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 import { DEFAULT_FRONTIER_GRID } from '../../../packages/search-core/src/webgpu-frontier-topology.js';
 import { MAX_FRONTIER_GENERATION_CANDIDATES } from '../../../packages/search-core/src/webgpu-frontier-generator.js?v=20260811-pipelinecache1';
-import { MAX_FRONTIER_TARGET_GENERATION_CANDIDATES } from '../../../packages/search-core/src/webgpu-frontier-target-generator.js?v=20260812-target-timing3';
+import { MAX_FRONTIER_TARGET_GENERATION_CANDIDATES } from '../../../packages/search-core/src/webgpu-frontier-target-generator.js?v=20260812-metrictiming1';
 import { createWebGpuFrontierNavigationScheduler, decodeWebGpuFrontierNavigationRow } from '../../../packages/search-core/src/webgpu-frontier-navigation-plan.js?v=20260812-resident-merged-submit1';
 
 function key(x, y) { return `${x},${y}`; }
@@ -646,7 +646,7 @@ async function evaluateFrontierGeometry(entries, state, centroidId, frontierMetr
     const candidates = entries.map(entry => createFrontierMetricsCandidate({ ...input, candidateCells: entry.candidate.cells, candidateMask: cachedFrontierMask(entry.candidate.cells), bounds: state.bounds }));
     const result = await frontierMetrics.evaluate(candidates);
     if (result?.status === 'completed' && result.parity === 'verified' && Array.isArray(result.metrics) && result.metrics.length === entries.length) {
-      onMetrics({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: entries.length });
+      onMetrics({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: entries.length, ...(result.dispatchTimings ? { dispatchTimings: result.dispatchTimings } : {}) });
       return entries.map((entry, index) => ({ ...entry, gpuGeometry: result.metrics[index] }));
     }
     onMetrics({ status: 'fallback', reason: result?.reason || 'frontier-metrics-unavailable' });
@@ -667,7 +667,7 @@ async function evaluateFrontierGeometryAcrossBeam(jobs, centroidId, frontierMetr
     const used = result?.status === 'completed' && result.parity === 'verified' && Array.isArray(result.metrics) && result.metrics.length === pending.length;
     const reason = used ? null : (result?.reason || 'frontier-metrics-unavailable');
     if (used) for (const [index, item] of pending.entries()) jobs[item.jobIndex].entries[item.entryIndex] = { ...item.entry, gpuGeometry: result.metrics[index] };
-    onMetrics({ status: used ? 'used' : 'fallback', backend: used ? 'compute-shader' : 'cpu-oracle', parity: used ? 'verified' : 'oracle', reason, candidateCount: pending.length, batch: 'beam', boundsGroups: 1 });
+    onMetrics({ status: used ? 'used' : 'fallback', backend: used ? 'compute-shader' : 'cpu-oracle', parity: used ? 'verified' : 'oracle', reason, candidateCount: pending.length, batch: 'beam', boundsGroups: 1, ...(result?.dispatchTimings ? { dispatchTimings: result.dispatchTimings } : {}) });
     if (used) return jobs;
   } catch (error) { onMetrics({ status: 'fallback', reason: `frontier-metrics-failed:${error.message}`, batch: 'beam' }); }
   return jobs;
