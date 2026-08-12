@@ -1,6 +1,7 @@
 import { createDisplayGeometry } from '../../../packages/domain/src/display-geometry.js';
 import { createRendererRequest } from '../../../packages/browser-handoff/src/renderer-boundary.js';
 import { createRendererAdapter } from '../../../packages/browser-handoff/src/renderer-adapter-capability.js';
+import { createWebGpuFlatlandRenderer } from '../../../packages/browser-handoff/src/webgpu-flatland-renderer.js?v=20260812-webgpu-flatland1';
 import { createCpuOracleFirstAdapter } from '../../../packages/search-core/src/compute-adapter.js';
 import { createWebGpuDeviceCache } from '../../../packages/search-core/src/webgpu-device-cache.js';
 import { probeWebGpuExecutionCapabilities } from '../../../packages/search-core/src/webgpu-execution-probe.js?v=20260810-gpu35';
@@ -11,9 +12,14 @@ import { createWebGpuFrontierDeduplicator, cpuDeduplicateFrontierStates } from '
 
 const geometry = createDisplayGeometry({ kind: 'flatland', dimension: 2 });
 const rendererAdapter = createRendererAdapter();
+const flatlandRenderer = createWebGpuFlatlandRenderer();
 const rendererCapabilities = rendererAdapter.capabilities;
 const rendererBoundarySummary = `Renderer boundary: flatland=${rendererCapabilities.projections.flatland}; backend=${rendererCapabilities.backend || 'unavailable'}; sphere/hypersphere/cube/hypercube/simplex=vocabulary-only.`;
 const rendererBoundaryTitle = detail => `${detail} ${rendererBoundarySummary}`;
+async function renderFlatland({ canvas, cells, bounds } = {}) {
+  const request = createRendererRequest({ geometry, cells });
+  return flatlandRenderer.render({ canvas, cells, bounds, request });
+}
 const cpuOracle = async request => ({
   canonicalSignature: request.deterministicKey,
   placements: null,
@@ -71,12 +77,15 @@ window.__TDOTDH_V2_RUNTIME__ = Object.freeze({
   runCandidateParity,
   rendererAdapter,
   rendererCapabilities,
+  flatlandRenderer,
+  renderFlatland,
   workerUrl: workerUrl.href,
   rendererRequest: cells => createRendererRequest({ geometry, cells }),
   acceleration: cpuOracleFirst.availability(),
 });
 
 const status = document.querySelector('#v2RuntimeStatus');
+window.dispatchEvent(new Event('tdotdh:v2-runtime-ready'));
 if (status) {
   status.textContent = 'V2 product · CPU oracle active · probing GPU navigation';
   status.title = rendererBoundaryTitle('Chrome graphics acceleration is not sufficient evidence by itself; this label changes only after the page dispatches navigation kernels and verifies CPU parity.');

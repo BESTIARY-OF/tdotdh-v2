@@ -508,11 +508,15 @@ function renderBoard() {
   const board = document.querySelector('#board'); board.innerHTML = '';
   if (!app.placements) { board.className = 'board board-empty'; board.style.gridTemplateColumns = ''; board.style.gridTemplateRows = ''; board.style.width = ''; board.style.height = ''; board.innerHTML = '<div><span class="empty-glyph">✦</span><strong>Search for a field</strong><small>15 fixed-orientation nonominoes / 135 squares</small></div>'; updateMetrics(null); return; }
   const metrics = fieldMetrics(app.placements); board.className = 'board'; board.style.gridTemplateColumns = `repeat(${metrics.width}, minmax(0, 1fr))`; board.style.gridTemplateRows = `repeat(${metrics.height}, minmax(0, 1fr))`; board.style.aspectRatio = `${metrics.width} / ${metrics.height}`;
+  const gpuCells = [];
   for (let y = metrics.minY; y <= metrics.maxY; y++) for (let x = metrics.minX; x <= metrics.maxX; x++) {
     const id = metrics.map.get(key(x, y)), piece = app.pieces.find(p => p.id === id), cell = document.createElement('div'); cell.className = `cell ${key(x, y) === key(metrics.centerSquare.x, metrics.centerSquare.y) ? 'center-square' : ''}`; cell.style.setProperty('--piece-color', piece?.color || 'transparent'); cell.dataset.id = id || '';
+    if (id && piece) gpuCells.push({ x, y, color: piece.color });
     cell.addEventListener('click', () => { if (!id || app.selectedId === id) clearPieceSelection(); else { app.selectedId = id; app.selectedFamily = null; app.arrangementPinned = false; app.sidebarMode = 'pieces'; renderSidebarMode(); renderPieceList(); renderInspector(); highlightPiece(); } }); board.appendChild(cell);
   }
-  updateMetrics(metrics); requestAnimationFrame(fitBoardToViewport);
+  const gpuRuntime = window.__TDOTDH_V2_RUNTIME__, gpuCanvas = document.createElement('canvas');
+  gpuCanvas.className = 'board-gpu-canvas'; gpuCanvas.setAttribute('aria-hidden', 'true'); board.appendChild(gpuCanvas);
+  updateMetrics(metrics); requestAnimationFrame(() => { fitBoardToViewport(); if (typeof gpuRuntime?.renderFlatland !== 'function') { gpuCanvas.remove(); return; } void gpuRuntime.renderFlatland({ canvas: gpuCanvas, cells: gpuCells, bounds: { minX: metrics.minX, minY: metrics.minY, width: metrics.width, height: metrics.height } }).then(result => { gpuCanvas.dataset.rendererStatus = result.status; if (result.status !== 'rendered') gpuCanvas.remove(); }).catch(() => gpuCanvas.remove()); });
 }
 function fitBoardToViewport() {
   if (!app.placements) return;
@@ -1087,6 +1091,7 @@ function solve() { if (app.continuous) { stopContinuousSearch(); return; } app.s
 function resetApp() { if (app.searchWorker) app.searchWorker.terminate(); if (app.searchTimer) clearTimeout(app.searchTimer); app.searchWorker = null; app.searchTimer = null; app.solving = false; app.continuous = false; app.searchCheckpoint = null; app.sidebarMode = 'pieces'; app.selectedFamily = null; app.arrangementPinned = false; app.placements = app.snapshots[0]?.placements || null; app.nodes = app.totalNodes; app.pass = 0; persistSearchProgress(true); document.querySelector('#solveButton').disabled = false; document.querySelector('#solveButton').innerHTML = '<span class="spark">✦</span> Find a new arrangement'; document.querySelector('#searchStatus').textContent = app.snapshots.length ? `Ready to search · ${app.snapshots.length} banked` : 'Ready to search'; document.querySelector('#arrangementLabel').innerHTML = 'Variable field <span class="divider">/</span> source-locked'; document.querySelector('#stageTitle').textContent = 'Search the open field.'; document.querySelector('#stageSubtitle').textContent = `No rectangle is prescribed. Find a dense connected packing with zero internal holes and #${String(activeCentroidId()).padStart(2, '0')} away from every coast.`; renderBoard(); renderSnapshots(); renderSidebarMode(); if (app.placements) updateArrangementSummary(app.snapshots[0].metrics); }
 
 initializePresetState(); restoreSearchSettings(); app.pieces = createPieces(); restorePositionPreferences(); restorePositionLocks(); restoreFamilySteering(); restoreSnapshots(); restoreSearchProgress(); app.placements = app.snapshots[0]?.placements || null; renderPresetIdentity(); renderPieceList(); renderBoard(); renderInspector(); renderSnapshots(); renderSidebarMode(); if (app.placements) updateArrangementSummary(app.snapshots[0].metrics);
+window.addEventListener('tdotdh:v2-runtime-ready', () => { if (app.placements) renderBoard(); });
 document.querySelector('#solveButton').addEventListener('click', solve);
 document.querySelector('#resetButton').addEventListener('click', resetApp);
 document.querySelector('#helpButton').addEventListener('click', () => document.querySelector('#helpDialog').showModal()); document.querySelector('#closeDialog').addEventListener('click', () => document.querySelector('#helpDialog').close());
