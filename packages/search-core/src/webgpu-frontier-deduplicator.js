@@ -26,7 +26,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     } else {
       let priorIndex = prior - 1u;
       let priorFingerprint = fingerprints[priorIndex];
-      if (all(priorFingerprint == fingerprint)) { atomicMin(&table[slot], sourceIndex + 1u); break; }
+      if (all(priorFingerprint == fingerprint)) { atomicMin(&table[slot], index + 1u); break; }
     }
     slot = (slot + 1u) & params.tableMask;
   }
