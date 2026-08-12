@@ -834,7 +834,7 @@ async function evaluateFrontierTopology(entries, state, centroidId, frontierTopo
     const inputs = entries.map(entry => ({ parentMask: stateInput.parentMask, candidateMask: cachedFrontierMask(entry.candidate.cells), centroidMask: stateInput.centroidMask }));
     const result = frontierTopology.evaluateBatch ? await frontierTopology.evaluateBatch(inputs, { verifyParity: false }) : { status: 'completed', parity: 'deferred', backend: 'compute-shader', results: await Promise.all(inputs.map(input => frontierTopology.evaluate(input))) };
     if (result?.status === 'completed' && ['verified', 'deferred'].includes(result.parity) && Array.isArray(result.results) && result.results.length === entries.length) {
-      onTopology({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: entries.length });
+      onTopology({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: entries.length, ...(result.timings ? { timings: result.timings } : {}) });
       return entries.map((entry, index) => ({ ...entry, gpuTopology: result.results[index]?.metrics || null }));
     }
     onTopology({ status: 'fallback', reason: result?.reason || 'frontier-topology-batch-unavailable' });
@@ -871,7 +871,7 @@ async function evaluateFrontierTopologyAcrossBeam(jobs, centroidId, frontierTopo
       for (const [index, item] of pending.entries()) {
         jobs[item.jobIndex].entries[item.entryIndex] = { ...item.entry, gpuTopology: result.results[index]?.metrics || null };
       }
-      onTopology({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: pending.length, batch: 'beam', parityGate: result.parity === 'verified' ? 'checked' : 'deferred-to-final-canonical-boundary' });
+      onTopology({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: pending.length, batch: 'beam', parityGate: result.parity === 'verified' ? 'checked' : 'deferred-to-final-canonical-boundary', ...(result.timings ? { timings: result.timings } : {}) });
       return jobs;
     }
     onTopology({ status: 'fallback', reason: result?.reason || 'frontier-topology-batch-unavailable', candidateCount: pending.length, batch: 'beam' });
@@ -1070,7 +1070,7 @@ async function evaluateFinalTopology(state, centroidId, frontierTopology, onTopo
     const emptyMask = new Uint32Array(Math.ceil(DEFAULT_FRONTIER_GRID.width * DEFAULT_FRONTIER_GRID.height / 32));
     const result = await frontierTopology.evaluate({ parentMask: emptyMask, candidateMask: createFrontierMaskFromCells(cells), centroidMask: centroidCells.length ? createFrontierMaskFromCells(centroidCells) : emptyMask });
     if (result?.status === 'completed' && ['verified', 'labels-verified'].includes(result.parity) && result.metrics) {
-      onTopology({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, metrics: result.metrics });
+      onTopology({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, metrics: result.metrics, ...(result.timings ? { timings: result.timings } : {}) });
       return result.metrics;
     }
     onTopology({ status: result?.status === 'rejected' ? 'rejected' : 'fallback', reason: result?.reason || 'frontier-topology-unavailable' });

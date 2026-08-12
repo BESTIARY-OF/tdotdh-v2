@@ -377,6 +377,7 @@ function gpuMapMode() {
 }
 
 async function runWebGpuReduction(deviceCache, normalized, grid, shaderSource) {
+  const startedAt = performance.now();
   const device = await deviceCache.getDevice();
   const usage = gpuBufferUsage();
   const mapMode = gpuMapMode();
@@ -454,13 +455,14 @@ async function runWebGpuReduction(deviceCache, normalized, grid, shaderSource) {
     const gpuEmptyLabels = await runLabels(emptyLabels, false);
     for (const buffer of [...labelBuffers, ...labelReadbacks, labelParams]) buffer.destroy();
     const summary = summarizeLabels(gpuOccupiedLabels, gpuEmptyLabels, grid);
-    return { occupiedMask, area, occupiedLabels: Array.from(gpuOccupiedLabels), emptyLabels: Array.from(gpuEmptyLabels), ...summary };
+    return { occupiedMask, area, occupiedLabels: Array.from(gpuOccupiedLabels), emptyLabels: Array.from(gpuEmptyLabels), ...summary, timings: { gpuMs: Number((performance.now() - startedAt).toFixed(2)) } };
   } finally {
     for (const buffer of [parentBuffer, candidateBuffer, occupiedBuffer, areaBuffer, paramsBuffer, occupiedReadback, areaReadback]) buffer.destroy();
   }
 }
 
 async function runWebGpuBatchReduction(deviceCache, normalizedInputs, grid, { readback = true, pipelineCache = createWebGpuPipelineCache() } = {}) {
+  const startedAt = performance.now();
   const candidateCount = normalizedInputs.length;
   const wordCount = grid.wordCount;
   const cellCount = grid.width * grid.height;
@@ -627,12 +629,12 @@ async function runWebGpuBatchReduction(deviceCache, normalizedInputs, grid, { re
     };
     if (!readback) {
       const summary = await runResidentLabelsAndSummary();
-      return normalizedInputs.map((input, index) => ({ area: areas[index], occupiedComponentCount: summary[index * 2], holes: summary[index * 2 + 1] }));
+      return { reductions: normalizedInputs.map((input, index) => ({ area: areas[index], occupiedComponentCount: summary[index * 2], holes: summary[index * 2 + 1] })), timings: { gpuMs: Number((performance.now() - startedAt).toFixed(2)) } };
     }
     const occupiedResult = await runBatchLabels(true);
     const emptyResult = await runBatchLabels(false);
     const occupiedLabels = occupiedResult.labels, emptyLabels = emptyResult.labels;
-    return normalizedInputs.map((input, index) => {
+    const reductions = normalizedInputs.map((input, index) => {
       const wordStart = index * wordCount;
       const cellStart = index * cellCount;
       const occupiedMask = occupiedFlat.slice(wordStart, wordStart + wordCount);
@@ -640,6 +642,7 @@ async function runWebGpuBatchReduction(deviceCache, normalizedInputs, grid, { re
       const candidateEmptyLabels = emptyLabels.slice(cellStart, cellStart + cellCount);
       return { occupiedMask, area: areas[index], occupiedLabels: candidateOccupiedLabels, emptyLabels: candidateEmptyLabels, ...summarizeLabels(candidateOccupiedLabels, candidateEmptyLabels, grid) };
     });
+    return { reductions, timings: { gpuMs: Number((performance.now() - startedAt).toFixed(2)) } };
   } finally {
     for (const buffer of [parentBuffer, candidateBuffer, occupiedBuffer, areasBuffer, paramsBuffer, occupiedReadback, areasReadback, ...labelResources].filter(Boolean)) buffer.destroy();
   }
@@ -692,13 +695,18 @@ export function createWebGpuFrontierTopology({ gpu = globalThis.navigator?.gpu, 
         accelerator: { backend: 'webgpu', status: 'deferred', area: accelerated?.area ?? 0, occupiedComponentCount: accelerated?.occupiedComponentCount ?? 0, holes: accelerated?.holes ?? 0 },
       });
     }
+    const oracleStartedAt = performance.now();
     const cpu = cpuFrontierTopology(input, normalizedGrid);
+    const oracleMs = performance.now() - oracleStartedAt;
+    const reductionStartedAt = performance.now();
     const cpuReduction = cpuTopologyReduction(input, normalizedGrid);
+    const cpuReductionMs = performance.now() - reductionStartedAt;
+    const timings = Object.freeze({ cpuOracleMs: Number(oracleMs.toFixed(2)), cpuReductionMs: Number(cpuReductionMs.toFixed(2)), gpuMs: accelerated?.timings?.gpuMs ?? null });
     if (!sameMask(accelerated?.occupiedMask, cpuReduction.occupiedMask) || accelerated?.area !== cpuReduction.area || !sameMask(accelerated?.occupiedLabels, cpuReduction.occupiedLabels) || !sameMask(accelerated?.emptyLabels, cpuReduction.emptyLabels) || accelerated?.occupiedComponentCount !== cpuReduction.occupiedComponentCount || accelerated?.holes !== cpuReduction.holes) {
-      return Object.freeze({ schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA, status: 'rejected', backend: 'cpu-oracle', reason: 'topology-parity-mismatch', metrics: cpu.metrics, accelerator: { backend: 'webgpu', status: 'rejected' } });
+      return Object.freeze({ schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA, status: 'rejected', backend: 'cpu-oracle', reason: 'topology-parity-mismatch', metrics: cpu.metrics, accelerator: { backend: 'webgpu', status: 'rejected' }, timings });
     }
     const metrics = Object.freeze({ ...cpu.metrics, holes: accelerated.holes, connected: accelerated.occupiedComponentCount === 1 });
-    return Object.freeze({ schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'labels-verified', metricsBackend: 'cpu-oracle-plus-gpu-labels', occupiedMask: cpu.occupiedMask, metrics, accelerator: { backend: 'webgpu', status: 'verified', area: accelerated.area, occupiedComponentCount: accelerated.occupiedComponentCount, holes: accelerated.holes } });
+    return Object.freeze({ schema: WEBGPU_FRONTIER_TOPOLOGY_SCHEMA, status: 'completed', backend: 'webgpu', parity: 'labels-verified', metricsBackend: 'cpu-oracle-plus-gpu-labels', occupiedMask: cpu.occupiedMask, metrics, accelerator: { backend: 'webgpu', status: 'verified', area: accelerated.area, occupiedComponentCount: accelerated.occupiedComponentCount, holes: accelerated.holes }, timings });
   };
   const evaluate = async input => {
     const cpu = cpuFrontierTopology(input, normalizedGrid);
@@ -724,8 +732,8 @@ export function createWebGpuFrontierTopology({ gpu = globalThis.navigator?.gpu, 
       if (typeof accelerator === 'function') {
         results = await Promise.all(inputs.map(async input => verifyAccelerated(input, await accelerator(normalizeInput(input, normalizedGrid), normalizedGrid), { verifyParity })));
       } else {
-        const reductions = await runWebGpuBatchReduction(deviceCache, inputs.map(input => normalizeInput(input, normalizedGrid)), normalizedGrid, { readback: verifyParity, pipelineCache });
-        results = reductions.map((reduction, index) => verifyAccelerated(inputs[index], reduction, { verifyParity }));
+        const reductionRun = await runWebGpuBatchReduction(deviceCache, inputs.map(input => normalizeInput(input, normalizedGrid)), normalizedGrid, { readback: verifyParity, pipelineCache });
+        results = reductionRun.reductions.map((reduction, index) => verifyAccelerated(inputs[index], { ...reduction, timings: reductionRun.timings }, { verifyParity }));
       }
     } catch (error) {
       deviceCache.reset();
@@ -740,6 +748,11 @@ export function createWebGpuFrontierTopology({ gpu = globalThis.navigator?.gpu, 
       parity: verified ? parity : 'fallback',
       candidateCount: results.length,
       results,
+      timings: Object.freeze({
+        gpuMs: results.reduce((max, result) => Math.max(max, Number(result?.timings?.gpuMs) || 0), 0) || null,
+        cpuOracleMs: Number(results.reduce((sum, result) => sum + (Number(result?.timings?.cpuOracleMs) || 0), 0).toFixed(2)),
+        cpuReductionMs: Number(results.reduce((sum, result) => sum + (Number(result?.timings?.cpuReductionMs) || 0), 0).toFixed(2)),
+      }),
     });
   };
   return Object.freeze({ availability, evaluate, evaluateBatch });
