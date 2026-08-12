@@ -99,7 +99,7 @@ assert.deepEqual(Array.from(overflowReceipt.selectedRows), [0]);
   let createdBuffers = 0;
   const fakeDevice = {
     queue: { writeBuffer() {}, submit() {}, async onSubmittedWorkDone() {} },
-    createBuffer() { createdBuffers += 1; return { destroy() {}, async mapAsync() {}, getMappedRange() { return Uint32Array.from([0, 0, 1, 1]).buffer; }, unmap() {} }; },
+    createBuffer(descriptor = {}) { createdBuffers += 1; const size = descriptor.size, mapped = Boolean((descriptor.usage || 0) & globalThis.GPUBufferUsage.MAP_READ); return { size, destroy() {}, async mapAsync() {}, getMappedRange() { if (mapped && size === 4) return Uint32Array.from([2]).buffer; if (mapped && size >= 96) return Int32Array.from([2, 2, 0, 1, 3, 1, 3, 3, 0, -1, 2, 0]).buffer; return Uint32Array.from([0, 0, 1, 1]).buffer; }, unmap() {} }; },
     createShaderModule() { return {}; },
     createComputePipeline() { return { getBindGroupLayout() { return {}; } }; },
     createBindGroup() { return {}; },
@@ -117,7 +117,7 @@ assert.deepEqual(Array.from(overflowReceipt.selectedRows), [0]);
   assert.equal(createdBuffers, 7, 'persistent navigation reuses its seven GPU buffers');
   const residentPersistentScheduler = createWebGpuFrontierNavigationScheduler({ gpu: { async requestAdapter() { return fakeAdapter; } } });
   const residentPersistentReceipt = await residentPersistentScheduler.selectResidentCandidateRecords([
-    { residentHandle: { schema: 'tdotdh.webgpu-frontier-target-records.v0', device: fakeDevice, recordCount: rows.length, recordsBuffer: fakeDevice.createBuffer(), validityBuffer: fakeDevice.createBuffer() }, piecePlans: [0, 0, 0, 0, 0, 0, 0, 1] },
+    { residentHandle: { schema: 'tdotdh.webgpu-frontier-target-records.v0', device: fakeDevice, recordCount: rows.length, recordsBuffer: fakeDevice.createBuffer(), validityBuffer: fakeDevice.createBuffer(), itemMetadata: [null, null, { pieceId: '0:4', pieceCount: 0 }, { pieceId: '1:7', pieceCount: 0 }] }, piecePlans: [0, 0, 0, 0, 0, 0, 0, 1] },
   ], { planCount: 2, expectedRows: rows });
   assert.equal(residentPersistentReceipt.backend, 'webgpu');
   assert.equal(residentPersistentReceipt.parity, 'verified');
