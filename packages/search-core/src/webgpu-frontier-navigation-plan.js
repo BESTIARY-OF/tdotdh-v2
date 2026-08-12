@@ -513,7 +513,18 @@ function createPersistentGpuResidentNavigationRunner(device, shaderSource) {
     assertNotAborted(signal);
     const countPass = countEncoder.beginComputePass(); countPass.setPipeline(current.countPipeline); countPass.setBindGroup(0, current.bindGroup); countPass.dispatchWorkgroups(Math.ceil(recordCount / FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE)); countPass.end();
     const chooseTargetPass = countEncoder.beginComputePass(); chooseTargetPass.setPipeline(current.chooseTargetPipeline); chooseTargetPass.setBindGroup(0, current.bindGroup); chooseTargetPass.dispatchWorkgroups(Math.ceil(resolvedPlanCount / FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE)); chooseTargetPass.end();
-    const countStarted = performance.now(); device.queue.submit([countEncoder.finish()]); await device.queue.onSubmittedWorkDone(); markStage('countAndUpload', countStarted); assertNotAborted(signal); if (lost) throw new Error('webgpu-device-lost');
+    const countStarted = performance.now();
+    const groupCount = Math.ceil(recordCount / FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE);
+    if (!captureTargetCounts) {
+      device.queue.writeBuffer(buffers.scanParams, 0, new Uint32Array([recordCount, groupCount, 0, 0]));
+      const selectPass = countEncoder.beginComputePass(); selectPass.setPipeline(current.selectPipeline); selectPass.setBindGroup(0, current.bindGroup); selectPass.dispatchWorkgroups(Math.ceil(recordCount / FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE)); selectPass.end();
+      const scanPass = countEncoder.beginComputePass(); scanPass.setPipeline(current.scanPipeline); scanPass.setBindGroup(0, current.scanBindGroup); scanPass.dispatchWorkgroups(groupCount); scanPass.end();
+      countEncoder.copyBufferToBuffer(buffers.groupTotals, 0, buffers.groupReadback, 0, Math.max(4, groupCount * 4));
+      device.queue.submit([countEncoder.finish()]); await device.queue.onSubmittedWorkDone(); assertNotAborted(signal); if (lost) throw new Error('webgpu-device-lost');
+      await buffers.groupReadback.mapAsync(mapMode.READ); assertNotAborted(signal); var groupTotals = Array.from(new Uint32Array(buffers.groupReadback.getMappedRange().slice(0, Math.max(4, groupCount * 4)))); buffers.groupReadback.unmap(); markStage('countSelectScanReadback', countStarted);
+    } else {
+      device.queue.submit([countEncoder.finish()]); await device.queue.onSubmittedWorkDone(); markStage('countAndUpload', countStarted); assertNotAborted(signal); if (lost) throw new Error('webgpu-device-lost');
+    }
     let targetCounts = null;
     if (captureTargetCounts) {
       const targetCountBytes = Math.max(4, resolvedPlanCount * FRONTIER_NAVIGATION_RESIDENT_MAX_TARGETS * 4);
@@ -521,13 +532,15 @@ function createPersistentGpuResidentNavigationRunner(device, shaderSource) {
       const targetCountStarted = performance.now(); const countReadbackEncoder = device.createCommandEncoder(); countReadbackEncoder.copyBufferToBuffer(buffers.targetCounts, 0, buffers.targetCountsReadback, 0, targetCountBytes); device.queue.submit([countReadbackEncoder.finish()]); await device.queue.onSubmittedWorkDone(); assertNotAborted(signal);
       await buffers.targetCountsReadback.mapAsync(mapMode.READ); assertNotAborted(signal); targetCounts = Array.from(new Uint32Array(buffers.targetCountsReadback.getMappedRange().slice(0, targetCountBytes))); buffers.targetCountsReadback.unmap(); markStage('targetCountsReadback', targetCountStarted);
     }
-    const groupCount = Math.ceil(recordCount / FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE);
-    device.queue.writeBuffer(buffers.scanParams, 0, new Uint32Array([recordCount, groupCount, 0, 0]));
-    const selectAndScanEncoder = device.createCommandEncoder();
-    const selectPass = selectAndScanEncoder.beginComputePass(); selectPass.setPipeline(current.selectPipeline); selectPass.setBindGroup(0, current.bindGroup); selectPass.dispatchWorkgroups(Math.ceil(recordCount / FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE)); selectPass.end();
-    const scanPass = selectAndScanEncoder.beginComputePass(); scanPass.setPipeline(current.scanPipeline); scanPass.setBindGroup(0, current.scanBindGroup); scanPass.dispatchWorkgroups(groupCount); scanPass.end();
-    const selectScanStarted = performance.now(); selectAndScanEncoder.copyBufferToBuffer(buffers.groupTotals, 0, buffers.groupReadback, 0, Math.max(4, groupCount * 4)); device.queue.submit([selectAndScanEncoder.finish()]); await device.queue.onSubmittedWorkDone(); assertNotAborted(signal); if (lost) throw new Error('webgpu-device-lost');
-    await buffers.groupReadback.mapAsync(mapMode.READ); assertNotAborted(signal); const groupTotals = Array.from(new Uint32Array(buffers.groupReadback.getMappedRange().slice(0, Math.max(4, groupCount * 4)))); buffers.groupReadback.unmap(); markStage('selectScanReadback', selectScanStarted); const groupOffsets = new Uint32Array(groupCount); let selectedCount = 0; for (let index = 0; index < groupCount; index += 1) { groupOffsets[index] = selectedCount; selectedCount += groupTotals[index] || 0; }
+    if (captureTargetCounts) {
+      device.queue.writeBuffer(buffers.scanParams, 0, new Uint32Array([recordCount, groupCount, 0, 0]));
+      const selectAndScanEncoder = device.createCommandEncoder();
+      const selectPass = selectAndScanEncoder.beginComputePass(); selectPass.setPipeline(current.selectPipeline); selectPass.setBindGroup(0, current.bindGroup); selectPass.dispatchWorkgroups(Math.ceil(recordCount / FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE)); selectPass.end();
+      const scanPass = selectAndScanEncoder.beginComputePass(); scanPass.setPipeline(current.scanPipeline); scanPass.setBindGroup(0, current.scanBindGroup); scanPass.dispatchWorkgroups(groupCount); scanPass.end();
+      const selectScanStarted = performance.now(); selectAndScanEncoder.copyBufferToBuffer(buffers.groupTotals, 0, buffers.groupReadback, 0, Math.max(4, groupCount * 4)); device.queue.submit([selectAndScanEncoder.finish()]); await device.queue.onSubmittedWorkDone(); assertNotAborted(signal); if (lost) throw new Error('webgpu-device-lost');
+      await buffers.groupReadback.mapAsync(mapMode.READ); assertNotAborted(signal); groupTotals = Array.from(new Uint32Array(buffers.groupReadback.getMappedRange().slice(0, Math.max(4, groupCount * 4)))); buffers.groupReadback.unmap(); markStage('selectScanReadback', selectScanStarted);
+    }
+    const groupOffsets = new Uint32Array(groupCount); let selectedCount = 0; for (let index = 0; index < groupCount; index += 1) { groupOffsets[index] = selectedCount; selectedCount += groupTotals[index] || 0; }
     device.queue.writeBuffer(buffers.groupOffsets, 0, groupOffsets); device.queue.writeBuffer(buffers.scanParams, 0, new Uint32Array([recordCount, groupCount, 0, 0]));
     const compactStarted = performance.now(); const compactEncoder = device.createCommandEncoder(), compactPass = compactEncoder.beginComputePass(); compactPass.setPipeline(current.compactPipeline); compactPass.setBindGroup(0, current.compactBindGroup); compactPass.dispatchWorkgroups(groupCount); compactPass.end(); compactEncoder.copyBufferToBuffer(buffers.compactedRecords, 0, buffers.compactedReadback, 0, Math.max(4, selectedCount * FRONTIER_NAVIGATION_RESIDENT_COMPACTED_STRIDE * 4)); device.queue.submit([compactEncoder.finish()]); await device.queue.onSubmittedWorkDone(); assertNotAborted(signal); if (lost) throw new Error('webgpu-device-lost');
     const compactedBytes = Math.max(4, selectedCount * FRONTIER_NAVIGATION_RESIDENT_COMPACTED_STRIDE * 4); let rawCompactedRecords = new Int32Array(); if (selectedCount) { await buffers.compactedReadback.mapAsync(mapMode.READ); assertNotAborted(signal); rawCompactedRecords = new Int32Array(buffers.compactedReadback.getMappedRange().slice(0, compactedBytes)); buffers.compactedReadback.unmap(); } markStage('compactReadback', compactStarted); dispatchCount += 1;
