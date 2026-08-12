@@ -30,8 +30,6 @@ struct Params { candidateCount: u32, wordCount: u32, pieceCount: u32, width: u32
 @group(0) @binding(11) var<storage, read> parentStateIndices: array<u32>;
 @group(0) @binding(12) var<storage, read> outputStateIndices: array<u32>;
 
-fn labelBit(base: u32, offset: u32) -> u32 { return (nextLabels[base + offset / 32u] >> (offset % 32u)) & 1u; }
-
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= params.candidateCount) { return; }
@@ -56,29 +54,52 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
       canonicalLabels[localOffset] = 0u;
     }
   }
+  let rowWordCount = (params.width + 31u) / 32u;
   var found = false;
-  var minX: i32 = 0;
-  var minY: i32 = 0;
+  var minX: i32 = i32(params.width);
+  var minY: i32 = i32(params.height);
   for (var y: u32 = 0u; y < params.height; y++) {
-    for (var x: u32 = 0u; x < params.width; x++) {
-      let offset = y * params.width + x;
-      var occupied = false;
-      for (var piece: u32 = 0u; piece < params.pieceCount; piece++) {
-        if (labelBit(localBase + piece * labelStride, offset) == 1u) { occupied = true; }
+    for (var piece: u32 = 0u; piece < params.pieceCount; piece++) {
+      let rowBase = localBase + piece * labelStride + y * rowWordCount;
+      for (var word: u32 = 0u; word < rowWordCount; word++) {
+        let value = nextLabels[rowBase + word];
+        if (value != 0u) {
+          found = true;
+          minY = min(minY, i32(y));
+          for (var bit: u32 = 0u; bit < 32u; bit++) {
+            if (word * 32u + bit < params.width && ((value >> bit) & 1u) == 1u) {
+              minX = min(minX, i32(word * 32u + bit));
+              break;
+            }
+          }
+        }
       }
-      if (occupied) { if (!found) { minX = i32(x); minY = i32(y); found = true; } else { minX = min(minX, i32(x)); minY = min(minY, i32(y)); } }
     }
   }
   if (found) {
+    let shiftWords = u32(minX) / 32u;
+    let shiftBits = u32(minX) % 32u;
     for (var piece: u32 = 0u; piece < params.pieceCount; piece++) {
-      for (var y: u32 = 0u; y < params.height; y++) {
-        for (var x: u32 = 0u; x < params.width; x++) {
-          let offset = y * params.width + x;
-          if (labelBit(localBase + piece * labelStride, offset) == 1u) {
-            let canonicalX = i32(x) - minX; let canonicalY = i32(y) - minY;
-            let canonicalOffset = u32(canonicalY * i32(params.width) + canonicalX);
-            let destination = localBase + piece * labelStride + canonicalOffset / 32u;
-            canonicalLabels[destination] = canonicalLabels[destination] | (1u << (canonicalOffset % 32u));
+      for (var sourceY: u32 = 0u; sourceY < params.height; sourceY++) {
+        let destinationY = i32(sourceY) - minY;
+        if (destinationY >= 0 && destinationY < i32(params.height)) {
+          let sourceBase = localBase + piece * labelStride + sourceY * rowWordCount;
+          let destinationBase = localBase + piece * labelStride + u32(destinationY) * rowWordCount;
+          for (var sourceWord: u32 = 0u; sourceWord < rowWordCount; sourceWord++) {
+            if (sourceWord >= shiftWords) {
+              let value = nextLabels[sourceBase + sourceWord];
+              let destinationWord = sourceWord - shiftWords;
+              if (destinationWord < rowWordCount) {
+                if (shiftBits == 0u) {
+                  canonicalLabels[destinationBase + destinationWord] = canonicalLabels[destinationBase + destinationWord] | value;
+                } else {
+                  canonicalLabels[destinationBase + destinationWord] = canonicalLabels[destinationBase + destinationWord] | (value >> shiftBits);
+                  if (destinationWord > 0u) {
+                    canonicalLabels[destinationBase + destinationWord - 1u] = canonicalLabels[destinationBase + destinationWord - 1u] | (value << (32u - shiftBits));
+                  }
+                }
+              }
+            }
           }
         }
       }
