@@ -220,8 +220,12 @@ async function dispatch(device, resources, candidates, pieceIds, outputIndices, 
     encoder.copyBufferToBuffer(buffers.canonicalLabels, 0, buffers.canonicalReadback, 0, labelBytes);
   }
   encoder.copyBufferToBuffer(buffers.digests, 0, buffers.digestReadback, 0, digestBytes);
-  device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
-  const nextLabels = readLabels ? await readback(buffers.nextReadback, labelBytes) : [], canonicalLabels = readLabels ? await readback(buffers.canonicalReadback, labelBytes) : [], digestValues = await readback(buffers.digestReadback, digestBytes), absoluteHashes = [], canonicalHashes = [];
+  device.queue.submit([encoder.finish()]);
+  const [nextLabels, canonicalLabels, digestValues] = await Promise.all([
+    readLabels ? readback(buffers.nextReadback, labelBytes) : Promise.resolve([]),
+    readLabels ? readback(buffers.canonicalReadback, labelBytes) : Promise.resolve([]),
+    readback(buffers.digestReadback, digestBytes),
+  ]), absoluteHashes = [], canonicalHashes = [];
   for (let index = 0; index < count; index++) { absoluteHashes.push(digestValues[index * 2]); canonicalHashes.push(digestValues[index * 2 + 1]); }
   return { nextLabels, canonicalLabels, absoluteHashes, canonicalHashes, readback: readLabels ? 'full-labels-and-digests' : 'state-digests-only' };
 }
