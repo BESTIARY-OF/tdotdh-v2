@@ -1252,6 +1252,19 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     }
     return { ...receipt, timingTotals: { ...topologyTimingTotals } };
   };
+  const dispatchTimingTotals = {
+    frontierMetrics: { calls: 0, uploadMs: 0, submitMs: 0, readbackMs: 0, totalMs: 0 },
+    frontierState: { calls: 0, uploadMs: 0, submitMs: 0, readbackMs: 0, totalMs: 0 },
+  };
+  const withDispatchTimingTotals = (stage, receipt) => {
+    const timings = receipt?.dispatchTimings, totals = dispatchTimingTotals[stage];
+    if (!timings || !totals) return receipt;
+    totals.calls += Number.isFinite(Number(timings.calls)) ? Number(timings.calls) : 1;
+    for (const name of ['uploadMs', 'submitMs', 'readbackMs', 'totalMs']) {
+      if (Number.isFinite(Number(timings[name]))) totals[name] += Number(timings[name]);
+    }
+    return { ...receipt, dispatchTimingTotals: { ...totals } };
+  };
   const frontierDedupTrace = [];
   if (frontierTargetGeneratorStatus?.status !== 'available' && frontierTargetGeneratorStatus) frontierTargetGenerationReceipt = { status: 'fallback', reason: frontierTargetGeneratorStatus.reason || 'frontier-target-generator-unavailable' };
   if (frontierTargetPoolStatus?.status !== 'available' && frontierTargetPoolStatus) frontierTargetPoolReceipt = { status: 'fallback', reason: frontierTargetPoolStatus.reason || 'frontier-target-pool-unavailable' };
@@ -1378,7 +1391,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const navigationPlanHistory = [];
   let lockedSearchNodes = 0;
   if (seedBranches.length && searchStrategy === 'breadth' && !gpuFirstSearch) {
-    const lockedResult = await searchLockedSeedBranches(pieces, seedBranches, knownFamilies, centroidId, targetNeighborCount, Boolean(targetFamily), knownSignatures, searchHints, positionPreferences, random, quality, candidatePrefilter, receipt => { prefilterReceipt = receipt; }, options.frontierValidator, frontierEvaluator, frontierGenerator, frontierGeneratorStatus, receipt => { frontierReceipt = receipt; }, receipt => { frontierGenerationReceipt = receipt; }, isCancelled, options.frontierMetrics, receipt => { frontierMetricsReceipt = receipt; }, options.frontierState, receipt => { frontierStateReceipt = receipt; }, frontierTopology, receipt => { frontierTopologyReceipt = receipt; }, fieldMetricsAdapter, frontierTargetPool, frontierTargetPoolStatus, receipt => { frontierTargetPoolReceipt = receipt; }, frontierNavigator, frontierCandidateRecords, navigationScheduler, receipt => { navigationPlanReceipt = receipt; }, navigationBatch);
+    const lockedResult = await searchLockedSeedBranches(pieces, seedBranches, knownFamilies, centroidId, targetNeighborCount, Boolean(targetFamily), knownSignatures, searchHints, positionPreferences, random, quality, candidatePrefilter, receipt => { prefilterReceipt = receipt; }, options.frontierValidator, frontierEvaluator, frontierGenerator, frontierGeneratorStatus, receipt => { frontierReceipt = receipt; }, receipt => { frontierGenerationReceipt = receipt; }, isCancelled, options.frontierMetrics, receipt => { frontierMetricsReceipt = withDispatchTimingTotals('frontierMetrics', receipt); }, options.frontierState, receipt => { frontierStateReceipt = withDispatchTimingTotals('frontierState', receipt); }, frontierTopology, receipt => { frontierTopologyReceipt = receipt; }, fieldMetricsAdapter, frontierTargetPool, frontierTargetPoolStatus, receipt => { frontierTargetPoolReceipt = receipt; }, frontierNavigator, frontierCandidateRecords, navigationScheduler, receipt => { navigationPlanReceipt = receipt; }, navigationBatch);
     if (lockedResult?.placements || !targetFamily) return { ...lockedResult, prefilter: prefilterReceipt, frontier: frontierReceipt, navigationPlan: navigationPlanReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierRanker: frontierRankerReceipt, frontierScore: frontierScoreReceipt, frontierCompactor: frontierCompactorReceipt, frontierDedup: frontierDedupReceipt };
     lockedSearchNodes = Number(lockedResult?.nodes) || 0;
     targetFamily = null;
@@ -1601,12 +1614,12 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       finally { gpuSubstageTimings[name] = Number((performance.now() - started).toFixed(2)); }
     };
     const terminalTransition = depth === pieceCount - 2;
-    const frontierGeometryBoundary = await timeGpuSubstage('frontierMetrics', () => evaluateFrontierGeometryAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateGeometry ? null : frontierMetrics, receipt => { frontierMetricsReceipt = receipt; stageHistory.frontierMetrics.push({ depth, ...receipt }); }));
+    const frontierGeometryBoundary = await timeGpuSubstage('frontierMetrics', () => evaluateFrontierGeometryAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateGeometry ? null : frontierMetrics, receipt => { const timedReceipt = withDispatchTimingTotals('frontierMetrics', receipt); frontierMetricsReceipt = timedReceipt; stageHistory.frontierMetrics.push({ depth, ...timedReceipt }); }));
     beamJobs = frontierGeometryBoundary?.jobs || beamJobs;
     await timeGpuSubstage('fieldMetrics', () => evaluateFieldAggregatesAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateFieldMetrics ? null : fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; stageHistory.fieldMetrics.push({ depth, ...receipt }); }, verifyGpuTransitionParity || terminalTransition));
     await timeGpuSubstage('frontierValidity', () => evaluateFrontierOptionsAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateValidity ? null : frontierEvaluator, options.disableGpuCandidateValidity ? null : options.frontierValidator, receipt => { frontierReceipt = { ...receipt, ...(navigationTicket ? { ticket: navigationTicket } : {}), ...(navigationCursor ? { cursor: { ...navigationCursor, depth, nodeOffset: navigationCursor.nodeOffset + nodes } } : {}) }; stageHistory.frontier.push({ depth, ...frontierReceipt }); }));
     frontierNavigator?.beginLayer?.();
-    await timeGpuSubstage('frontierState', () => evaluateFrontierStateAcrossBeam(beamJobs, frontierNavigator || frontierState, receipt => { const historyEntry = { depth, ...receipt }, history = [...stageHistory.frontierState, historyEntry]; frontierStateReceipt = { ...receipt, history: history.slice(-64) }; stageHistory.frontierState.push(historyEntry); }, { verifyParity: verifyGpuTransitionParity || terminalTransition, readDigests: !(options.enableGpuResidentDigestConsumer === true) || terminalTransition }));
+    await timeGpuSubstage('frontierState', () => evaluateFrontierStateAcrossBeam(beamJobs, frontierNavigator || frontierState, receipt => { const timedReceipt = withDispatchTimingTotals('frontierState', receipt), historyEntry = { depth, ...timedReceipt }, history = [...stageHistory.frontierState, historyEntry]; frontierStateReceipt = { ...timedReceipt, history: history.slice(-64) }; stageHistory.frontierState.push(historyEntry); }, { verifyParity: verifyGpuTransitionParity || terminalTransition, readDigests: !(options.enableGpuResidentDigestConsumer === true) || terminalTransition }));
     frontierNavigator?.commitLayer?.();
     const cancelledAfterGpu = isCancelled();
     if (navigationCancellation) navigationCancellation(cancelledAfterGpu);
