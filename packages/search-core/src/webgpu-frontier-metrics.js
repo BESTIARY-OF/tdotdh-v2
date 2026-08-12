@@ -370,9 +370,18 @@ export function createWebGpuFrontierMetrics({ gpu = globalThis.navigator?.gpu, g
             batches.push({ resources: resource, count: dispatch.count, outputBytes: dispatch.outputBytes, dispatchStarted: dispatch.dispatchStarted, dispatchTimings: dispatch.dispatchTimings });
           } catch (error) { discardGpuResources(resource); throw error; }
         }
-        let resolution = null;
-        const resolve = () => { if (!resolution) resolution = resolveResidentBatches(batches, cpu); return resolution; };
-        return Object.freeze({ schema: WEBGPU_FRONTIER_METRICS_RESIDENT_HANDLE_SCHEMA, status: 'resident', backend: 'webgpu', parity: 'deferred', candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, metricCount: FRONTIER_METRIC_COUNT, batches: batches.length, resolve });
+        let resolution = null, released = false;
+        const release = () => {
+          if (released) return;
+          released = true;
+          for (const batch of batches) releaseGpuResources(batch.resources);
+        };
+        const resolve = () => {
+          if (released) return Promise.resolve(unavailable('resident-handle-released', normalizedGrid, cpu));
+          if (!resolution) resolution = resolveResidentBatches(batches, cpu);
+          return resolution;
+        };
+        return Object.freeze({ schema: WEBGPU_FRONTIER_METRICS_RESIDENT_HANDLE_SCHEMA, status: 'resident', backend: 'webgpu', parity: 'deferred', candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, metricCount: FRONTIER_METRIC_COUNT, batches: batches.length, resolve, release });
       } catch (error) {
         for (const batch of batches) discardGpuResources(batch.resources);
         deviceCache.reset();

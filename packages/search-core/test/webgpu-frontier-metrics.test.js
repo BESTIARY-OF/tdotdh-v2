@@ -48,6 +48,7 @@ try {
   assert.equal(resident.status, 'resident');
   assert.equal(resident.parity, 'deferred');
   assert.equal(resident.metricCount, 6);
+  assert.equal(typeof resident.release, 'function');
   assert.equal(mappedReads, 2, 'resident evaluation must not read back before the result boundary');
   const resolved = await resident.resolve();
   assert.equal(resolved.status, 'completed');
@@ -55,6 +56,8 @@ try {
   assert.deepEqual(resolved.metrics, cpu.metrics);
   assert.equal(mappedReads, 3, 'resident resolve must perform exactly one result readback');
   assert.equal(createdBuffers, 7, 'resolved resident output must release its reusable resource');
+  resident.release();
+  assert.equal((await resident.resolve()).reason, 'resident-handle-released');
 } finally {
   if (previousBufferUsage === undefined) delete globalThis.GPUBufferUsage; else globalThis.GPUBufferUsage = previousBufferUsage;
   if (previousMapMode === undefined) delete globalThis.GPUMapMode; else globalThis.GPUMapMode = previousMapMode;

@@ -655,22 +655,36 @@ async function evaluateFrontierGeometry(entries, state, centroidId, frontierMetr
 }
 
 async function evaluateFrontierGeometryAcrossBeam(jobs, centroidId, frontierMetrics, onMetrics = () => {}) {
-  if (!frontierMetrics?.evaluate || !jobs.length) return jobs;
+  if ((!frontierMetrics?.evaluate && !frontierMetrics?.evaluateResident) || !jobs.length) return { jobs, residentHandle: null };
   try {
     const pending = [];
     for (const [jobIndex, job] of jobs.entries()) {
       const input = frontierInputForState(job.state, centroidId);
       for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, entry, candidate: createFrontierMetricsCandidate({ ...input, candidateCells: entry.candidate.cells, candidateMask: cachedFrontierMask(entry.candidate.cells), bounds: job.state.bounds }) });
     }
-    if (!pending.length) return jobs;
+    if (!pending.length) return { jobs, residentHandle: null };
+    if (frontierMetrics.evaluateResident) {
+      const resident = await frontierMetrics.evaluateResident(pending.map(item => item.candidate));
+      if (resident?.status === 'resident' && resident.parity === 'deferred' && typeof resident.resolve === 'function') {
+        onMetrics({ status: 'resident', backend: resident.backend || 'webgpu', parity: resident.parity, reason: null, candidateCount: pending.length, batch: 'beam', boundsGroups: 1 });
+        const resolve = async () => {
+          const resolved = await resident.resolve();
+          const used = resolved?.status === 'completed' && resolved.parity === 'verified' && Array.isArray(resolved.metrics) && resolved.metrics.length === pending.length;
+          if (used) for (const [index, item] of pending.entries()) jobs[item.jobIndex].entries[item.entryIndex] = { ...item.entry, gpuGeometry: resolved.metrics[index] };
+          onMetrics({ status: used ? 'used' : 'fallback', backend: used ? (resolved.backend || 'compute-shader') : 'cpu-oracle', parity: used ? resolved.parity : 'oracle', reason: used ? null : (resolved?.reason || 'frontier-metrics-unavailable'), candidateCount: pending.length, batch: 'beam', boundsGroups: 1, ...(resolved?.dispatchTimings ? { dispatchTimings: resolved.dispatchTimings } : {}) });
+          return used;
+        };
+        return { jobs, residentHandle: resident, resolve, release: resident.release };
+      }
+    }
     const result = await frontierMetrics.evaluate(pending.map(item => item.candidate));
     const used = result?.status === 'completed' && result.parity === 'verified' && Array.isArray(result.metrics) && result.metrics.length === pending.length;
     const reason = used ? null : (result?.reason || 'frontier-metrics-unavailable');
     if (used) for (const [index, item] of pending.entries()) jobs[item.jobIndex].entries[item.entryIndex] = { ...item.entry, gpuGeometry: result.metrics[index] };
     onMetrics({ status: used ? 'used' : 'fallback', backend: used ? 'compute-shader' : 'cpu-oracle', parity: used ? 'verified' : 'oracle', reason, candidateCount: pending.length, batch: 'beam', boundsGroups: 1, ...(result?.dispatchTimings ? { dispatchTimings: result.dispatchTimings } : {}) });
-    if (used) return jobs;
+    if (used) return { jobs, residentHandle: null };
   } catch (error) { onMetrics({ status: 'fallback', reason: `frontier-metrics-failed:${error.message}`, batch: 'beam' }); }
-  return jobs;
+  return { jobs, residentHandle: null };
 }
 
 async function evaluateFieldAggregates(entries, state, centroidId, fieldMetricsAdapter, onMetrics = () => {}, verifyParity = true) {
@@ -1238,17 +1252,20 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   }
   async function deduplicateRankedOptions(entries, state) {
     if (!frontierDeduplicator?.deduplicate || !entries.length || frontierDeduplicatorStatus?.status !== 'available') return entries;
-    if (entries.some(entry => !entry.gpuState)) {
-      if (frontierDedupReceipt.status === 'cpu-oracle') frontierDedupReceipt = { status: 'fallback', reason: 'gpu-state-unavailable' };
+    const eligible = entries.filter(entry => entry.gpuState);
+    const fallback = entries.length - eligible.length;
+    if (!eligible.length) {
+      if (frontierDedupReceipt.status === 'cpu-oracle') frontierDedupReceipt = { status: 'fallback', reason: 'gpu-state-unavailable', candidateCount: entries.length };
       return entries;
     }
-    const rows = entries.map(entry => ({ hash: (Number.isSafeInteger(entry.gpuState.absoluteHash) ? entry.gpuState.absoluteHash : entry.gpuState.stateKeyHash) >>> 0, signature: arrangementSignature([...state.placements, entry.candidate]) }));
+    const rows = eligible.map(entry => ({ hash: (Number.isSafeInteger(entry.gpuState.absoluteHash) ? entry.gpuState.absoluteHash : entry.gpuState.stateKeyHash) >>> 0, signature: arrangementSignature([...state.placements, entry.candidate]) }));
     const result = await frontierDeduplicator.deduplicate(rows);
-    if (result?.status === 'completed' && result?.parity === 'verified' && Array.isArray(result.keep) && result.keep.length === entries.length) {
-      frontierDedupReceipt = { status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: entries.length, batch: 'beam' };
-      return entries.filter((entry, index) => result.keep[index] === 1);
+    if (result?.status === 'completed' && result?.parity === 'verified' && Array.isArray(result.keep) && result.keep.length === eligible.length) {
+      const kept = new Set(eligible.filter((entry, index) => result.keep[index] === 1));
+      frontierDedupReceipt = { status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: eligible.length, batch: 'beam', ...(fallback ? { fallbackCount: fallback } : {}) };
+      return entries.filter(entry => !entry.gpuState || kept.has(entry));
     }
-    if (frontierDedupReceipt.status === 'cpu-oracle') frontierDedupReceipt = { status: 'fallback', reason: result?.reason || 'frontier-deduplicator-unavailable' };
+    if (frontierDedupReceipt.status === 'cpu-oracle') frontierDedupReceipt = { status: 'fallback', reason: result?.reason || 'frontier-deduplicator-unavailable', candidateCount: eligible.length, ...(fallback ? { fallbackCount: fallback } : {}) };
     return entries;
   }
   async function deduplicateRankedOptionsMany(jobs) {
@@ -1377,7 +1394,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     const nextBeam = [];
     const gpuStateBuckets = new Map();
     const cpuStateKeys = new Set();
-    const beamJobs = [];
+    let beamJobs = [];
     const beamPlans = [];
     for (const [stateIndex, state] of beam.entries()) {
       // Keep cancellation responsive without paying a zero-delay timer turn
@@ -1566,7 +1583,8 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       finally { gpuSubstageTimings[name] = Number((performance.now() - started).toFixed(2)); }
     };
     const terminalTransition = depth === pieceCount - 2;
-    await timeGpuSubstage('frontierMetrics', () => evaluateFrontierGeometryAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateGeometry ? null : frontierMetrics, receipt => { frontierMetricsReceipt = receipt; stageHistory.frontierMetrics.push({ depth, ...receipt }); }));
+    const frontierGeometryBoundary = await timeGpuSubstage('frontierMetrics', () => evaluateFrontierGeometryAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateGeometry ? null : frontierMetrics, receipt => { frontierMetricsReceipt = receipt; stageHistory.frontierMetrics.push({ depth, ...receipt }); }));
+    beamJobs = frontierGeometryBoundary?.jobs || beamJobs;
     await timeGpuSubstage('fieldMetrics', () => evaluateFieldAggregatesAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateFieldMetrics ? null : fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; stageHistory.fieldMetrics.push({ depth, ...receipt }); }, verifyGpuTransitionParity || terminalTransition));
     await timeGpuSubstage('frontierValidity', () => evaluateFrontierOptionsAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateValidity ? null : frontierEvaluator, options.disableGpuCandidateValidity ? null : options.frontierValidator, receipt => { frontierReceipt = { ...receipt, ...(navigationTicket ? { ticket: navigationTicket } : {}), ...(navigationCursor ? { cursor: { ...navigationCursor, depth, nodeOffset: navigationCursor.nodeOffset + nodes } } : {}) }; stageHistory.frontier.push({ depth, ...frontierReceipt }); }));
     frontierNavigator?.beginLayer?.();
@@ -1574,8 +1592,9 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     frontierNavigator?.commitLayer?.();
     const cancelledAfterGpu = isCancelled();
     if (navigationCancellation) navigationCancellation(cancelledAfterGpu);
-    if (cancelledAfterGpu) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierDedup: frontierDedupReceipt };
+    if (cancelledAfterGpu) { frontierGeometryBoundary?.release?.(); return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierDedup: frontierDedupReceipt }; }
     await timeGpuSubstage('frontierTopology', () => evaluateFrontierTopologyAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateTopology ? null : frontierTopology, receipt => { frontierTopologyReceipt = receipt; stageHistory.frontierTopology.push({ depth, ...receipt }); }, frontierTopologyAvailabilityReceipt));
+    if (frontierGeometryBoundary?.resolve) await timeGpuSubstage('frontierMetricsResultBoundary', () => frontierGeometryBoundary.resolve());
     markDepthTiming('gpuEvaluationMs');
     const rankedJobs = [];
     for (const job of beamJobs) {
