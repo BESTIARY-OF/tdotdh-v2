@@ -197,7 +197,17 @@ function parentReferenceReceipt(candidates) {
   });
 }
 
-function flatten(candidates, property, width) { const flat = new Uint32Array(candidates.length * width); candidates.forEach((candidate, index) => flat.set(candidate[property], index * width)); return flat; }
+function flatten(candidates, property, width) {
+  const flat = new Uint32Array(candidates.length * width);
+  for (let index = 0; index < candidates.length; index += 1) flat.set(candidates[index][property], index * width);
+  return flat;
+}
+
+function uint32Values(values, property = null) {
+  const flat = new Uint32Array(values.length);
+  for (let index = 0; index < values.length; index += 1) flat[index] = property ? values[index][property] : values[index];
+  return flat;
+}
 function equalArrays(left, right) { return JSON.stringify(left) === JSON.stringify(right); }
 function parityMismatchReason(actual, expected, context = {}) {
   for (const [name, values] of Object.entries(actual)) {
@@ -275,16 +285,14 @@ async function dispatch(device, resources, candidates, pieceIds, outputIndices, 
   // the same dispatch. Avoiding the full seed transfer is the fast path once
   // a beam layer is resident on the GPU.
   device.queue.writeBuffer(buffers.candidateMasks, 0, flatten(candidates, 'candidateMask', grid.wordCount));
-  device.queue.writeBuffer(buffers.candidatePieceIndices, 0, Uint32Array.from(candidates.map(candidate => candidate.candidatePieceIndex)));
+  device.queue.writeBuffer(buffers.candidatePieceIndices, 0, uint32Values(candidates, 'candidatePieceIndex'));
   device.queue.writeBuffer(buffers.remainingMasks, 0, flatten(candidates, 'remainingMask', REMAINING_MASK_WORD_COUNT));
-  const parentStateIndices = candidates.map((candidate, index) => {
-    if (candidate.parentStateIndex != null) return candidate.parentStateIndex;
-    return RESIDENT_PARENT_SENTINEL;
-  });
-  device.queue.writeBuffer(buffers.parentStateIndices, 0, Uint32Array.from(parentStateIndices));
+  const parentStateIndices = uint32Values(candidates.map(candidate => candidate.parentStateIndex == null ? RESIDENT_PARENT_SENTINEL : candidate.parentStateIndex));
+  device.queue.writeBuffer(buffers.parentStateIndices, 0, parentStateIndices);
   device.queue.writeBuffer(buffers.gatherParams, 0, new Uint32Array([count, labelsPerState, 0, 0]));
-  device.queue.writeBuffer(buffers.outputStateIndices, 0, Uint32Array.from(outputIndices));
-  device.queue.writeBuffer(buffers.publishOutputIndices, 0, Uint32Array.from(outputIndices));
+  const outputStateIndices = outputIndices instanceof Uint32Array ? outputIndices : uint32Values(outputIndices);
+  device.queue.writeBuffer(buffers.outputStateIndices, 0, outputStateIndices);
+  device.queue.writeBuffer(buffers.publishOutputIndices, 0, outputStateIndices);
   device.queue.writeBuffer(buffers.publishParams, 0, new Uint32Array([count, labelsPerState, 0, 0]));
   device.queue.writeBuffer(buffers.params, 0, new Int32Array([count, grid.wordCount, pieceIds.length, grid.width, grid.height, grid.originX, grid.originY, 0]));
   const uploadMs = performance.now() - dispatchStarted;
@@ -370,7 +378,7 @@ export function createWebGpuResidentFrontierState({ gpu = globalThis.navigator?.
         const nextLabels = [], canonicalLabels = [], absoluteHashes = [], canonicalHashes = [], residentStateIndices = [], dispatchTimings = { calls: 0, uploadMs: 0, submitMs: 0, readbackMs: 0, totalMs: 0 }, append = (target, values) => { for (const value of values) target.push(value); };
         const deferDigests = readDigests === false && verifyParity !== true && normalized.length <= batchCapacity;
         let residentDigestRef = null;
-        for (let offset = 0; offset < normalized.length; offset += batchCapacity) { const batch = normalized.slice(offset, offset + batchCapacity), outputIndices = batch.map((_, index) => layer.baseSlot + layer.nextSlot + offset + index), result = await dispatch(device, resources, batch, pieceIds, outputIndices, normalizedGrid, { readLabels: verifyParity, readDigests: !deferDigests, digestGeneration: layer.pendingEpoch }); append(nextLabels, result.nextLabels); append(canonicalLabels, result.canonicalLabels); append(absoluteHashes, result.absoluteHashes); append(canonicalHashes, result.canonicalHashes); append(residentStateIndices, outputIndices); if (result.residentDigestRef) residentDigestRef = result.residentDigestRef; for (const name of ['uploadMs', 'submitMs', 'readbackMs', 'totalMs']) { dispatchTimings[name] += result.dispatchTimings?.[name] || 0; dispatchTimingTotals[name] += result.dispatchTimings?.[name] || 0; } dispatchTimings.calls += 1; dispatchTimingTotals.calls += 1; }
+        for (let offset = 0; offset < normalized.length; offset += batchCapacity) { const batch = normalized.slice(offset, offset + batchCapacity), outputIndices = new Uint32Array(batch.length); for (let index = 0; index < outputIndices.length; index += 1) outputIndices[index] = layer.baseSlot + layer.nextSlot + offset + index; const result = await dispatch(device, resources, batch, pieceIds, outputIndices, normalizedGrid, { readLabels: verifyParity, readDigests: !deferDigests, digestGeneration: layer.pendingEpoch }); append(nextLabels, result.nextLabels); append(canonicalLabels, result.canonicalLabels); append(absoluteHashes, result.absoluteHashes); append(canonicalHashes, result.canonicalHashes); append(residentStateIndices, outputIndices); if (result.residentDigestRef) residentDigestRef = result.residentDigestRef; for (const name of ['uploadMs', 'submitMs', 'readbackMs', 'totalMs']) { dispatchTimings[name] += result.dispatchTimings?.[name] || 0; dispatchTimingTotals[name] += result.dispatchTimings?.[name] || 0; } dispatchTimings.calls += 1; dispatchTimingTotals.calls += 1; }
         if (verifyParity) {
           const actual = { nextLabels, canonicalLabels, absoluteHashes, canonicalHashes }, expected = { nextLabels: cpu.nextLabels, canonicalLabels: cpu.canonicalLabels, absoluteHashes: cpu.absoluteHashes, canonicalHashes: cpu.canonicalHashes };
           if (!equalArrays(nextLabels, cpu.nextLabels) || !equalArrays(canonicalLabels, cpu.canonicalLabels) || !equalArrays(absoluteHashes, cpu.absoluteHashes) || !equalArrays(canonicalHashes, cpu.canonicalHashes)) return unavailable(parityMismatchReason(actual, expected, { labelsPerState: cpu.pieceCount * cpu.wordCount, pieceCount: cpu.pieceCount, wordCount: cpu.wordCount, parentStateIndices: normalized.map(candidate => candidate.parentStateIndex), candidatePieceIndices: normalized.map(candidate => candidate.candidatePieceIndex), seedParents: normalized.map(candidate => candidate.parentLabelMasks), candidateMasks: normalized.map(candidate => candidate.candidateMask) }), cpu, { capacity, epoch: layer.pendingEpoch, residentCount, parentReference });
