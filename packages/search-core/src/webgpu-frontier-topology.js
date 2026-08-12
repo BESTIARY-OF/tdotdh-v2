@@ -1,5 +1,6 @@
 import { probeWebGpuCapabilities } from './webgpu-capability-probe.js';
 import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
+import { createWebGpuPipelineCache } from './webgpu-pipeline-cache.js';
 import { DEFAULT_FRONTIER_GRID } from './webgpu-frontier-validator.js';
 
 export const WEBGPU_FRONTIER_TOPOLOGY_SCHEMA = 'tdotdh.webgpu-frontier-topology.v0';
@@ -459,7 +460,7 @@ async function runWebGpuReduction(deviceCache, normalized, grid, shaderSource) {
   }
 }
 
-async function runWebGpuBatchReduction(deviceCache, normalizedInputs, grid, { readback = true } = {}) {
+async function runWebGpuBatchReduction(deviceCache, normalizedInputs, grid, { readback = true, pipelineCache = createWebGpuPipelineCache() } = {}) {
   const candidateCount = normalizedInputs.length;
   const wordCount = grid.wordCount;
   const cellCount = grid.width * grid.height;
@@ -488,8 +489,7 @@ async function runWebGpuBatchReduction(deviceCache, normalizedInputs, grid, { re
     device.queue.writeBuffer(candidateBuffer, 0, candidateMasks);
     device.queue.writeBuffer(areasBuffer, 0, new Uint32Array(candidateCount));
     device.queue.writeBuffer(paramsBuffer, 0, new Uint32Array([candidateCount, wordCount, 0, 0]));
-    const reductionModule = device.createShaderModule({ code: BATCH_REDUCTION_SHADER });
-    const reductionPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: reductionModule, entryPoint: 'main' } });
+    const reductionPipeline = pipelineCache.get(device, BATCH_REDUCTION_SHADER);
     const reductionBindGroup = device.createBindGroup({ layout: reductionPipeline.getBindGroupLayout(0), entries: [
       { binding: 0, resource: { buffer: parentBuffer } }, { binding: 1, resource: { buffer: candidateBuffer } },
       { binding: 2, resource: { buffer: occupiedBuffer } }, { binding: 3, resource: { buffer: areasBuffer } },
@@ -512,8 +512,7 @@ async function runWebGpuBatchReduction(deviceCache, normalizedInputs, grid, { re
     const areas = Array.from(new Uint32Array(areasReadback.getMappedRange().slice(0)));
     areasReadback.unmap();
 
-    const labelModule = device.createShaderModule({ code: BATCH_LABEL_SHADER });
-    const labelPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: labelModule, entryPoint: 'main' } });
+    const labelPipeline = pipelineCache.get(device, BATCH_LABEL_SHADER);
     const labelBuffers = [
       device.createBuffer({ size: cellByteLength, usage: usage.STORAGE | usage.COPY_DST | usage.COPY_SRC }),
       device.createBuffer({ size: cellByteLength, usage: usage.STORAGE | usage.COPY_DST | usage.COPY_SRC }),
@@ -525,10 +524,8 @@ async function runWebGpuBatchReduction(deviceCache, normalizedInputs, grid, { re
     const summaryBuffer = device.createBuffer({ size: summaryByteLength, usage: usage.STORAGE | usage.COPY_DST | usage.COPY_SRC });
     const summaryReadback = device.createBuffer({ size: summaryByteLength, usage: usage.MAP_READ | usage.COPY_DST });
     const summaryParams = device.createBuffer({ size: 16, usage: usage.UNIFORM | usage.COPY_DST });
-    const summaryModule = device.createShaderModule({ code: BATCH_LABEL_SUMMARY_SHADER });
-    const summaryPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: summaryModule, entryPoint: 'main' } });
-    const seedModule = device.createShaderModule({ code: BATCH_LABEL_SEED_SHADER });
-    const seedPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: seedModule, entryPoint: 'main' } });
+    const summaryPipeline = pipelineCache.get(device, BATCH_LABEL_SUMMARY_SHADER);
+    const seedPipeline = pipelineCache.get(device, BATCH_LABEL_SEED_SHADER);
     labelResources.push(...labelBuffers, labelReadback, labelParams, seedParams, summaryBuffer, summaryReadback, summaryParams);
     const runBatchLabels = async active => {
       device.queue.writeBuffer(labelParams, 0, new Uint32Array([candidateCount, cellCount, grid.width, grid.height]));
@@ -623,6 +620,7 @@ export function createWebGpuFrontierTopology({ gpu = globalThis.navigator?.gpu, 
   const normalizedGrid = normalizeGrid(grid);
   if (typeof shaderSource !== 'string' || !shaderSource.trim()) throw new TypeError('shaderSource must be a non-empty string');
   let availabilityPromise = null;
+  const pipelineCache = createWebGpuPipelineCache();
   const availability = () => {
     if (availabilityPromise) return availabilityPromise;
     availabilityPromise = (async () => {
@@ -677,7 +675,7 @@ export function createWebGpuFrontierTopology({ gpu = globalThis.navigator?.gpu, 
       if (typeof accelerator === 'function') {
         results = await Promise.all(inputs.map(async input => verifyAccelerated(input, await accelerator(normalizeInput(input, normalizedGrid), normalizedGrid), { verifyParity })));
       } else {
-        const reductions = await runWebGpuBatchReduction(deviceCache, inputs.map(input => normalizeInput(input, normalizedGrid)), normalizedGrid, { readback: verifyParity });
+        const reductions = await runWebGpuBatchReduction(deviceCache, inputs.map(input => normalizeInput(input, normalizedGrid)), normalizedGrid, { readback: verifyParity, pipelineCache });
         results = reductions.map((reduction, index) => verifyAccelerated(inputs[index], reduction, { verifyParity }));
       }
     } catch (error) {
