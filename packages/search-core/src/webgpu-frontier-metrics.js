@@ -67,12 +67,31 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   var combinedMaxX: i32 = 0;
   var combinedMinY: i32 = 0;
   var combinedMaxY: i32 = 0;
-  for (var y: i32 = params.originY; y < params.originY + i32(params.height); y++) {
-    for (var x: i32 = params.originX; x < params.originX + i32(params.width); x++) {
-      let parent = parentBit(base, x, y);
-      let candidate = candidateBit(base, x, y);
-      let ring = ringBit(base, x, y);
-      if (candidate == 1u) {
+  // The masks are sparse (a parent has at most the pieces already placed and
+  // a candidate/centroid/ring has only a small neighborhood). Iterate set
+  // bits rather than visiting every coordinate in the 64x64 grid. The bit
+  // accessors remain the single source of truth for neighbor tests, so this
+  // changes traversal cost without changing the six-value metric contract.
+  for (var word: u32 = 0u; word < params.wordCount; word++) {
+    var parentBits = parentMasks[base + word];
+    while (parentBits != 0u) {
+      let bitInWord = u32(firstTrailingBit(parentBits));
+      let cellIndex = word * 32u + bitInWord;
+      if (cellIndex < params.width * params.height) {
+        let x = params.originX + i32(cellIndex % params.width);
+        let y = params.originY + i32(cellIndex / params.width);
+        if (!found) { combinedMinX = x; combinedMaxX = x; combinedMinY = y; combinedMaxY = y; found = true; }
+        else { combinedMinX = min(combinedMinX, x); combinedMaxX = max(combinedMaxX, x); combinedMinY = min(combinedMinY, y); combinedMaxY = max(combinedMaxY, y); }
+      }
+      parentBits = parentBits & (parentBits - 1u);
+    }
+    var candidateBits = candidateMasks[base + word];
+    while (candidateBits != 0u) {
+      let bitInWord = u32(firstTrailingBit(candidateBits));
+      let cellIndex = word * 32u + bitInWord;
+      if (cellIndex < params.width * params.height) {
+        let x = params.originX + i32(cellIndex % params.width);
+        let y = params.originY + i32(cellIndex / params.width);
         if (parentBit(base, x + 1, y) == 1u) { contact += 1; }
         if (parentBit(base, x - 1, y) == 1u) { contact += 1; }
         if (parentBit(base, x, y + 1) == 1u) { contact += 1; }
@@ -82,14 +101,22 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             if ((dx != 0 || dy != 0) && centroidBit(base, x + dx, y + dy) == 1u) { centroidContact += 1; }
           }
         }
-        if (ring == 1u) { ringCoverage += 1; }
-      } else if (ring == 1u && parent == 0u) {
-        openCentroid += 1;
-      }
-      if (parent == 1u || candidate == 1u) {
+        if (ringBit(base, x, y) == 1u) { ringCoverage += 1; }
         if (!found) { combinedMinX = x; combinedMaxX = x; combinedMinY = y; combinedMaxY = y; found = true; }
         else { combinedMinX = min(combinedMinX, x); combinedMaxX = max(combinedMaxX, x); combinedMinY = min(combinedMinY, y); combinedMaxY = max(combinedMaxY, y); }
       }
+      candidateBits = candidateBits & (candidateBits - 1u);
+    }
+    var ringBits = ringMasks[base + word];
+    while (ringBits != 0u) {
+      let bitInWord = u32(firstTrailingBit(ringBits));
+      let cellIndex = word * 32u + bitInWord;
+      if (cellIndex < params.width * params.height) {
+        let x = params.originX + i32(cellIndex % params.width);
+        let y = params.originY + i32(cellIndex / params.width);
+        if (parentBit(base, x, y) == 0u && candidateBit(base, x, y) == 0u) { openCentroid += 1; }
+      }
+      ringBits = ringBits & (ringBits - 1u);
     }
   }
   let combinedArea = select(0, (combinedMaxX - combinedMinX + 1) * (combinedMaxY - combinedMinY + 1), found);

@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { createFrontierMetricsCandidate, cpuEvaluateFrontierMetrics, createWebGpuFrontierMetrics, WEBGPU_FRONTIER_METRICS_SCHEMA } from '../src/webgpu-frontier-metrics.js';
+import { createFrontierMetricsCandidate, cpuEvaluateFrontierMetrics, createWebGpuFrontierMetrics, WEBGPU_FRONTIER_METRICS_SCHEMA, DEFAULT_SHADER } from '../src/webgpu-frontier-metrics.js';
+
+assert.match(DEFAULT_SHADER, /firstTrailingBit/);
 
 const parentCells = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 0, y: 1 }];
 const candidateCells = [{ x: 1, y: 1 }, { x: 2, y: 1 }];
