@@ -10,7 +10,7 @@ export const DEFAULT_RESIDENT_FRONTIER_CAPACITY = 4096;
 // to avoid a queue wait and mapped readback for every small beam slice. The
 // resident pool remains bounded at 4096 states; 512 is below the 32 MiB
 // storage-binding limit for the specialized 64x64 state layout.
-export const DEFAULT_RESIDENT_FRONTIER_BATCH_CAPACITY = 512;
+export const DEFAULT_RESIDENT_FRONTIER_BATCH_CAPACITY = 1024;
 
 const RESIDENT_PARENT_SENTINEL = 0xffffffff;
 
