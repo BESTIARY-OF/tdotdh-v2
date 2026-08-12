@@ -308,9 +308,76 @@ async function runGpuBatch(device, normalized, grid, shaderSource, pipelineCache
   } finally { Object.values(buffers).flatMap(buffer => Array.isArray(buffer) ? buffer : [buffer]).forEach(buffer => buffer.destroy()); }
 }
 
-export function createWebGpuFieldMetrics({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 65536 }, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
+function nextFieldMetricsCapacity(value) {
+  let capacity = 1;
+  while (capacity < value) capacity *= 2;
+  return capacity;
+}
+
+function createPersistentGpuFieldMetricsRunner(device, grid, shaderSource, pipelineCache) {
+  const usage = globalThis.GPUBufferUsage, mapMode = globalThis.GPUMapMode, cellCount = grid.width * grid.height;
+  let resources = null, queue = Promise.resolve(), lost = false;
+  const dispose = bundle => {
+    if (!bundle) return;
+    for (const value of Object.values(bundle.buffers || {})) {
+      for (const buffer of Array.isArray(value) ? value : [value]) buffer?.destroy?.();
+    }
+  };
+  const reset = () => { dispose(resources); resources = null; };
+  if (device?.lost && typeof device.lost.then === 'function') device.lost.then(() => { lost = true; reset(); }).catch(() => { lost = true; reset(); });
+  const ensure = count => {
+    const capacity = nextFieldMetricsCapacity(Math.max(1, count));
+    if (resources?.capacity >= capacity) return resources;
+    const maskBytes = capacity * grid.wordCount * 4, labelBytes = capacity * cellCount * 4, outputBytes = capacity * FIELD_METRIC_COUNT * 4;
+    let buffers = null;
+    try {
+      buffers = {
+        occupied: device.createBuffer({ size: maskBytes, usage: usage.STORAGE | usage.COPY_DST }),
+        centroid: device.createBuffer({ size: maskBytes, usage: usage.STORAGE | usage.COPY_DST }),
+        outsideLabels: [
+          device.createBuffer({ size: labelBytes, usage: usage.STORAGE | usage.COPY_DST }),
+          device.createBuffer({ size: labelBytes, usage: usage.STORAGE | usage.COPY_DST }),
+        ],
+        output: device.createBuffer({ size: outputBytes, usage: usage.STORAGE | usage.COPY_SRC }),
+        params: device.createBuffer({ size: 32, usage: usage.UNIFORM | usage.COPY_DST }),
+        labelParams: device.createBuffer({ size: 16, usage: usage.UNIFORM | usage.COPY_DST }),
+        readback: device.createBuffer({ size: outputBytes, usage: usage.MAP_READ | usage.COPY_DST }),
+      };
+      const metricPipeline = pipelineCache.get(device, shaderSource), seedPipeline = pipelineCache.get(device, OUTSIDE_LABEL_SEED_SHADER), propagatePipeline = pipelineCache.get(device, OUTSIDE_LABEL_PROPAGATE_SHADER);
+      const seedGroup = device.createBindGroup({ layout: seedPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.occupied } }, { binding: 1, resource: { buffer: buffers.outsideLabels[0] } }, { binding: 2, resource: { buffer: buffers.labelParams } }] });
+      const propagateGroups = [0, 1].map(index => device.createBindGroup({ layout: propagatePipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.outsideLabels[index] } }, { binding: 1, resource: { buffer: buffers.outsideLabels[1 - index] } }, { binding: 2, resource: { buffer: buffers.labelParams } }] }));
+      const finalLabelIndex = (grid.width + grid.height) % 2;
+      const metricGroup = device.createBindGroup({ layout: metricPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.occupied } }, { binding: 1, resource: { buffer: buffers.centroid } }, { binding: 2, resource: { buffer: buffers.outsideLabels[finalLabelIndex] } }, { binding: 3, resource: { buffer: buffers.output } }, { binding: 4, resource: { buffer: buffers.params } }] });
+      const previous = resources;
+      resources = { buffers, seedPipeline, propagatePipeline, metricPipeline, seedGroup, propagateGroups, metricGroup, capacity };
+      dispose(previous);
+    } catch (error) { dispose({ buffers }); throw error; }
+    return resources;
+  };
+  async function runExclusive(normalized) {
+    if (lost) throw new Error('webgpu-device-lost');
+    const count = normalized.length, current = ensure(count), { buffers } = current, outputBytes = count * FIELD_METRIC_COUNT * 4;
+    device.queue.writeBuffer(buffers.occupied, 0, flatten(normalized, 'occupiedMask', grid.wordCount));
+    device.queue.writeBuffer(buffers.centroid, 0, flatten(normalized, 'centroidMask', grid.wordCount));
+    device.queue.writeBuffer(buffers.params, 0, new Int32Array([count, grid.wordCount, grid.width, grid.height, grid.originX, grid.originY, 0, 0]));
+    device.queue.writeBuffer(buffers.labelParams, 0, new Uint32Array([count, cellCount, grid.width, grid.height]));
+    const encoder = device.createCommandEncoder();
+    const seed = encoder.beginComputePass(); seed.setPipeline(current.seedPipeline); seed.setBindGroup(0, current.seedGroup); seed.dispatchWorkgroups(Math.ceil(count * cellCount / 64)); seed.end();
+    let labelIndex = 0;
+    for (let pass = 0; pass < grid.width + grid.height; pass += 1) {
+      const compute = encoder.beginComputePass(); compute.setPipeline(current.propagatePipeline); compute.setBindGroup(0, current.propagateGroups[labelIndex]); compute.dispatchWorkgroups(Math.ceil(count * cellCount / 64)); compute.end(); labelIndex = 1 - labelIndex;
+    }
+    const metric = encoder.beginComputePass(); metric.setPipeline(current.metricPipeline); metric.setBindGroup(0, current.metricGroup); metric.dispatchWorkgroups(Math.ceil(count / 64)); metric.end(); encoder.copyBufferToBuffer(buffers.output, 0, buffers.readback, 0, Math.max(4, outputBytes));
+    device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone(); if (lost) throw new Error('webgpu-device-lost');
+    await buffers.readback.mapAsync(mapMode.READ); const values = Array.from(new Int32Array(buffers.readback.getMappedRange().slice(0, outputBytes))); buffers.readback.unmap();
+    return Array.from({ length: count }, (_, index) => values.slice(index * FIELD_METRIC_COUNT, (index + 1) * FIELD_METRIC_COUNT));
+  }
+  return Object.freeze({ reset, run(normalized) { const task = queue.then(() => runExclusive(normalized)); queue = task.catch(() => {}); return task; } });
+}
+
+export function createWebGpuFieldMetrics({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 65536 }, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }), persistent = true } = {}) {
   if (typeof shaderSource !== 'string' || !shaderSource.trim()) throw new TypeError('shaderSource must be a non-empty string');
-  const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits }, pipelineCache = createWebGpuPipelineCache();
+  const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits }, pipelineCache = createWebGpuPipelineCache(); let persistentRunner = null;
   return Object.freeze({
     async availability() { const probe = await probeWebGpuCapabilities({ gpu, requiredLimits: limits }); if (!probe.adapterAvailable) return Object.freeze({ schema: WEBGPU_FIELD_METRICS_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: 'webgpu-adapter-unavailable', grid: normalizedGrid }); if (!probe.requiredLimitsSatisfied) return Object.freeze({ schema: WEBGPU_FIELD_METRICS_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: 'webgpu-required-limits-unsatisfied', grid: normalizedGrid }); return Object.freeze({ schema: WEBGPU_FIELD_METRICS_SCHEMA, status: 'available', backend: 'webgpu', grid: normalizedGrid }); },
     async evaluate(candidates, { verifyParity = true } = {}) {
@@ -318,14 +385,18 @@ export function createWebGpuFieldMetrics({ gpu = globalThis.navigator?.gpu, grid
       if (status.status !== 'available') return unavailable(status.reason, normalizedGrid, cpuEvaluateFieldMetrics(normalized, normalizedGrid));
       try {
         const device = await deviceCache.getDevice(), maxBinding = Number(device.limits?.maxStorageBufferBindingSize) || limits.maxStorageBufferBindingSize, maxBatch = Math.max(1, Math.floor(maxBinding / Math.max(normalizedGrid.wordCount * 8, 4))), metrics = [];
-        for (let offset = 0; offset < normalized.length; offset += maxBatch) metrics.push(...await runGpuBatch(device, normalized.slice(offset, offset + maxBatch), normalizedGrid, shaderSource, pipelineCache));
+        if (persistent && !persistentRunner) persistentRunner = createPersistentGpuFieldMetricsRunner(device, normalizedGrid, shaderSource, pipelineCache);
+        for (let offset = 0; offset < normalized.length; offset += maxBatch) {
+          const batch = normalized.slice(offset, offset + maxBatch);
+          metrics.push(...(persistentRunner ? await persistentRunner.run(batch) : await runGpuBatch(device, batch, normalizedGrid, shaderSource, pipelineCache)));
+        }
         if (verifyParity) {
           const cpu = cpuEvaluateFieldMetrics(normalized, normalizedGrid);
           if (JSON.stringify(metrics) !== JSON.stringify(cpu.metrics)) return unavailable('oracle-parity-mismatch', normalizedGrid, cpu);
         }
         return Object.freeze({ schema: WEBGPU_FIELD_METRICS_SCHEMA, status: 'completed', backend: 'webgpu', metrics, candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, parity: verifyParity ? 'verified' : 'deferred' });
       } catch (error) {
-        deviceCache.reset();
+        persistentRunner?.reset(); persistentRunner = null; deviceCache.reset();
         return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid, cpuEvaluateFieldMetrics(normalized, normalizedGrid));
       }
     },
