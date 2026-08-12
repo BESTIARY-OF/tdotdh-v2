@@ -1,6 +1,6 @@
 const output = document.querySelector('#output');
 const runButton = document.querySelector('#run');
-const workerUrl = new URL('./v2-search-worker.js?v=20260811-matched108', import.meta.url);
+const workerUrl = new URL('./v2-search-worker.js?v=20260811-matched123', import.meta.url);
 
 function signature(placements) {
   if (!Array.isArray(placements) || placements.length === 0) return null;
@@ -26,7 +26,7 @@ async function loadFixture() {
 
 function createProductRequest(pieces, backend, { cursor = { depth: 0, nodeOffset: 0, rootChoice: 0 }, requestId = `matched-${backend}-${Date.now()}`, familyId = `benchmark-${backend}` } = {}) {
   const diagnostic = new URL(location.href).searchParams.get('diagnostic');
-  const diagnosticSteering = diagnostic === 'no-topology' ? { disableGpuCandidateTopology: true } : diagnostic === 'no-geometry' ? { disableGpuCandidateGeometry: true } : diagnostic === 'no-field-metrics' ? { disableGpuCandidateFieldMetrics: true } : diagnostic === 'no-target-pool' ? { disableGpuTargetPool: true } : diagnostic === 'no-target-generation' ? { disableGpuCandidateGeneration: true } : diagnostic === 'no-resident-navigation' ? { disableGpuResidentNavigation: true } : diagnostic === 'verify-resident-navigation' ? { verifyGpuResidentNavigation: true, captureGpuResidentDiagnostics: true } : diagnostic === 'no-state-parity' ? { verifyGpuTransitionParity: false } : {};
+  const diagnosticSteering = diagnostic === 'no-topology' ? { disableGpuCandidateTopology: true } : diagnostic === 'no-geometry' ? { disableGpuCandidateGeometry: true } : diagnostic === 'no-field-metrics' ? { disableGpuCandidateFieldMetrics: true } : diagnostic === 'no-target-pool' ? { disableGpuTargetPool: true } : diagnostic === 'no-target-generation' ? { disableGpuCandidateGeneration: true } : diagnostic === 'no-resident-navigation' ? { disableGpuResidentNavigation: true } : diagnostic === 'verify-resident-navigation' ? { verifyGpuResidentNavigation: true, captureGpuResidentDiagnostics: true } : diagnostic === 'resident-digest' ? { enableGpuResidentDigestConsumer: true } : diagnostic === 'verify-resident-state' ? { verifyGpuTransitionParity: true, enableGpuResidentDigestConsumer: true } : diagnostic === 'no-state-parity' ? { verifyGpuTransitionParity: false } : {};
   return {
     type: 'start',
     protocolVersion: 1,

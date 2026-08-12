@@ -20,7 +20,7 @@ const fakeAdapter = { limits: { maxStorageBufferBindingSize: 64 * 1024 * 1024, m
   queue: { writeBuffer(buffer, offset, data) { if (buffer?.kind === 'seedParents') seedParentWrites.push({ offset, bytes: data.byteLength }); }, submit() {}, async onSubmittedWorkDone() {} },
   createBuffer() {
     createdBuffers += 1;
-    const readbackKind = { 14: cpu.nextLabels, 15: cpu.canonicalLabels, 16: digestReadback }[createdBuffers] || [];
+    const readbackKind = { 15: cpu.nextLabels, 16: cpu.canonicalLabels, 17: digestReadback }[createdBuffers] || [];
     return { kind: createdBuffers === 1 ? 'seedParents' : undefined, destroy() {}, async mapAsync() {}, getMappedRange() { return Uint32Array.from(readbackKind).buffer; }, unmap() {} };
   },
   createShaderModule() { return {}; },
@@ -64,7 +64,7 @@ try {
     parentStateIndices: [0],
   });
   assert.equal(seedParentWrites.length, 1, 'resident child must not re-upload its CPU parent labels');
-  assert.equal(createdBuffers, 16, 'resident pool must reuse its double-buffered allocation');
+  assert.equal(createdBuffers, 20, 'resident pool must reuse its resident allocation');
   resident.commitLayer();
   resident.reset();
 } finally {

@@ -75,14 +75,14 @@ export function createWebGpuFrontierNavigator({ stateAdapter, ticket, cursor = {
     beginLayer() { return stateAdapter.beginLayer ? stateAdapter.beginLayer() : Object.freeze({ schema: WEBGPU_FRONTIER_NAVIGATOR_SCHEMA, status: 'layer-open', epoch: active?.epoch || 0 }); },
     commitLayer() { return stateAdapter.commitLayer ? stateAdapter.commitLayer() : Object.freeze({ schema: WEBGPU_FRONTIER_NAVIGATOR_SCHEMA, status: 'layer-committed', epoch: active?.epoch || 0 }); },
     async availability() { return stateAdapter.availability ? stateAdapter.availability() : Object.freeze({ status: 'available', backend: 'webgpu' }); },
-    async expand(candidates, { cursor: nextCursor = latestCursor, verifyParity = true } = {}) {
+    async expand(candidates, { cursor: nextCursor = latestCursor, verifyParity = true, readDigests = true } = {}) {
       const normalizedCursor = observeCursor(nextCursor), ordinal = batchOrdinal++, batchTicket = ticketCopy(stableTicket, ordinal);
       if (shouldCancel()) return cancelledReceipt({ ticket: stableTicket, cursor: normalizedCursor, reason: 'cancelled-before-dispatch', batchOrdinal: ordinal, active });
-      const result = await stateAdapter.transition(candidates, { verifyParity });
+      const result = await stateAdapter.transition(candidates, { verifyParity, readDigests });
       if (shouldCancel()) return cancelledReceipt({ ticket: stableTicket, cursor: normalizedCursor, reason: 'cancelled-before-commit', batchOrdinal: ordinal, active });
       if (result?.status !== 'completed' || result?.backend !== 'webgpu' || !['verified', 'deferred'].includes(result?.parity)) return Object.freeze({ ...result, navigator: { schema: WEBGPU_FRONTIER_NAVIGATOR_SCHEMA, status: 'fallback', ticket: batchTicket, cursor: normalizedCursor } });
       epoch += 1;
-      active = Object.freeze({ epoch, digest: hashWords(result.absoluteHashes, result.canonicalHashes), candidateCount: result.candidateCount, bufferCapacity: result.bufferCapacity ?? null, readback: 'canonical-replay-only' });
+      active = Object.freeze({ epoch, digest: result.residentDigestRef ? `resident-epoch-${epoch}` : hashWords(result.absoluteHashes, result.canonicalHashes), candidateCount: result.candidateCount, bufferCapacity: result.bufferCapacity ?? null, readback: result.residentDigestRef ? 'resident-digests' : 'canonical-replay-only' });
       return Object.freeze({ ...result, navigator: { schema: WEBGPU_FRONTIER_NAVIGATOR_SCHEMA, status: 'resident', ticket: batchTicket, cursor: normalizedCursor, epoch: active.epoch, digest: active.digest, candidateCount: active.candidateCount, bufferCapacity: active.bufferCapacity, readback: active.readback } });
     },
   });

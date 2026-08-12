@@ -468,6 +468,7 @@ function sameGpuState(left, right) {
   if (!left || !right || left.wordCount !== right.wordCount || left.pieceIds.length !== right.pieceIds.length || left.remainingMask.length !== right.remainingMask.length) return false;
   for (let index = 0; index < left.pieceIds.length; index++) if (left.pieceIds[index] !== right.pieceIds[index]) return false;
   for (let index = 0; index < left.remainingMask.length; index++) if (left.remainingMask[index] !== right.remainingMask[index]) return false;
+  if (left.stateKey || right.stateKey) return left.stateKey === right.stateKey;
   if (Number.isSafeInteger(left.absoluteHash) || Number.isSafeInteger(right.absoluteHash)) return left.absoluteHash === right.absoluteHash && left.canonicalHash === right.canonicalHash;
   if (left.canonicalSignature || right.canonicalSignature) return left.canonicalSignature === right.canonicalSignature;
   if (!left.nextLabels || !right.nextLabels || left.nextLabels.length !== right.nextLabels.length) return false;
@@ -482,6 +483,16 @@ function seedFamilyId(seed) {
 function arrangementSignature(placements) {
   const cells = placements.flatMap(placement => placement.cells), minX = Math.min(...cells.map(cell => cell.x)), minY = Math.min(...cells.map(cell => cell.y));
   return [...placements].sort((a, b) => a.id - b.id).map(placement => `${placement.id}:${placement.cells.map(cell => `${cell.x - minX},${cell.y - minY}`).sort().join(';')}`).join('|');
+}
+function absoluteStateKey(placements, remaining = []) {
+  const placed = [...placements].sort((a, b) => a.id - b.id).map(placement => `${placement.id}:${placement.cells.map(cell => `${cell.x},${cell.y}`).sort().join(';')}`).join('|');
+  const remainingIds = [...remaining].map(piece => Number(piece?.id ?? piece)).sort((a, b) => a - b).join(',');
+  return `${placed}||${remainingIds}`;
+}
+function stateKeyHash(stateKey) {
+  let hash = 2166136261;
+  for (let index = 0; index < stateKey.length; index++) hash = Math.imul(hash ^ stateKey.charCodeAt(index), 16777619) >>> 0;
+  return hash >>> 0;
 }
 function seededRandom(seed = '') {
   let state = 2166136261;
@@ -691,7 +702,9 @@ async function evaluateFrontierState(entries, state, frontierState, onState = ()
       parentStateIndex: state.gpuState?.residentStateIndex,
     }));
     const result = frontierState.expand ? await frontierState.expand(candidates) : await frontierState.transition(candidates);
-    if (result?.status === 'completed' && result.parity === 'verified' && Array.isArray(result.absoluteHashes) && result.absoluteHashes.length === entries.length) {
+    const hasHostDigests = Array.isArray(result?.absoluteHashes) && result.absoluteHashes.length === entries.length;
+    const hasResidentDigests = result?.residentDigestRef && result.residentDigestRef.count === entries.length;
+    if (result?.status === 'completed' && ['verified', 'deferred'].includes(result.parity) && (hasHostDigests || hasResidentDigests)) {
       onState({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, persistent: result.persistent === true, resident: result.navigator?.status === 'resident', navigatorEpoch: result.navigator?.epoch, bufferCapacity: result.bufferCapacity, candidateCount: entries.length, parentReference: result.parentReference });
       const wordCount = Number(result.wordCount) || 0;
       const labelsPerCandidate = result.pieceIds.length * wordCount;
@@ -700,7 +713,8 @@ async function evaluateFrontierState(entries, state, frontierState, onState = ()
         const canonicalLabels = result.canonicalLabels.slice(labelStart, labelStart + labelsPerCandidate);
         const remainingMask = Array.from(candidates[index].remainingMask);
         const resident = result.resident === true || result.navigator?.status === 'resident';
-        const statePayload = { absoluteHash: result.absoluteHashes[index], canonicalHash: result.canonicalHashes[index], pieceIds: result.pieceIds, wordCount, remainingMask, residentStateIndex: result.residentStateIndices?.[index], residentEpoch: result.residentEpoch };
+        const stateKey = hasResidentDigests ? absoluteStateKey([...state.placements, entry.candidate], state.remaining.filter(piece => piece.id !== entry.piece.id)) : null;
+        const statePayload = { ...(hasHostDigests ? { absoluteHash: result.absoluteHashes[index], canonicalHash: result.canonicalHashes[index] } : {}), ...(stateKey ? { stateKey, stateKeyHash: stateKeyHash(stateKey), digestRef: result.residentDigestRef, digestIndex: index } : {}), pieceIds: result.pieceIds, wordCount, remainingMask, residentStateIndex: result.residentStateIndices?.[index], residentEpoch: result.residentEpoch };
         if (resident) { statePayload.parentLabelRef = { epoch: result.residentEpoch, index: result.residentStateIndices?.[index] }; statePayload.canonicalSignature = canonicalSignatureFromLabeledFrontierState({ pieceIds: result.pieceIds, canonicalLabels, wordCount }); }
         else Object.assign(statePayload, { nextLabels: result.nextLabels.slice(labelStart, labelStart + labelsPerCandidate), canonicalLabels });
         return { ...entry, gpuState: statePayload };
@@ -724,12 +738,16 @@ async function evaluateFrontierStateAcrossBeam(jobs, frontierState, onState = ()
     }
     if (!pending.length) return jobs;
     const result = frontierState.expand ? await frontierState.expand(pending.map(item => item.candidate), transitionOptions) : await frontierState.transition(pending.map(item => item.candidate), transitionOptions);
-    if (result?.status === 'completed' && ['verified', 'deferred'].includes(result.parity) && Array.isArray(result.absoluteHashes) && result.absoluteHashes.length === pending.length) {
+    const hasHostDigests = Array.isArray(result?.absoluteHashes) && result.absoluteHashes.length === pending.length;
+    const hasResidentDigests = result?.residentDigestRef && result.residentDigestRef.count === pending.length;
+    if (result?.status === 'completed' && ['verified', 'deferred'].includes(result.parity) && (hasHostDigests || hasResidentDigests)) {
       const wordCount = Number(result.wordCount) || 0, labelsPerCandidate = result.pieceIds.length * wordCount;
       for (const [index, item] of pending.entries()) {
         const labelStart = index * labelsPerCandidate;
         const hasLabels = Array.isArray(result.canonicalLabels) && result.canonicalLabels.length >= labelStart + labelsPerCandidate, canonicalLabels = hasLabels ? result.canonicalLabels.slice(labelStart, labelStart + labelsPerCandidate) : null, resident = result.resident === true || result.navigator?.status === 'resident';
-        const statePayload = { absoluteHash: result.absoluteHashes[index], canonicalHash: result.canonicalHashes[index], pieceIds: result.pieceIds, wordCount, remainingMask: Array.from(item.candidate.remainingMask), residentStateIndex: result.residentStateIndices?.[index], residentEpoch: result.residentEpoch };
+        const remainingIds = Array.isArray(item.candidate.remainingIds) ? item.candidate.remainingIds : [];
+        const stateKey = hasResidentDigests ? absoluteStateKey([...jobs[item.jobIndex].state.placements, item.entry.candidate], remainingIds) : null;
+        const statePayload = { ...(hasHostDigests ? { absoluteHash: result.absoluteHashes[index], canonicalHash: result.canonicalHashes[index] } : {}), ...(stateKey ? { stateKey, stateKeyHash: stateKeyHash(stateKey), digestRef: result.residentDigestRef, digestIndex: index } : {}), pieceIds: result.pieceIds, wordCount, remainingMask: Array.from(item.candidate.remainingMask), residentStateIndex: result.residentStateIndices?.[index], residentEpoch: result.residentEpoch };
         if (resident) { statePayload.parentLabelRef = { epoch: result.residentEpoch, index: result.residentStateIndices?.[index] }; if (canonicalLabels) statePayload.canonicalSignature = canonicalSignatureFromLabeledFrontierState({ pieceIds: result.pieceIds, canonicalLabels, wordCount }); }
         else if (Array.isArray(result.nextLabels) && result.nextLabels.length >= labelStart + labelsPerCandidate) Object.assign(statePayload, { nextLabels: result.nextLabels.slice(labelStart, labelStart + labelsPerCandidate), ...(canonicalLabels ? { canonicalLabels } : {}) });
         jobs[item.jobIndex].entries[item.entryIndex] = { ...item.entry, gpuState: statePayload };
@@ -1173,6 +1191,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const initialStageReceipt = () => gpuExecution && !gpuNavigationEnabled ? { status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', reason: gpuUnavailableReason } : { status: 'cpu-oracle', backend: 'cpu-oracle', parity: 'oracle', reason: 'stage-not-executed' };
   let prefilterReceipt = initialStageReceipt(), frontierReceipt = initialStageReceipt(), frontierGenerationReceipt = initialStageReceipt(), frontierTargetGenerationReceipt = initialStageReceipt(), frontierTargetPoolReceipt = initialStageReceipt(), frontierMetricsReceipt = initialStageReceipt(), fieldMetricsReceipt = initialStageReceipt(), frontierStateReceipt = initialStageReceipt(), frontierTopologyReceipt = initialStageReceipt(), frontierRankerReceipt = initialStageReceipt(), frontierScoreReceipt = initialStageReceipt(), frontierCompactorReceipt = initialStageReceipt(), frontierDedupReceipt = initialStageReceipt();
   const stageHistory = { frontier: [], frontierMetrics: [], fieldMetrics: [], frontierState: [], frontierTopology: [], frontierScore: [], frontierRanker: [], frontierCompactor: [], frontierDedup: [] };
+  const frontierDedupTrace = [];
   if (frontierTargetGeneratorStatus?.status !== 'available' && frontierTargetGeneratorStatus) frontierTargetGenerationReceipt = { status: 'fallback', reason: frontierTargetGeneratorStatus.reason || 'frontier-target-generator-unavailable' };
   if (frontierTargetPoolStatus?.status !== 'available' && frontierTargetPoolStatus) frontierTargetPoolReceipt = { status: 'fallback', reason: frontierTargetPoolStatus.reason || 'frontier-target-pool-unavailable' };
   if (frontierDeduplicatorStatus?.status !== 'available' && frontierDeduplicatorStatus) frontierDedupReceipt = { status: 'fallback', reason: frontierDeduplicatorStatus.reason || 'frontier-deduplicator-unavailable' };
@@ -1193,7 +1212,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       if (frontierDedupReceipt.status === 'cpu-oracle') frontierDedupReceipt = { status: 'fallback', reason: 'gpu-state-unavailable' };
       return entries;
     }
-    const rows = entries.map(entry => ({ hash: entry.gpuState.absoluteHash >>> 0, signature: arrangementSignature([...state.placements, entry.candidate]) }));
+    const rows = entries.map(entry => ({ hash: (Number.isSafeInteger(entry.gpuState.absoluteHash) ? entry.gpuState.absoluteHash : entry.gpuState.stateKeyHash) >>> 0, signature: arrangementSignature([...state.placements, entry.candidate]) }));
     const result = await frontierDeduplicator.deduplicate(rows);
     if (result?.status === 'completed' && result?.parity === 'verified' && Array.isArray(result.keep) && result.keep.length === entries.length) {
       frontierDedupReceipt = { status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: entries.length, batch: 'beam' };
@@ -1204,20 +1223,37 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   }
   async function deduplicateRankedOptionsMany(jobs) {
     if (!jobs.length) return jobs;
-    if (!frontierDeduplicator?.deduplicateMany || frontierDeduplicatorStatus?.status !== 'available' || jobs.some(job => job.entries.some(entry => !entry.gpuState))) {
+    if (!frontierDeduplicator?.deduplicateMany || frontierDeduplicatorStatus?.status !== 'available') {
       const entries = [];
       for (const job of jobs) entries.push({ ...job, entries: await deduplicateRankedOptions(job.entries, job.state) });
       return entries;
     }
-    const groups = jobs.map(job => job.entries.map(entry => ({ hash: entry.gpuState.absoluteHash >>> 0, signature: arrangementSignature([...job.state.placements, entry.candidate]) })));
-    const result = await frontierDeduplicator.deduplicateMany(groups), total = groups.reduce((sum, group) => sum + group.length, 0);
-    if (result?.status === 'completed' && result?.parity === 'verified' && Array.isArray(result.keep) && result.keep.length === jobs.length && result.keep.every((keep, index) => Array.isArray(keep) && keep.length === jobs[index].entries.length)) {
-      frontierDedupReceipt = { status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, candidateCount: total, batch: 'beam-groups', groupCount: jobs.length };
-      return jobs.map((job, jobIndex) => ({ ...job, entries: job.entries.filter((entry, entryIndex) => result.keep[jobIndex][entryIndex] === 1) }));
+    const output = jobs.map(job => ({ ...job, entries: [...job.entries] }));
+    const eligible = [], fallback = [];
+    for (const [jobIndex, job] of jobs.entries()) {
+      if (job.entries.length && job.entries.every(entry => entry.gpuState)) eligible.push(jobIndex);
+      else fallback.push(jobIndex);
     }
-    const entries = [];
-    for (const job of jobs) entries.push({ ...job, entries: await deduplicateRankedOptions(job.entries, job.state) });
-    return entries;
+    frontierDedupTrace.push({ eligibleGroups: eligible.length, fallbackGroups: fallback.length, candidateCount: jobs.reduce((sum, job) => sum + job.entries.length, 0) });
+    let residentResult = null, residentSucceeded = false;
+    if (eligible.length) {
+      const residentGroups = eligible.map(jobIndex => jobs[jobIndex].entries.map(entry => ({ signature: arrangementSignature([...jobs[jobIndex].state.placements, entry.candidate]), ...(entry.gpuState.digestRef ? { digestRef: entry.gpuState.digestRef, digestIndex: entry.gpuState.digestIndex } : {}) })));
+      const canConsumeResidentDigests = options.enableGpuResidentDigestConsumer === true && residentGroups.every(group => group.every(row => row.digestRef));
+      const groups = canConsumeResidentDigests ? residentGroups : eligible.map((jobIndex, groupIndex) => jobs[jobIndex].entries.map((entry, entryIndex) => ({ hash: (Number.isSafeInteger(entry.gpuState.absoluteHash) ? entry.gpuState.absoluteHash : entry.gpuState.stateKeyHash) >>> 0, signature: residentGroups[groupIndex][entryIndex].signature })));
+      residentResult = canConsumeResidentDigests && frontierDeduplicator.deduplicateResidentMany ? await frontierDeduplicator.deduplicateResidentMany(groups) : await frontierDeduplicator.deduplicateMany(groups);
+      frontierDedupTrace[frontierDedupTrace.length - 1].result = { status: residentResult?.status || null, parity: residentResult?.parity || null, resident: residentResult?.resident === true, reason: residentResult?.reason || null, mode: canConsumeResidentDigests ? 'resident' : 'hash' };
+      const total = groups.reduce((sum, group) => sum + group.length, 0);
+      if (residentResult?.status === 'completed' && residentResult?.parity === 'verified' && Array.isArray(residentResult.keep) && residentResult.keep.length === eligible.length && residentResult.keep.every((keep, index) => Array.isArray(keep) && keep.length === jobs[eligible[index]].entries.length)) {
+        residentSucceeded = true;
+        for (const [groupIndex, jobIndex] of eligible.entries()) output[jobIndex].entries = jobs[jobIndex].entries.filter((entry, entryIndex) => residentResult.keep[groupIndex][entryIndex] === 1);
+        frontierDedupReceipt = { status: 'used', backend: residentResult.backend || 'compute-shader', parity: residentResult.parity, candidateCount: total, batch: 'beam-groups', groupCount: eligible.length, ...(residentResult.resident ? { resident: true } : {}), fallbackGroupCount: fallback.length, trace: frontierDedupTrace.slice(-64) };
+      } else {
+        residentResult = null;
+      }
+    }
+    for (const jobIndex of fallback) output[jobIndex].entries = await deduplicateRankedOptions(jobs[jobIndex].entries, jobs[jobIndex].state);
+    if (!residentSucceeded) for (const jobIndex of eligible) output[jobIndex].entries = await deduplicateRankedOptions(jobs[jobIndex].entries, jobs[jobIndex].state);
+    return output;
   }
   const searchHints = Boolean(options.searchHints);
   const gpuStateDedupEnabled = options.disableGpuStateDedup !== true;
@@ -1505,7 +1541,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     await timeGpuSubstage('fieldMetrics', () => evaluateFieldAggregatesAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateFieldMetrics ? null : fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; stageHistory.fieldMetrics.push({ depth, ...receipt }); }, verifyGpuTransitionParity || terminalTransition));
     await timeGpuSubstage('frontierValidity', () => evaluateFrontierOptionsAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateValidity ? null : frontierEvaluator, options.disableGpuCandidateValidity ? null : options.frontierValidator, receipt => { frontierReceipt = { ...receipt, ...(navigationTicket ? { ticket: navigationTicket } : {}), ...(navigationCursor ? { cursor: { ...navigationCursor, depth, nodeOffset: navigationCursor.nodeOffset + nodes } } : {}) }; stageHistory.frontier.push({ depth, ...frontierReceipt }); }));
     frontierNavigator?.beginLayer?.();
-    await timeGpuSubstage('frontierState', () => evaluateFrontierStateAcrossBeam(beamJobs, frontierNavigator || frontierState, receipt => { frontierStateReceipt = receipt; stageHistory.frontierState.push({ depth, ...receipt }); }, { verifyParity: verifyGpuTransitionParity || terminalTransition }));
+    await timeGpuSubstage('frontierState', () => evaluateFrontierStateAcrossBeam(beamJobs, frontierNavigator || frontierState, receipt => { frontierStateReceipt = receipt; stageHistory.frontierState.push({ depth, ...receipt }); }, { verifyParity: verifyGpuTransitionParity || terminalTransition, readDigests: !(options.enableGpuResidentDigestConsumer === true) || terminalTransition }));
     frontierNavigator?.commitLayer?.();
     const cancelledAfterGpu = isCancelled();
     if (navigationCancellation) navigationCancellation(cancelledAfterGpu);
@@ -1553,7 +1589,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         const placements = [...state.placements, option.candidate], metrics = option.metrics, field = new Set(state.field); option.candidate.cells.forEach(c => field.add(key(c.x, c.y)));
         if (metrics.holes > 0) continue;
         if (option.gpuState && gpuStateDedupEnabled) {
-          const hash = String(option.gpuState.absoluteHash >>> 0), bucket = gpuStateBuckets.get(hash) || [];
+          const hash = String((Number.isSafeInteger(option.gpuState.absoluteHash) ? option.gpuState.absoluteHash : option.gpuState.stateKeyHash) >>> 0), bucket = gpuStateBuckets.get(hash) || [];
           if (bucket.some(existing => sameGpuState(existing, option.gpuState))) continue;
           bucket.push(option.gpuState); gpuStateBuckets.set(hash, bucket);
         } else {

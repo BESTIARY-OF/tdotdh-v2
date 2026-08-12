@@ -5,6 +5,7 @@ import { REMAINING_MASK_WORD_COUNT, WEBGPU_LABELED_FRONTIER_STATE_SCHEMA, cpuTra
 
 export const WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA = 'tdotdh.webgpu-resident-frontier-state.v0';
 export const WEBGPU_RESIDENT_PARENT_REFERENCE_SCHEMA = 'tdotdh.webgpu-resident-parent-reference.v0';
+export const WEBGPU_RESIDENT_DIGEST_SCHEMA = 'tdotdh.webgpu-resident-digest.v0';
 export const DEFAULT_RESIDENT_FRONTIER_CAPACITY = 4096;
 // Keep intermediate frontier transitions GPU-resident in large enough chunks
 // to avoid a queue wait and mapped readback for every small beam slice. The
@@ -13,6 +14,38 @@ export const DEFAULT_RESIDENT_FRONTIER_CAPACITY = 4096;
 export const DEFAULT_RESIDENT_FRONTIER_BATCH_CAPACITY = 1024;
 
 const RESIDENT_PARENT_SENTINEL = 0xffffffff;
+
+const GATHER_SHADER = `
+struct Params { candidateCount: u32, labelsPerState: u32, reserved0: u32, reserved1: u32 };
+@group(0) @binding(0) var<storage, read> residentParents: array<u32>;
+@group(0) @binding(1) var<storage, read> parentStateIndices: array<u32>;
+@group(0) @binding(2) var<storage, read_write> seedParents: array<u32>;
+@group(0) @binding(3) var<storage, read> params: Params;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let count = params.candidateCount * params.labelsPerState;
+  if (id.x >= count) { return; }
+  let candidate = id.x / params.labelsPerState;
+  let offset = id.x % params.labelsPerState;
+  let parentIndex = parentStateIndices[candidate];
+  if (parentIndex != ${RESIDENT_PARENT_SENTINEL}u) { seedParents[id.x] = residentParents[parentIndex * params.labelsPerState + offset]; }
+}`;
+
+const PUBLISH_SHADER = `
+struct Params { candidateCount: u32, labelsPerState: u32, reserved0: u32, reserved1: u32 };
+@group(0) @binding(0) var<storage, read> source: array<u32>;
+@group(0) @binding(1) var<storage, read> outputStateIndices: array<u32>;
+@group(0) @binding(2) var<storage, read_write> residentParents: array<u32>;
+@group(0) @binding(3) var<storage, read> params: Params;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let count = params.candidateCount * params.labelsPerState;
+  if (id.x >= count) { return; }
+  let candidate = id.x / params.labelsPerState;
+  let offset = id.x % params.labelsPerState;
+  let destination = outputStateIndices[candidate] * params.labelsPerState + offset;
+  residentParents[destination] = source[id.x];
+}`;
 
 const SHADER = `
 struct Params { candidateCount: u32, wordCount: u32, pieceCount: u32, width: u32, height: u32, originX: i32, originY: i32, reserved: u32 };
@@ -46,9 +79,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   for (var piece: u32 = 0u; piece < params.pieceCount; piece++) {
     for (var word: u32 = 0u; word < labelStride; word++) {
       let localOffset = localBase + piece * labelStride + word;
-      var parentValue = 0u;
-      if (parentIndex == ${RESIDENT_PARENT_SENTINEL}u) { parentValue = seedParents[parentBase + piece * labelStride + word]; }
-      else { parentValue = residentParents[residentParentBase + piece * labelStride + word]; }
+      // The gather pass resolves resident parents into resolvedParents before this
+      // transition. Keep the index/arena bindings live for stable layouts, but
+      // consume one canonical parent source in the main pass.
+      var parentValue = seedParents[parentBase + piece * labelStride + word];
       let candidateValue = select(0u, candidateMasks[candidateMaskBase + word], piece == pieceIndex);
       nextLabels[localOffset] = parentValue | candidateValue;
       canonicalLabels[localOffset] = 0u;
@@ -185,7 +219,8 @@ function makeResources(device, capacity, batchCapacity, pieceCount, grid, shader
   const remainingBytes = batchCapacity * REMAINING_MASK_WORD_COUNT * 4;
   const hashBytes = batchCapacity * 4;
   const buffers = {
-    seedParents: device.createBuffer({ size: batchLabelsBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+    seedParents: device.createBuffer({ size: batchLabelsBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC }),
+    resolvedParents: device.createBuffer({ size: batchLabelsBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC }),
     candidateMasks: device.createBuffer({ size: batchMaskBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
     candidatePieceIndices: device.createBuffer({ size: batchCapacity * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
     remainingMasks: device.createBuffer({ size: remainingBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
@@ -193,8 +228,8 @@ function makeResources(device, capacity, batchCapacity, pieceCount, grid, shader
     canonicalLabels: device.createBuffer({ size: batchLabelsBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
     digests: device.createBuffer({ size: hashBytes * 2, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC }),
     params: device.createBuffer({ size: 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
-    residentParents: device.createBuffer({ size: residentBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
-    residentNext: device.createBuffer({ size: residentBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+    residentParents: device.createBuffer({ size: residentBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC }),
+    residentNext: device.createBuffer({ size: residentBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC }),
     residentCanonical: device.createBuffer({ size: residentBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
     parentStateIndices: device.createBuffer({ size: batchCapacity * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
     outputStateIndices: device.createBuffer({ size: batchCapacity * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
@@ -207,17 +242,26 @@ function makeResources(device, capacity, batchCapacity, pieceCount, grid, shader
     .replaceAll('params.pieceCount', `${pieceCount}u`)
     .replaceAll('params.width', `${grid.width}u`)
     .replaceAll('params.height', `${grid.height}u`);
+  const gatherModule = device.createShaderModule({ code: GATHER_SHADER }), gatherPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: gatherModule, entryPoint: 'main' } });
+  const publishModule = device.createShaderModule({ code: PUBLISH_SHADER }), publishPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: publishModule, entryPoint: 'main' } });
   const module = device.createShaderModule({ code: specializedShader }), pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
-  const bindingBuffers = [buffers.seedParents, buffers.candidateMasks, buffers.candidatePieceIndices, buffers.remainingMasks, buffers.nextLabels, buffers.canonicalLabels, buffers.digests, buffers.params, buffers.residentParents, buffers.residentNext, buffers.residentCanonical, buffers.parentStateIndices, buffers.outputStateIndices];
+  const bindingBuffers = [buffers.resolvedParents, buffers.candidateMasks, buffers.candidatePieceIndices, buffers.remainingMasks, buffers.nextLabels, buffers.canonicalLabels, buffers.digests, buffers.params, buffers.residentParents, buffers.residentNext, buffers.residentCanonical, buffers.parentStateIndices, buffers.outputStateIndices];
   const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: bindingBuffers.map((buffer, binding) => ({ binding, resource: { buffer } })) });
-  return { capacity, batchCapacity, pieceCount, grid, labelsPerState, buffers, pipeline, bindGroup };
+  const gatherParams = device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  const gatherBindGroup = device.createBindGroup({ layout: gatherPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.residentParents } }, { binding: 1, resource: { buffer: buffers.parentStateIndices } }, { binding: 2, resource: { buffer: buffers.resolvedParents } }, { binding: 3, resource: { buffer: gatherParams } }] });
+  const publishParams = device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  buffers.gatherParams = gatherParams;
+  const publishOutputIndices = device.createBuffer({ size: batchCapacity * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  buffers.publishParams = publishParams; buffers.publishOutputIndices = publishOutputIndices;
+  const publishBindGroup = device.createBindGroup({ layout: publishPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.nextLabels } }, { binding: 1, resource: { buffer: publishOutputIndices } }, { binding: 2, resource: { buffer: buffers.residentParents } }, { binding: 3, resource: { buffer: publishParams } }] });
+  return { capacity, batchCapacity, pieceCount, grid, labelsPerState, buffers, pipeline, bindGroup, gatherPipeline, gatherBindGroup, publishPipeline, publishBindGroup };
 }
 
 function destroyResources(resources) { if (resources) Object.values(resources.buffers).forEach(buffer => buffer.destroy()); }
 
 async function readback(buffer, bytes) { await buffer.mapAsync(GPUMapMode.READ); const values = Array.from(new Uint32Array(buffer.getMappedRange().slice(0, bytes))); buffer.unmap(); return values; }
 
-async function dispatch(device, resources, candidates, pieceIds, outputIndices, grid, { readLabels = true } = {}) {
+async function dispatch(device, resources, candidates, pieceIds, outputIndices, grid, { readLabels = true, readDigests = true, digestGeneration = 0 } = {}) {
   const dispatchStarted = performance.now();
   const { buffers, pipeline, bindGroup, labelsPerState } = resources, count = candidates.length, labelBytes = count * labelsPerState * 4, maskBytes = count * grid.wordCount * 4, hashBytes = count * 4, digestBytes = hashBytes * 2;
   // Resident children read their parent labels from residentParents. Roots
@@ -229,37 +273,59 @@ async function dispatch(device, resources, candidates, pieceIds, outputIndices, 
   device.queue.writeBuffer(buffers.remainingMasks, 0, flatten(candidates, 'remainingMask', REMAINING_MASK_WORD_COUNT));
   const parentStateIndices = candidates.map((candidate, index) => {
     if (candidate.parentStateIndex != null) return candidate.parentStateIndex;
-    device.queue.writeBuffer(buffers.seedParents, index * labelsPerState * 4, candidate.parentLabelMasks);
     return RESIDENT_PARENT_SENTINEL;
   });
   device.queue.writeBuffer(buffers.parentStateIndices, 0, Uint32Array.from(parentStateIndices));
+  device.queue.writeBuffer(buffers.gatherParams, 0, new Uint32Array([count, labelsPerState, 0, 0]));
   device.queue.writeBuffer(buffers.outputStateIndices, 0, Uint32Array.from(outputIndices));
+  device.queue.writeBuffer(buffers.publishOutputIndices, 0, Uint32Array.from(outputIndices));
+  device.queue.writeBuffer(buffers.publishParams, 0, new Uint32Array([count, labelsPerState, 0, 0]));
   device.queue.writeBuffer(buffers.params, 0, new Int32Array([count, grid.wordCount, pieceIds.length, grid.width, grid.height, grid.originX, grid.originY, 0]));
   const uploadMs = performance.now() - dispatchStarted;
-  const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
+  if (parentStateIndices.some(index => index !== RESIDENT_PARENT_SENTINEL)) {
+    const gatherEncoder = device.createCommandEncoder(), gatherPass = gatherEncoder.beginComputePass();
+    gatherPass.setPipeline(resources.gatherPipeline); gatherPass.setBindGroup(0, resources.gatherBindGroup); gatherPass.dispatchWorkgroups(Math.ceil(count * labelsPerState / 64)); gatherPass.end();
+    device.queue.submit([gatherEncoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+  }
+  const encoder = device.createCommandEncoder();
+  for (let index = 0; index < parentStateIndices.length; index++) {
+    if (parentStateIndices[index] === RESIDENT_PARENT_SENTINEL) {
+      device.queue.writeBuffer(buffers.seedParents, index * labelsPerState * 4, candidates[index].parentLabelMasks);
+      encoder.copyBufferToBuffer(buffers.seedParents, index * labelsPerState * 4, buffers.resolvedParents, index * labelsPerState * 4, labelsPerState * 4);
+    }
+  }
+  const pass = encoder.beginComputePass();
   pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end();
   if (readLabels) {
     encoder.copyBufferToBuffer(buffers.nextLabels, 0, buffers.nextReadback, 0, labelBytes);
     encoder.copyBufferToBuffer(buffers.canonicalLabels, 0, buffers.canonicalReadback, 0, labelBytes);
   }
-  encoder.copyBufferToBuffer(buffers.digests, 0, buffers.digestReadback, 0, digestBytes);
+  if (readDigests) encoder.copyBufferToBuffer(buffers.digests, 0, buffers.digestReadback, 0, digestBytes);
   const beforeSubmit = performance.now();
   device.queue.submit([encoder.finish()]);
+  const publishEncoder = device.createCommandEncoder(), publishPass = publishEncoder.beginComputePass();
+  publishPass.setPipeline(resources.publishPipeline); publishPass.setBindGroup(0, resources.publishBindGroup); publishPass.dispatchWorkgroups(Math.ceil(count * labelsPerState / 64)); publishPass.end();
+  device.queue.submit([publishEncoder.finish()]);
   const submitMs = performance.now() - beforeSubmit;
-  const [nextLabels, canonicalLabels, digestValues] = await Promise.all([
+  const completion = device.queue.onSubmittedWorkDone();
+  const [nextLabels, canonicalLabels, digestValues, _completion] = await Promise.all([
     readLabels ? readback(buffers.nextReadback, labelBytes) : Promise.resolve([]),
     readLabels ? readback(buffers.canonicalReadback, labelBytes) : Promise.resolve([]),
-    readback(buffers.digestReadback, digestBytes),
+    readDigests ? readback(buffers.digestReadback, digestBytes) : Promise.resolve([]),
+    completion,
   ]), readbackMs = performance.now() - beforeSubmit - submitMs, absoluteHashes = [], canonicalHashes = [];
-  for (let index = 0; index < count; index++) { absoluteHashes.push(digestValues[index * 2]); canonicalHashes.push(digestValues[index * 2 + 1]); }
-  return { nextLabels, canonicalLabels, absoluteHashes, canonicalHashes, readback: readLabels ? 'full-labels-and-digests' : 'state-digests-only', dispatchTimings: { uploadMs: Number(uploadMs.toFixed(2)), submitMs: Number(submitMs.toFixed(2)), readbackMs: Number(readbackMs.toFixed(2)), totalMs: Number((performance.now() - dispatchStarted).toFixed(2)) } };
+  for (let index = 0; index < count; index++) { if (readDigests) { absoluteHashes.push(digestValues[index * 2]); canonicalHashes.push(digestValues[index * 2 + 1]); } }
+  return { nextLabels, canonicalLabels, absoluteHashes, canonicalHashes, readback: readLabels ? 'full-labels-and-digests' : readDigests ? 'state-digests-only' : 'resident-digests', ...(readDigests ? {} : { residentDigestRef: Object.freeze({ schema: WEBGPU_RESIDENT_DIGEST_SCHEMA, device, buffer: resources.buffers.digests, offsetWords: 0, strideWords: 2, count, generation: digestGeneration }) }), dispatchTimings: { uploadMs: Number(uploadMs.toFixed(2)), submitMs: Number(submitMs.toFixed(2)), readbackMs: Number(readbackMs.toFixed(2)), totalMs: Number((performance.now() - dispatchStarted).toFixed(2)) } };
 }
 
 /**
- * A two-generation GPU frontier pool. `beginLayer` freezes the input pool,
- * `transition` writes all children into the other pool, and `commitLayer`
- * swaps them. Parent references therefore remain GPU-local across a full beam
- * layer; only canonical replay arrays and hashes are read back for admission.
+ * A monotonic GPU frontier pool. `beginLayer` reserves the next append range,
+ * `transition` writes children into a scratch output buffer and publishes them
+ * into the stable parent arena with an explicit queue completion edge, and
+ * `commitLayer` publishes the range. Parent references therefore remain stable
+ * across every beam layer and resumable cursor; only canonical replay arrays
+ * and hashes are read back for admission.
  */
 export function createWebGpuResidentFrontierState({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, deviceCache = null, capacity = DEFAULT_RESIDENT_FRONTIER_CAPACITY, batchCapacity = DEFAULT_RESIDENT_FRONTIER_BATCH_CAPACITY, requiredLimits = { maxStorageBufferBindingSize: 33554432, maxStorageBuffersPerShaderStage: 14 }, shaderSource = SHADER } = {}) {
   if (!Number.isSafeInteger(capacity) || capacity <= 0) throw new TypeError('resident frontier capacity must be a positive safe integer');
@@ -269,8 +335,8 @@ export function createWebGpuResidentFrontierState({ gpu = globalThis.navigator?.
   let dispatchTimingTotals = { calls: 0, uploadMs: 0, submitMs: 0, readbackMs: 0, totalMs: 0 };
   const reset = () => { destroyResources(resources); resources = null; pieceIds = null; epoch = 0; residentCount = 0; layer = null; dispatchTimingTotals = { calls: 0, uploadMs: 0, submitMs: 0, readbackMs: 0, totalMs: 0 }; residentDeviceCache.reset(); };
   const availability = async () => { const probe = await probeWebGpuCapabilities({ gpu, requiredLimits: limits }); return probe.adapterAvailable && probe.requiredLimitsSatisfied ? Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'available', backend: 'webgpu', capacity, batchCapacity, grid: normalizedGrid }) : Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: probe.adapterAvailable ? 'webgpu-required-limits-unsatisfied' : 'webgpu-adapter-unavailable', capacity, batchCapacity, grid: normalizedGrid }); };
-  const beginLayer = () => { if (layer) throw new Error('resident frontier layer is already active'); layer = { nextSlot: 0, pieceIds: null, pendingEpoch: epoch + 1 }; return Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'layer-open', epoch, nextEpoch: layer.pendingEpoch }); };
-  const commitLayer = () => { if (!layer) return Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'idle', epoch }); const committed = Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'layer-committed', epoch: layer.pendingEpoch, outputCount: layer.nextSlot }); epoch = layer.pendingEpoch; residentCount = layer.nextSlot; layer = null; if (resources) { const old = resources.buffers.residentParents; resources.buffers.residentParents = resources.buffers.residentNext; resources.buffers.residentNext = old; const bindingBuffers = [resources.buffers.seedParents, resources.buffers.candidateMasks, resources.buffers.candidatePieceIndices, resources.buffers.remainingMasks, resources.buffers.nextLabels, resources.buffers.canonicalLabels, resources.buffers.digests, resources.buffers.params, resources.buffers.residentParents, resources.buffers.residentNext, resources.buffers.residentCanonical, resources.buffers.parentStateIndices, resources.buffers.outputStateIndices]; resources.bindGroup = resources.device.createBindGroup({ layout: resources.pipeline.getBindGroupLayout(0), entries: bindingBuffers.map((buffer, binding) => ({ binding, resource: { buffer } })) }); } return committed; };
+  const beginLayer = () => { if (layer) throw new Error('resident frontier layer is already active'); layer = { baseSlot: residentCount, nextSlot: 0, pieceIds: null, pendingEpoch: epoch + 1 }; return Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'layer-open', epoch, nextEpoch: layer.pendingEpoch, baseSlot: layer.baseSlot }); };
+  const commitLayer = () => { if (!layer) return Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'idle', epoch }); const committed = Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'layer-committed', epoch: layer.pendingEpoch, baseSlot: layer.baseSlot, outputCount: layer.nextSlot }); epoch = layer.pendingEpoch; residentCount = layer.baseSlot + layer.nextSlot; layer = null; if (resources) { const bindingBuffers = [resources.buffers.resolvedParents, resources.buffers.candidateMasks, resources.buffers.candidatePieceIndices, resources.buffers.remainingMasks, resources.buffers.nextLabels, resources.buffers.canonicalLabels, resources.buffers.digests, resources.buffers.params, resources.buffers.residentParents, resources.buffers.residentNext, resources.buffers.residentCanonical, resources.buffers.parentStateIndices, resources.buffers.outputStateIndices]; resources.bindGroup = resources.device.createBindGroup({ layout: resources.pipeline.getBindGroupLayout(0), entries: bindingBuffers.map((buffer, binding) => ({ binding, resource: { buffer } })) }); resources.gatherBindGroup = resources.device.createBindGroup({ layout: resources.gatherPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: resources.buffers.residentParents } }, { binding: 1, resource: { buffer: resources.buffers.parentStateIndices } }, { binding: 2, resource: { buffer: resources.buffers.resolvedParents } }, { binding: 3, resource: { buffer: resources.buffers.gatherParams } }] }); resources.publishBindGroup = resources.device.createBindGroup({ layout: resources.publishPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: resources.buffers.nextLabels } }, { binding: 1, resource: { buffer: resources.buffers.publishOutputIndices } }, { binding: 2, resource: { buffer: resources.buffers.residentParents } }, { binding: 3, resource: { buffer: resources.buffers.publishParams } }] }); } return committed; };
   return Object.freeze({
     schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA,
     availability,
@@ -278,7 +344,7 @@ export function createWebGpuResidentFrontierState({ gpu = globalThis.navigator?.
     commitLayer,
     reset,
     epoch: () => epoch,
-    async transition(candidates, { verifyParity = true } = {}) {
+    async transition(candidates, { verifyParity = true, readDigests = true } = {}) {
       const normalized = normalizeCandidates(candidates, normalizedGrid), cpu = verifyParity ? cpuTransitionLabeledFrontierStates(candidates, normalizedGrid) : null, parentReference = parentReferenceReceipt(normalized);
       if (!layer) beginLayer();
       if (!pieceIds) pieceIds = normalized[0].pieceIds;
@@ -286,7 +352,7 @@ export function createWebGpuResidentFrontierState({ gpu = globalThis.navigator?.
       if (layer.pieceIds && JSON.stringify(layer.pieceIds) !== JSON.stringify(normalized[0].pieceIds)) return unavailable('layer-piece-id-set-changed', cpu || { pieceIds, nextLabels: [], canonicalLabels: [], absoluteHashes: [], canonicalHashes: [], candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, pieceCount: pieceIds.length }, { parentReference });
       layer.pieceIds = normalized[0].pieceIds;
       const fallbackCpu = () => cpu || { pieceIds, nextLabels: [], canonicalLabels: [], absoluteHashes: [], canonicalHashes: [], candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, pieceCount: pieceIds.length };
-      if (layer.nextSlot + normalized.length > capacity) return unavailable('resident-frontier-capacity-exceeded', fallbackCpu(), { capacity, epoch: layer.pendingEpoch, parentReference });
+      if (layer.baseSlot + layer.nextSlot + normalized.length > capacity) return unavailable('resident-frontier-capacity-exceeded', fallbackCpu(), { capacity, epoch: layer.pendingEpoch, residentCount, parentReference });
       const status = await availability(); if (status.status !== 'available') return unavailable(status.reason, fallbackCpu(), { capacity, epoch: layer.pendingEpoch, parentReference });
       try {
         const device = await residentDeviceCache.getDevice();
@@ -294,13 +360,15 @@ export function createWebGpuResidentFrontierState({ gpu = globalThis.navigator?.
         if (resources.pieceCount !== pieceIds.length || resources.grid.wordCount !== normalizedGrid.wordCount) { reset(); return unavailable('resident-frontier-shape-changed', fallbackCpu(), { parentReference }); }
         for (const candidate of normalized) if (candidate.parentStateIndex != null && candidate.parentStateIndex >= residentCount) return unavailable('resident-parent-reference-not-in-input-layer', fallbackCpu(), { capacity, epoch: layer.pendingEpoch, residentCount, parentReference });
         const nextLabels = [], canonicalLabels = [], absoluteHashes = [], canonicalHashes = [], residentStateIndices = [], dispatchTimings = { calls: 0, uploadMs: 0, submitMs: 0, readbackMs: 0, totalMs: 0 }, append = (target, values) => { for (const value of values) target.push(value); };
-        for (let offset = 0; offset < normalized.length; offset += batchCapacity) { const batch = normalized.slice(offset, offset + batchCapacity), outputIndices = batch.map((_, index) => layer.nextSlot + offset + index); const result = await dispatch(device, resources, batch, pieceIds, outputIndices, normalizedGrid, { readLabels: verifyParity }); append(nextLabels, result.nextLabels); append(canonicalLabels, result.canonicalLabels); append(absoluteHashes, result.absoluteHashes); append(canonicalHashes, result.canonicalHashes); append(residentStateIndices, outputIndices); for (const name of ['uploadMs', 'submitMs', 'readbackMs', 'totalMs']) { dispatchTimings[name] += result.dispatchTimings?.[name] || 0; dispatchTimingTotals[name] += result.dispatchTimings?.[name] || 0; } dispatchTimings.calls += 1; dispatchTimingTotals.calls += 1; }
+        const deferDigests = readDigests === false && verifyParity !== true && normalized.length <= batchCapacity;
+        let residentDigestRef = null;
+        for (let offset = 0; offset < normalized.length; offset += batchCapacity) { const batch = normalized.slice(offset, offset + batchCapacity), outputIndices = batch.map((_, index) => layer.baseSlot + layer.nextSlot + offset + index), result = await dispatch(device, resources, batch, pieceIds, outputIndices, normalizedGrid, { readLabels: verifyParity, readDigests: !deferDigests, digestGeneration: layer.pendingEpoch }); append(nextLabels, result.nextLabels); append(canonicalLabels, result.canonicalLabels); append(absoluteHashes, result.absoluteHashes); append(canonicalHashes, result.canonicalHashes); append(residentStateIndices, outputIndices); if (result.residentDigestRef) residentDigestRef = result.residentDigestRef; for (const name of ['uploadMs', 'submitMs', 'readbackMs', 'totalMs']) { dispatchTimings[name] += result.dispatchTimings?.[name] || 0; dispatchTimingTotals[name] += result.dispatchTimings?.[name] || 0; } dispatchTimings.calls += 1; dispatchTimingTotals.calls += 1; }
         if (verifyParity) {
           const actual = { nextLabels, canonicalLabels, absoluteHashes, canonicalHashes }, expected = { nextLabels: cpu.nextLabels, canonicalLabels: cpu.canonicalLabels, absoluteHashes: cpu.absoluteHashes, canonicalHashes: cpu.canonicalHashes };
-          if (!equalArrays(nextLabels, cpu.nextLabels) || !equalArrays(canonicalLabels, cpu.canonicalLabels) || !equalArrays(absoluteHashes, cpu.absoluteHashes) || !equalArrays(canonicalHashes, cpu.canonicalHashes)) return unavailable(parityMismatchReason(actual, expected, { labelsPerState: cpu.pieceCount * cpu.wordCount, pieceCount: cpu.pieceCount, wordCount: cpu.wordCount, parentStateIndices: normalized.map(candidate => candidate.parentStateIndex), candidatePieceIndices: normalized.map(candidate => candidate.candidatePieceIndex), seedParents: normalized.map(candidate => candidate.parentLabelMasks), candidateMasks: normalized.map(candidate => candidate.candidateMask) }), cpu, { capacity, epoch: layer.pendingEpoch, parentReference });
+          if (!equalArrays(nextLabels, cpu.nextLabels) || !equalArrays(canonicalLabels, cpu.canonicalLabels) || !equalArrays(absoluteHashes, cpu.absoluteHashes) || !equalArrays(canonicalHashes, cpu.canonicalHashes)) return unavailable(parityMismatchReason(actual, expected, { labelsPerState: cpu.pieceCount * cpu.wordCount, pieceCount: cpu.pieceCount, wordCount: cpu.wordCount, parentStateIndices: normalized.map(candidate => candidate.parentStateIndex), candidatePieceIndices: normalized.map(candidate => candidate.candidatePieceIndex), seedParents: normalized.map(candidate => candidate.parentLabelMasks), candidateMasks: normalized.map(candidate => candidate.candidateMask) }), cpu, { capacity, epoch: layer.pendingEpoch, residentCount, parentReference });
         }
         layer.nextSlot += normalized.length;
-        return Object.freeze({ schema: WEBGPU_LABELED_FRONTIER_STATE_SCHEMA, status: 'completed', backend: 'webgpu', pieceIds, nextLabels, canonicalLabels, absoluteHashes, canonicalHashes, candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, pieceCount: pieceIds.length, parity: verifyParity ? 'verified' : 'deferred', persistent: true, resident: true, residentEpoch: layer.pendingEpoch, residentStateIndices, bufferCapacity: capacity, batchCapacity, parentReference, readback: verifyParity ? 'full-labels-and-digests' : 'state-digests-only', dispatchTimings, dispatchTimingTotals: { ...dispatchTimingTotals } });
+        return Object.freeze({ schema: WEBGPU_LABELED_FRONTIER_STATE_SCHEMA, status: 'completed', backend: 'webgpu', pieceIds, nextLabels, canonicalLabels, absoluteHashes, canonicalHashes, candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, pieceCount: pieceIds.length, parity: verifyParity ? 'verified' : 'deferred', persistent: true, resident: true, residentEpoch: layer.pendingEpoch, residentStateIndices, bufferCapacity: capacity, batchCapacity, parentReference, readback: residentDigestRef ? 'resident-digests' : verifyParity ? 'full-labels-and-digests' : 'state-digests-only', ...(residentDigestRef ? { residentDigestRef } : {}), dispatchTimings, dispatchTimingTotals: { ...dispatchTimings } });
       } catch (error) { reset(); return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, fallbackCpu(), { parentReference }); }
     },
   });
