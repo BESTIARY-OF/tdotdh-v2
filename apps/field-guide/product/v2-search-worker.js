@@ -21,7 +21,7 @@ import { createWebGpuFrontierNavigationScheduler } from '../../../packages/searc
 import { createWebGpuDeviceCache } from '../../../packages/search-core/src/webgpu-device-cache.js?v=20260811-lifecycle1';
 import { probeWebGpuExecutionCapabilities } from '../../../packages/search-core/src/webgpu-execution-probe.js?v=20260810-gpu35';
 import { createNavigationCoordinator } from '../../../packages/search-worker/src/navigation-coordinator.js?v=20260811-gpu-expansion4';
-import { search } from './v2-legacy-search.js?v=20260812-metricsresident5';
+import { search } from './v2-legacy-search.js?v=20260812-metricsresident7';
 
 const deviceCache = createWebGpuDeviceCache({ gpu: globalThis.navigator?.gpu });
 const candidatePrefilter = createWebGpuCandidatePrefilter({ gpu: globalThis.navigator?.gpu, deviceCache });
@@ -118,7 +118,7 @@ async function runProductSearch(request, context) {
     // loop enables full CPU canonical-label parity for the terminal layer;
     // callers can opt into per-depth parity for diagnostics.
     verifyGpuTransitionParity: steering.verifyGpuTransitionParity === true,
-    enableGpuResidentDigestConsumer: steering.enableGpuResidentDigestConsumer === true,
+    enableGpuResidentDigestConsumer: steering.enableGpuResidentDigestConsumer !== false,
     // The CPU frontier coordinates are a small control-plane input. When GPU
     // target generation is available, recomputing the identical 64x64 target
     // pool and reading it back only adds a synchronization barrier; candidate

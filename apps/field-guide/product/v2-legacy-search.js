@@ -670,7 +670,13 @@ async function evaluateFrontierGeometryAcrossBeam(jobs, centroidId, frontierMetr
         const resolve = async () => {
           const resolved = await resident.resolve();
           const used = resolved?.status === 'completed' && resolved.parity === 'verified' && Array.isArray(resolved.metrics) && resolved.metrics.length === pending.length;
-          if (used) for (const [index, item] of pending.entries()) jobs[item.jobIndex].entries[item.entryIndex] = { ...item.entry, gpuGeometry: resolved.metrics[index] };
+          if (used) for (const [index, item] of pending.entries()) {
+            // Resolution happens after later GPU stages may have attached resident
+            // state/topology payloads. Merge into the live entry rather than the
+            // snapshot captured when the deferred geometry work was submitted.
+            const current = jobs[item.jobIndex]?.entries?.[item.entryIndex] || item.entry;
+            jobs[item.jobIndex].entries[item.entryIndex] = { ...current, gpuGeometry: resolved.metrics[index] };
+          }
           onMetrics({ status: used ? 'used' : 'fallback', backend: used ? (resolved.backend || 'compute-shader') : 'cpu-oracle', parity: used ? resolved.parity : 'oracle', reason: used ? null : (resolved?.reason || 'frontier-metrics-unavailable'), candidateCount: pending.length, batch: 'beam', boundsGroups: 1, ...(resolved?.dispatchTimings ? { dispatchTimings: resolved.dispatchTimings } : {}) });
           return used;
         };
@@ -786,6 +792,7 @@ async function evaluateFrontierStateAcrossBeam(jobs, frontierState, onState = ()
     const hasResidentDigests = result?.residentDigestRef && result.residentDigestRef.count === pending.length;
     if (result?.status === 'completed' && ['verified', 'deferred'].includes(result.parity) && (hasHostDigests || hasResidentDigests)) {
       const wordCount = Number(result.wordCount) || 0, labelsPerCandidate = result.pieceIds.length * wordCount;
+      let gpuStateCount = 0;
       for (const [index, item] of pending.entries()) {
         const labelStart = index * labelsPerCandidate;
         const hasLabels = Array.isArray(result.canonicalLabels) && result.canonicalLabels.length >= labelStart + labelsPerCandidate, canonicalLabels = hasLabels ? result.canonicalLabels.slice(labelStart, labelStart + labelsPerCandidate) : null, resident = result.resident === true || result.navigator?.status === 'resident';
@@ -794,9 +801,10 @@ async function evaluateFrontierStateAcrossBeam(jobs, frontierState, onState = ()
         const statePayload = { ...(hasHostDigests ? { absoluteHash: result.absoluteHashes[index], canonicalHash: result.canonicalHashes[index] } : {}), ...(stateKey ? { stateKey, stateKeyHash: stateKeyHash(stateKey), digestRef: result.residentDigestRef, digestIndex: index } : {}), pieceIds: result.pieceIds, wordCount, remainingMask: Array.from(item.candidate.remainingMask), residentStateIndex: result.residentStateIndices?.[index], residentEpoch: result.residentEpoch };
         if (resident) { statePayload.parentLabelRef = { epoch: result.residentEpoch, index: result.residentStateIndices?.[index] }; if (canonicalLabels) statePayload.canonicalSignature = canonicalSignatureFromLabeledFrontierState({ pieceIds: result.pieceIds, canonicalLabels, wordCount }); }
         else if (Array.isArray(result.nextLabels) && result.nextLabels.length >= labelStart + labelsPerCandidate) Object.assign(statePayload, { nextLabels: result.nextLabels.slice(labelStart, labelStart + labelsPerCandidate), ...(canonicalLabels ? { canonicalLabels } : {}) });
+        gpuStateCount += 1;
         jobs[item.jobIndex].entries[item.entryIndex] = { ...item.entry, gpuState: statePayload };
       }
-      onState({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, persistent: result.persistent === true, resident: result.navigator?.status === 'resident', navigatorEpoch: result.navigator?.epoch, bufferCapacity: result.bufferCapacity, candidateCount: pending.length, batch: 'beam', parentReference: result.parentReference, ...(result.residentStateIndices ? { residentStateIndices: result.residentStateIndices.slice(0, 128) } : {}), ...(result.dispatchTimings ? { dispatchTimings: result.dispatchTimings } : {}), ...(result.dispatchTimingTotals ? { dispatchTimingTotals: result.dispatchTimingTotals } : {}) });
+      onState({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, persistent: result.persistent === true, resident: result.navigator?.status === 'resident', navigatorEpoch: result.navigator?.epoch, bufferCapacity: result.bufferCapacity, candidateCount: pending.length, gpuStateCount, batch: 'beam', readback: result.readback, residentDigest: Boolean(result.residentDigestRef), residentDigestCount: result.residentDigestRef?.count, parentReference: result.parentReference, ...(result.residentStateIndices ? { residentStateIndices: result.residentStateIndices.slice(0, 128) } : {}), ...(result.dispatchTimings ? { dispatchTimings: result.dispatchTimings } : {}), ...(result.dispatchTimingTotals ? { dispatchTimingTotals: result.dispatchTimingTotals } : {}) });
       return jobs;
     }
     onState({ status: 'fallback', reason: result?.reason || 'frontier-state-unavailable', candidateCount: pending.length, batch: 'beam' });
@@ -1291,7 +1299,8 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     const canConsumeResidentDigests = options.enableGpuResidentDigestConsumer === true && residentGroups.every(group => group.every(row => row.digestRef));
     const groups = canConsumeResidentDigests ? residentGroups : hashGroups;
     const candidateCount = groups.reduce((sum, group) => sum + group.length, 0);
-    frontierDedupTrace.push({ eligibleGroups: eligible.length, fallbackGroups: fallback.length, candidateCount, oracleHashCount, mode: canConsumeResidentDigests ? 'resident' : 'hash' });
+    const gpuEntryCount = jobs.reduce((sum, job) => sum + job.entries.filter(entry => entry.gpuState).length, 0);
+    frontierDedupTrace.push({ eligibleGroups: eligible.length, fallbackGroups: fallback.length, gpuEntryCount, candidateCount, oracleHashCount, mode: canConsumeResidentDigests ? 'resident' : 'hash' });
     const result = canConsumeResidentDigests && frontierDeduplicator.deduplicateResidentMany ? await frontierDeduplicator.deduplicateResidentMany(groups) : await frontierDeduplicator.deduplicateMany(groups);
     frontierDedupTrace[frontierDedupTrace.length - 1].result = { status: result?.status || null, parity: result?.parity || null, resident: result?.resident === true, reason: result?.reason || null };
     if (result?.status === 'completed' && result?.parity === 'verified' && Array.isArray(result.keep) && result.keep.length === jobs.length && result.keep.every((keep, index) => Array.isArray(keep) && keep.length === jobs[index].entries.length)) {
