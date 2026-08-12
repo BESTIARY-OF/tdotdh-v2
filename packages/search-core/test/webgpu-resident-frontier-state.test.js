@@ -64,7 +64,7 @@ try {
     parentStateIndices: [0],
   });
   assert.equal(seedParentWrites.length, 1, 'resident child must not re-upload its CPU parent labels');
-  assert.equal(createdBuffers, 20, 'resident pool must reuse its resident allocation');
+  assert.equal(createdBuffers, 19, 'resident pool must reuse its resident allocation');
   resident.commitLayer();
   resident.reset();
 } finally {
