@@ -486,7 +486,10 @@ function arrangementSignature(placements) {
 function seededRandom(seed = '') {
   let state = 2166136261;
   for (const character of String(seed)) { state ^= character.charCodeAt(0); state = Math.imul(state, 16777619); }
-  return () => { state = Math.imul(state ^ (state >>> 13), 1274126177); state ^= state >>> 16; return (state >>> 0) / 4294967296; };
+  const random = () => { state = Math.imul(state ^ (state >>> 13), 1274126177); state ^= state >>> 16; return (state >>> 0) / 4294967296; };
+  random.state = () => state >>> 0;
+  random.restore = value => { if (Number.isSafeInteger(value) && value >= 0 && value <= 0xffffffff) state = value >>> 0; };
+  return random;
 }
 function pieceDirections(placements, id, centroidId = 3) {
   const piece = placements.find(placement => placement.id === id), centroid = placements.find(placement => placement.id === centroidId);
@@ -1243,7 +1246,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const centroidId = Number(options.centroidId || 3), centroidPiece = pieces.find(p => p.id === centroidId), centerShape = applyLock(centroidPiece), centerSize = shapeSize(centerShape), seedOrigin = { x: -Math.floor(centerSize.width / 2), y: -Math.floor(centerSize.height / 2) }, seedCells = placedCells(centroidPiece, seedOrigin), seedPlacement = { id: centroidId, origin: seedOrigin, cells: seedCells };
   const seedSet = new Set(seedCells.map(c => key(c.x, c.y))), centroidRing = new Set(); seedCells.forEach(cell => adjacent(cell).forEach(next => { if (!seedSet.has(key(next.x, next.y))) centroidRing.add(key(next.x, next.y)); }));
   const checkpointSchema = 'tdotdh.product-search-checkpoint.v0';
-  const serializeCheckpoint = (beam, depth, nodeOffset) => ({ schema: checkpointSchema, depth, nodeOffset, strategy: searchStrategy, centroidId, targetFamily, targetSeed, threadId: Number(options.threadId || 0), searchSalt: options.searchSalt || `${targetFamily || 'open'}:${options.rootChoice || 0}`, beam: beam.slice(0, BEAM_LIMIT).map(state => ({ placements: state.placements.map(placement => ({ id: placement.id, origin: placement.origin, cells: placement.cells })), score: Number(state.score) || 0, rankScore: Number.isFinite(state.rankScore) ? state.rankScore : canonicalFrontierRankScore(state.score), hintMatches: Number(state.hintMatches) || 0 })) });
+  const serializeCheckpoint = (beam, depth, nodeOffset, randomState = random.state()) => ({ schema: checkpointSchema, depth, nodeOffset, strategy: searchStrategy, centroidId, targetFamily, targetSeed, threadId: Number(options.threadId || 0), searchSalt: options.searchSalt || `${targetFamily || 'open'}:${options.rootChoice || 0}`, randomState, beam: beam.slice(0, BEAM_LIMIT).map(state => ({ placements: state.placements.map(placement => ({ id: placement.id, origin: placement.origin, cells: placement.cells })), score: Number(state.score) || 0, rankScore: Number.isFinite(state.rankScore) ? state.rankScore : canonicalFrontierRankScore(state.score), hintMatches: Number(state.hintMatches) || 0 })) });
   const restoreCheckpoint = checkpoint => {
     if (!checkpoint || checkpoint.schema !== checkpointSchema || checkpoint.strategy !== searchStrategy || Number(checkpoint.centroidId) !== centroidId || (checkpoint.targetFamily || null) !== targetFamily || (checkpoint.targetSeed || null) !== targetSeed || !Array.isArray(checkpoint.beam) || checkpoint.beam.length === 0) return null;
     const beam = [];
@@ -1260,9 +1263,10 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       const score = Number(savedState.score) || 0;
       beam.push({ placements, field, remaining: pieces.filter(piece => !ids.has(piece.id)), bounds, score, rankScore: Number.isFinite(savedState.rankScore) ? Number(savedState.rankScore) : canonicalFrontierRankScore(score), hintMatches: Number(savedState.hintMatches) || 0, centroidFamily: bounds.centroidFamily, centroidFamilyId: bounds.centroidFamilyId, centroidSeed: bounds.centroidSeed, gpuState: null });
     }
-    return { beam, depth: Math.max(0, Number(checkpoint.depth) || 0), nodeOffset: Math.max(0, Number(checkpoint.nodeOffset) || 0) };
+    return { beam, depth: Math.max(0, Number(checkpoint.depth) || 0), nodeOffset: Math.max(0, Number(checkpoint.nodeOffset) || 0), randomState: Number.isSafeInteger(checkpoint.randomState) ? checkpoint.randomState : null };
   };
   const restored = restoreCheckpoint(options.resumeCheckpoint);
+  if (restored?.randomState != null) random.restore(restored.randomState);
   const seed = { placements: [seedPlacement], field: new Set(seedCells.map(c => key(c.x, c.y))), remaining: pieces.filter(p => p.id !== centroidId), bounds: fieldMetrics([seedPlacement], centroidId), hintMatches: 0 }, seedBranches = restored ? [] : searchStrategy === 'breadth' && !gpuFirstSearch ? await lockedSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, centroidRing, positionLocks, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; }) : targetFamily ? await targetSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, targetSeed, positionLocks, random, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; }) : [];
   if (!restored && targetFamily && (!targetSeed || !seedBranches.length)) targetFamily = null;
   let navigationPlanReceipt = { status: 'cpu-oracle', backend: 'cpu-oracle', parity: 'oracle', rowCount: 0, selectedCount: 0, planCount: 0 };
@@ -1281,6 +1285,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   let nodes = mainNodeStart, fallback = null, bestHintResult = null, lastDepth = restored?.depth || 0;
   const pieceCount = pieces.length;
   for (let depth = restored?.depth || 0; depth < pieceCount - 1 && beam.length && nodes - mainNodeStart < NODE_LIMIT; depth++) {
+    const depthRandomState = random.state();
     const depthTimingStarted = performance.now();
     let depthTimingBoundary = depthTimingStarted;
     const depthTimings = {};
@@ -1588,7 +1593,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       if (searchStrategy !== 'breadth' && retained.length < BEAM_LIMIT) for (const state of nextBeam) { if (retainedSet.has(state)) continue; retained.push(state); if (retained.length >= BEAM_LIMIT) break; }
     }
     if (isCancelled()) {
-      const checkpoint = serializeCheckpoint(beam, depth, restoredNodeOffset + nodes);
+      const checkpoint = serializeCheckpoint(beam, depth, restoredNodeOffset + nodes, depthRandomState);
       return { type: 'done', placements: null, metrics: null, nodes, cursor: { depth, nodeOffset: restoredNodeOffset + nodes, rootChoice: Number(options.rootChoice || 0), checkpoint }, prefilter: prefilterReceipt, frontier: frontierReceipt, navigationPlan: navigationPlanReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierRanker: frontierRankerReceipt, frontierScore: frontierScoreReceipt, frontierCompactor: frontierCompactorReceipt, frontierDedup: frontierDedupReceipt };
     }
     beam.splice(0, beam.length, ...retained);

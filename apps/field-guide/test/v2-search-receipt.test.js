@@ -193,6 +193,7 @@ const breadthResult = await search(pieces, [], { ...sharedOptions, searchStrateg
 let checkpointCursor = null;
 const checkpointResult = await search(pieces, [], { ...sharedOptions, frontierGenerator, reportProgress: progress => { checkpointCursor = progress.cursor; } });
 assert.ok(checkpointCursor?.checkpoint);
+assert.ok(Number.isSafeInteger(checkpointCursor.checkpoint.randomState));
 const resumedResult = await search(pieces, [], { ...sharedOptions, frontierGenerator, resumeCheckpoint: checkpointCursor.checkpoint });
 
 const lockedPieces = [

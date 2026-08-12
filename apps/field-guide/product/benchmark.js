@@ -24,7 +24,29 @@ async function loadFixture() {
   return ids.map(id => ({ id, cells: shapes[id].map(([x, y]) => ({ x, y })), orientation: locks[id] || 'fixed' }));
 }
 
-function runWorker(pieces, backend, onProgress = () => {}) {
+function createProductRequest(pieces, backend, { cursor = { depth: 0, nodeOffset: 0, rootChoice: 0 }, requestId = `matched-${backend}-${Date.now()}`, familyId = `benchmark-${backend}` } = {}) {
+  const diagnostic = new URL(location.href).searchParams.get('diagnostic');
+  const diagnosticSteering = diagnostic === 'no-topology' ? { disableGpuCandidateTopology: true } : diagnostic === 'no-geometry' ? { disableGpuCandidateGeometry: true } : diagnostic === 'no-field-metrics' ? { disableGpuCandidateFieldMetrics: true } : diagnostic === 'no-target-pool' ? { disableGpuTargetPool: true } : diagnostic === 'no-target-generation' ? { disableGpuCandidateGeneration: true } : diagnostic === 'no-resident-navigation' ? { disableGpuResidentNavigation: true } : diagnostic === 'verify-resident-navigation' ? { verifyGpuResidentNavigation: true, captureGpuResidentDiagnostics: true } : diagnostic === 'no-state-parity' ? { verifyGpuTransitionParity: false } : {};
+  return {
+    type: 'start',
+    protocolVersion: 1,
+    requestId,
+    presetFingerprint: 'SEDLEC-00Q_ISLAND-001',
+    catalogRevision: 'tdotdh-v2-benchmark',
+    seed: 'matched-sedlec-benchmark',
+    mode: 'breadth',
+    operation: 'product-search',
+    ticket: { presetFingerprint: 'SEDLEC-00Q_ISLAND-001', familyId, pass: 0, rootChoice: cursor.rootChoice || 0, threadId: 0 },
+    cursor,
+    budget: { maxNodes: 40000, maxMilliseconds: 900000 },
+    pieces,
+    constraints: {},
+    steering: { searchStrategy: 'breadth', benchmarkBackend: backend === 'cpu' ? 'cpu' : 'gpu', ...diagnosticSteering },
+    knownSignatureHints: [],
+  };
+}
+
+function runWorker(pieces, backend, onProgress = () => {}, options = {}) {
   return new Promise((resolve, reject) => {
     const worker = new Worker(workerUrl, { type: 'module' });
     const started = performance.now();
@@ -59,6 +81,7 @@ function runWorker(pieces, backend, onProgress = () => {}) {
         signature: signature(lastResult?.placements),
         frontierState: lastResult?.frontierState || null,
         navigation: lastResult?.navigation || null,
+        cursor: message.cursor || null,
         searchReceipt: lastResult?.searchReceipt || message.searchReceipt || null,
         stageReceipts: lastResult ? {
           frontier: lastResult.frontier || null,
@@ -83,26 +106,53 @@ function runWorker(pieces, backend, onProgress = () => {}) {
       worker.terminate();
       reject(new Error(`${backend} worker error: ${event.message || 'unknown error'}`));
     };
-    const diagnostic = new URL(location.href).searchParams.get('diagnostic');
-    const diagnosticSteering = diagnostic === 'no-topology' ? { disableGpuCandidateTopology: true } : diagnostic === 'no-geometry' ? { disableGpuCandidateGeometry: true } : diagnostic === 'no-field-metrics' ? { disableGpuCandidateFieldMetrics: true } : diagnostic === 'no-target-pool' ? { disableGpuTargetPool: true } : diagnostic === 'no-target-generation' ? { disableGpuCandidateGeneration: true } : diagnostic === 'no-resident-navigation' ? { disableGpuResidentNavigation: true } : diagnostic === 'verify-resident-navigation' ? { verifyGpuResidentNavigation: true, captureGpuResidentDiagnostics: true } : diagnostic === 'no-state-parity' ? { verifyGpuTransitionParity: false } : {};
-    worker.postMessage({
-      type: 'start',
-      protocolVersion: 1,
-      requestId: `matched-${backend}-${Date.now()}`,
-      presetFingerprint: 'SEDLEC-00Q_ISLAND-001',
-      catalogRevision: 'tdotdh-v2-benchmark',
-      seed: 'matched-sedlec-benchmark',
-      mode: 'breadth',
-      operation: 'product-search',
-      ticket: { presetFingerprint: 'SEDLEC-00Q_ISLAND-001', familyId: `benchmark-${backend}`, pass: 0, rootChoice: 0, threadId: 0 },
-      cursor: { depth: 0, nodeOffset: 0, rootChoice: 0 },
-      budget: { maxNodes: 40000, maxMilliseconds: 900000 },
-      pieces,
-      constraints: {},
-      steering: { searchStrategy: 'breadth', benchmarkBackend: backend, ...diagnosticSteering },
-      knownSignatureHints: [],
-    });
+    worker.postMessage(createProductRequest(pieces, backend, options));
   });
+}
+
+function runCancelledWorker(pieces) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(workerUrl, { type: 'module' });
+    const request = createProductRequest(pieces, 'gpu', { familyId: 'benchmark-cancel-resume' });
+    let progressCount = 0, cancelSent = false;
+    const timeout = setTimeout(() => { worker.terminate(); reject(new Error('cancelled worker timed out')); }, 16 * 60 * 1000);
+    worker.onmessage = event => {
+      const message = event.data || {};
+      if (message.type === 'progress') {
+        progressCount += 1;
+        if (!cancelSent && progressCount >= 2) { cancelSent = true; worker.postMessage({ type: 'cancel', requestId: request.requestId, reason: 'benchmark-cancel-resume' }); }
+        return;
+      }
+      if (message.type === 'cancelled') {
+        clearTimeout(timeout);
+        worker.terminate();
+        resolve({ type: message.type, reason: message.reason, nodes: message.searchReceipt?.nodes || 0, cursor: message.cursor, searchReceipt: message.searchReceipt, progressCount });
+        return;
+      }
+      if (message.type === 'failed') { clearTimeout(timeout); worker.terminate(); reject(new Error(message.error?.message || 'cancelled worker failed')); }
+    };
+    worker.onerror = event => { clearTimeout(timeout); worker.terminate(); reject(new Error(event.message || 'cancelled worker error')); };
+    worker.postMessage(request);
+  });
+}
+
+async function runCancellationResume(pieces) {
+  const cancelled = await runCancelledWorker(pieces);
+  if (cancelled.type !== 'cancelled' || !cancelled.cursor?.checkpoint) throw new Error('cancelled run did not return a resumable checkpoint');
+  const resumed = await runWorker(pieces, 'gpu', () => {}, { cursor: cancelled.cursor, familyId: 'benchmark-cancel-resume', requestId: `matched-gpu-resumed-${Date.now()}` });
+  const baseline = await runWorker(pieces, 'gpu', () => {}, { familyId: 'benchmark-cancel-resume', requestId: `matched-gpu-baseline-${Date.now()}` });
+  return {
+    fixture: 'SEDLEC-00Q_ISLAND-001',
+    cancelled: { type: cancelled.type, reason: cancelled.reason, nodes: cancelled.nodes, progressCount: cancelled.progressCount, cursor: cancelled.cursor, checkpoint: true },
+    resumed: { type: resumed.type, nodes: resumed.nodes, elapsedMs: resumed.elapsedMs, signature: resumed.signature, cursor: resumed.cursor, cumulativeNodeOffset: resumed.cursor?.nodeOffset ?? null },
+    baseline: { type: baseline.type, nodes: baseline.nodes, elapsedMs: baseline.elapsedMs, signature: baseline.signature },
+    checks: {
+      cancelledWithCheckpoint: Boolean(cancelled.cursor?.checkpoint),
+      resumedCompleted: resumed.type === 'completed' || resumed.type === 'result',
+      canonicalSignatureMatch: Boolean(resumed.signature && baseline.signature && resumed.signature === baseline.signature),
+      nodeCountMatch: resumed.cursor?.nodeOffset === baseline.nodes,
+    },
+  };
 }
 
 function summarize(result) {
@@ -128,6 +178,11 @@ runButton.addEventListener('click', async () => {
   output.textContent = 'Loading the canonical SEDLEC fixture…';
   try {
     const pieces = await loadFixture();
+    if (new URL(location.href).searchParams.get('mode') === 'cancel-resume') {
+      output.textContent = 'Cancelling after progress, then resuming from the worker checkpoint…';
+      output.textContent = JSON.stringify(await runCancellationResume(pieces), null, 2);
+      return;
+    }
     output.textContent = 'Running GPU worker, then forced CPU oracle…';
     const gpu = await runWorker(pieces, 'gpu', progress => {
       output.textContent = `GPU worker · depth ${progress.depth} · ${progress.nodes.toLocaleString()} nodes · frontier ${progress.frontier.toLocaleString()}`;
