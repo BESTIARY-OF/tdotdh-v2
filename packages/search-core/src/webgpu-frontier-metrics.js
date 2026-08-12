@@ -259,7 +259,7 @@ function dispatchGpuBatch(device, normalized, grid, resources) {
   const bounds = normalized[0].bounds;
   device.queue.writeBuffer(buffers.params, 0, new Int32Array([count, grid.wordCount, grid.width, grid.height, grid.originX, grid.originY, bounds.minX, bounds.maxX, bounds.minY, bounds.maxY, 0, 0]));
   const uploadMs = performance.now() - uploadStarted;
-  const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end(); encoder.copyBufferToBuffer(buffers.output, 0, buffers.readback, 0, outputBytes);
+  const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end();
   const submitStarted = performance.now();
   device.queue.submit([encoder.finish()]);
   const submitMs = performance.now() - submitStarted;
