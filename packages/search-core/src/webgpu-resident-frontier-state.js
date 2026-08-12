@@ -312,7 +312,6 @@ async function dispatch(device, resources, candidates, pieceIds, outputIndices, 
   if (readDigests) encoder.copyBufferToBuffer(buffers.digests, 0, buffers.digestReadback, 0, digestBytes);
   const beforeSubmit = performance.now();
   device.queue.submit([encoder.finish()]);
-  await device.queue.onSubmittedWorkDone();
   const publishEncoder = device.createCommandEncoder(), publishPass = publishEncoder.beginComputePass();
   publishPass.setPipeline(resources.publishPipeline); publishPass.setBindGroup(0, resources.publishBindGroup); publishPass.dispatchWorkgroups(Math.ceil(count * labelsPerState / 64)); publishPass.end();
   device.queue.submit([publishEncoder.finish()]);
