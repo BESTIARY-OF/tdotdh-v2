@@ -1243,6 +1243,15 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   const initialStageReceipt = () => gpuExecution && !gpuNavigationEnabled ? { status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', reason: gpuUnavailableReason } : { status: 'cpu-oracle', backend: 'cpu-oracle', parity: 'oracle', reason: 'stage-not-executed' };
   let prefilterReceipt = initialStageReceipt(), frontierReceipt = initialStageReceipt(), frontierGenerationReceipt = initialStageReceipt(), frontierTargetGenerationReceipt = initialStageReceipt(), frontierTargetPoolReceipt = initialStageReceipt(), frontierMetricsReceipt = initialStageReceipt(), fieldMetricsReceipt = initialStageReceipt(), frontierStateReceipt = initialStageReceipt(), frontierTopologyReceipt = initialStageReceipt(), frontierRankerReceipt = initialStageReceipt(), frontierScoreReceipt = initialStageReceipt(), frontierCompactorReceipt = initialStageReceipt(), frontierDedupReceipt = initialStageReceipt();
   const stageHistory = { frontier: [], frontierMetrics: [], fieldMetrics: [], frontierState: [], frontierTopology: [], frontierScore: [], frontierRanker: [], frontierCompactor: [], frontierDedup: [] };
+  const topologyTimingTotals = { calls: 0, gpuMs: 0, cpuOracleMs: 0, cpuReductionMs: 0 };
+  const withTopologyTimingTotals = receipt => {
+    if (!receipt?.timings) return receipt;
+    topologyTimingTotals.calls += 1;
+    for (const name of ['gpuMs', 'cpuOracleMs', 'cpuReductionMs']) {
+      if (Number.isFinite(Number(receipt.timings[name]))) topologyTimingTotals[name] += Number(receipt.timings[name]);
+    }
+    return { ...receipt, timingTotals: { ...topologyTimingTotals } };
+  };
   const frontierDedupTrace = [];
   if (frontierTargetGeneratorStatus?.status !== 'available' && frontierTargetGeneratorStatus) frontierTargetGenerationReceipt = { status: 'fallback', reason: frontierTargetGeneratorStatus.reason || 'frontier-target-generator-unavailable' };
   if (frontierTargetPoolStatus?.status !== 'available' && frontierTargetPoolStatus) frontierTargetPoolReceipt = { status: 'fallback', reason: frontierTargetPoolStatus.reason || 'frontier-target-pool-unavailable' };
@@ -1602,7 +1611,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     const cancelledAfterGpu = isCancelled();
     if (navigationCancellation) navigationCancellation(cancelledAfterGpu);
     if (cancelledAfterGpu) { frontierGeometryBoundary?.release?.(); return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierDedup: frontierDedupReceipt }; }
-    await timeGpuSubstage('frontierTopology', () => evaluateFrontierTopologyAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateTopology ? null : frontierTopology, receipt => { frontierTopologyReceipt = receipt; stageHistory.frontierTopology.push({ depth, ...receipt }); }, frontierTopologyAvailabilityReceipt));
+    await timeGpuSubstage('frontierTopology', () => evaluateFrontierTopologyAcrossBeam(beamJobs, centroidId, options.disableGpuCandidateTopology ? null : frontierTopology, receipt => { const timedReceipt = withTopologyTimingTotals(receipt); frontierTopologyReceipt = timedReceipt; stageHistory.frontierTopology.push({ depth, ...timedReceipt }); }, frontierTopologyAvailabilityReceipt));
     if (frontierGeometryBoundary?.resolve) await timeGpuSubstage('frontierMetricsResultBoundary', () => frontierGeometryBoundary.resolve());
     markDepthTiming('gpuEvaluationMs');
     const rankedJobs = [];
@@ -1716,7 +1725,8 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     lastDepth = depth + 1;
   for (const state of beam) if (!state.remaining.length) {
     const metrics = fieldMetrics(state.placements, centroidId);
-    const topologyMetrics = await evaluateFinalTopology(state, centroidId, frontierTopology, receipt => { frontierTopologyReceipt = receipt; });
+    const topologyMetrics = await evaluateFinalTopology(state, centroidId, frontierTopology, receipt => { const timedReceipt = withTopologyTimingTotals(receipt); frontierTopologyReceipt = timedReceipt; });
+    if (topologyTimingTotals.calls && frontierTopologyReceipt?.timingTotals) frontierTopologyReceipt = { ...frontierTopologyReceipt, timingTotals: { ...topologyTimingTotals } };
     const acceptedMetrics = { ...metrics, ...(topologyMetrics || {}), connected: topologyMetrics?.connected ?? connected(state.field) };
     const cpuSignature = arrangementSignature(state.placements);
     if (state.gpuState?.canonicalSignature) {
