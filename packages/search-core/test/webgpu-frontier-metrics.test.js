@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createFrontierMetricsCandidate, cpuEvaluateFrontierMetrics, createWebGpuFrontierMetrics, WEBGPU_FRONTIER_METRICS_SCHEMA, DEFAULT_SHADER } from '../src/webgpu-frontier-metrics.js';
+import { createFrontierMetricsCandidate, cpuEvaluateFrontierMetrics, createWebGpuFrontierMetrics, WEBGPU_FRONTIER_METRICS_SCHEMA, WEBGPU_FRONTIER_METRICS_RESIDENT_HANDLE_SCHEMA, DEFAULT_SHADER } from '../src/webgpu-frontier-metrics.js';
 
 assert.match(DEFAULT_SHADER, /firstTrailingBit/);
 
@@ -43,6 +43,18 @@ try {
   assert.equal(createdBuffers, 7, 'one reusable resource set should serve repeated evaluations');
   assert.equal(destroyedBuffers, 0, 'reusable resources must remain alive between evaluations');
   assert.equal(mappedReads, 2, 'each evaluation must retain its explicit mapAsync result boundary');
+  const resident = await reusable.evaluateResident([candidate]);
+  assert.equal(resident.schema, WEBGPU_FRONTIER_METRICS_RESIDENT_HANDLE_SCHEMA);
+  assert.equal(resident.status, 'resident');
+  assert.equal(resident.parity, 'deferred');
+  assert.equal(resident.metricCount, 6);
+  assert.equal(mappedReads, 2, 'resident evaluation must not read back before the result boundary');
+  const resolved = await resident.resolve();
+  assert.equal(resolved.status, 'completed');
+  assert.equal(resolved.parity, 'verified');
+  assert.deepEqual(resolved.metrics, cpu.metrics);
+  assert.equal(mappedReads, 3, 'resident resolve must perform exactly one result readback');
+  assert.equal(createdBuffers, 7, 'resolved resident output must release its reusable resource');
 } finally {
   if (previousBufferUsage === undefined) delete globalThis.GPUBufferUsage; else globalThis.GPUBufferUsage = previousBufferUsage;
   if (previousMapMode === undefined) delete globalThis.GPUMapMode; else globalThis.GPUMapMode = previousMapMode;

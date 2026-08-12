@@ -4,6 +4,7 @@ import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
 import { createWebGpuPipelineCache } from './webgpu-pipeline-cache.js';
 
 export const WEBGPU_FRONTIER_METRICS_SCHEMA = 'tdotdh.webgpu-frontier-metrics.v0';
+export const WEBGPU_FRONTIER_METRICS_RESIDENT_HANDLE_SCHEMA = 'tdotdh.webgpu-frontier-metrics-resident-handle.v0';
 export const FRONTIER_METRIC_COUNT = 6;
 
 const SHADER = `
@@ -240,6 +241,12 @@ function createGpuBatchResources(device, capacity, grid, shaderSource, pipelineC
 function destroyGpuBatchResources(resources) { if (resources) Object.values(resources.buffers).forEach(buffer => buffer.destroy()); }
 
 async function runGpuBatch(device, normalized, grid, resources) {
+  const dispatch = dispatchGpuBatch(device, normalized, grid, resources);
+  const output = await readGpuBatchOutput(resources, dispatch.count, dispatch.outputBytes);
+  return { metrics: metricsFromValues(output.values, dispatch.count), dispatchTimings: { ...dispatch.dispatchTimings, readbackMs: output.readbackMs, totalMs: performance.now() - dispatch.dispatchStarted } };
+}
+
+function dispatchGpuBatch(device, normalized, grid, resources) {
   const dispatchStarted = performance.now();
   const count = normalized.length, maskBytes = Math.max(4, count * grid.wordCount * 4), outputBytes = Math.max(4, count * FRONTIER_METRIC_COUNT * 4);
   if (count > resources.capacity || resources.device !== device) throw new RangeError('frontier metric batch exceeds reusable GPU capacity');
@@ -256,17 +263,26 @@ async function runGpuBatch(device, normalized, grid, resources) {
   const submitStarted = performance.now();
   device.queue.submit([encoder.finish()]);
   const submitMs = performance.now() - submitStarted;
+  return { count, outputBytes, dispatchStarted, dispatchTimings: { uploadMs, submitMs, readbackMs: 0, totalMs: performance.now() - dispatchStarted } };
+}
+
+async function readGpuBatchOutput(resources, count, outputBytes) {
+  const readbackStarted = performance.now();
+  const { device, buffers } = resources;
+  const encoder = device.createCommandEncoder();
+  encoder.copyBufferToBuffer(buffers.output, 0, buffers.readback, 0, outputBytes);
+  device.queue.submit([encoder.finish()]);
   // mapAsync is the explicit result boundary here: it waits for the copy to
   // become visible, so an additional queue-wide completion wait only adds a
   // host round trip to every metric batch.
-  const readbackStarted = performance.now();
   await buffers.readback.mapAsync(GPUMapMode.READ);
-  const values = Array.from(new Int32Array(buffers.readback.getMappedRange().slice(0, count * FRONTIER_METRIC_COUNT * 4))); buffers.readback.unmap();
-  const readbackMs = performance.now() - readbackStarted;
-  return {
-    metrics: Array.from({ length: count }, (_, index) => values.slice(index * FRONTIER_METRIC_COUNT, (index + 1) * FRONTIER_METRIC_COUNT)),
-    dispatchTimings: { uploadMs, submitMs, readbackMs, totalMs: performance.now() - dispatchStarted },
-  };
+  const values = Array.from(new Int32Array(buffers.readback.getMappedRange().slice(0, count * FRONTIER_METRIC_COUNT * 4)));
+  buffers.readback.unmap();
+  return { values, readbackMs: performance.now() - readbackStarted };
+}
+
+function metricsFromValues(values, count) {
+  return Array.from({ length: count }, (_, index) => values.slice(index * FRONTIER_METRIC_COUNT, (index + 1) * FRONTIER_METRIC_COUNT));
 }
 
 export function createWebGpuFrontierMetrics({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 262144 }, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
@@ -286,6 +302,27 @@ export function createWebGpuFrontierMetrics({ gpu = globalThis.navigator?.gpu, g
     destroyGpuBatchResources(resources);
     const index = reusableResources.indexOf(resources);
     if (index >= 0) reusableResources.splice(index, 1);
+  };
+  const resolveResidentBatches = async (batches, cpu) => {
+    try {
+      const metrics = [], dispatchTimings = { calls: 0, uploadMs: 0, submitMs: 0, readbackMs: 0, totalMs: 0 };
+      for (const batch of batches) {
+        const result = await readGpuBatchOutput(batch.resources, batch.count, batch.outputBytes);
+        metrics.push(...metricsFromValues(result.values, batch.count));
+        dispatchTimings.calls += 1;
+        dispatchTimings.readbackMs += result.readbackMs;
+        dispatchTimings.totalMs += performance.now() - batch.dispatchStarted;
+        for (const name of ['uploadMs', 'submitMs']) dispatchTimings[name] += batch.dispatchTimings[name];
+      }
+      if (JSON.stringify(metrics) !== JSON.stringify(cpu.metrics)) return unavailable('oracle-parity-mismatch', normalizedGrid, cpu);
+      return Object.freeze({ schema: WEBGPU_FRONTIER_METRICS_SCHEMA, status: 'completed', backend: 'webgpu', metrics, candidateCount: cpu.candidateCount, wordCount: normalizedGrid.wordCount, parity: 'verified', dispatchTimings: Object.freeze(Object.fromEntries(Object.entries(dispatchTimings).map(([name, value]) => [name, name === 'calls' ? value : Number(value.toFixed(2))]))) });
+    } catch (error) {
+      for (const batch of batches) discardGpuResources(batch.resources);
+      deviceCache.reset();
+      return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid, cpu);
+    } finally {
+      for (const batch of batches) releaseGpuResources(batch.resources);
+    }
   };
   return Object.freeze({
     async availability() {
@@ -319,6 +356,28 @@ export function createWebGpuFrontierMetrics({ gpu = globalThis.navigator?.gpu, g
         if (!parity) return unavailable('oracle-parity-mismatch', normalizedGrid, cpu);
         return Object.freeze({ schema: WEBGPU_FRONTIER_METRICS_SCHEMA, status: 'completed', backend: 'webgpu', metrics, candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, parity: 'verified', dispatchTimings: Object.freeze(Object.fromEntries(Object.entries(dispatchTimings).map(([name, value]) => [name, name === 'calls' ? value : Number(value.toFixed(2))]))) });
       } catch (error) { deviceCache.reset(); return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid, cpu || cpuEvaluateFrontierMetrics(normalized, normalizedGrid)); }
+    },
+    async evaluateResident(candidates) {
+      const normalized = normalizeCandidates(candidates, normalizedGrid), status = await this.availability();
+      if (status.status !== 'available') return unavailable(status.reason, normalizedGrid, cpuEvaluateFrontierMetrics(normalized, normalizedGrid));
+      let cpu = cpuEvaluateFrontierMetrics(normalized, normalizedGrid), batches = [];
+      try {
+        const device = await deviceCache.getDevice(), maxBinding = Number(device.limits?.maxStorageBufferBindingSize) || limits.maxStorageBufferBindingSize, maxBatch = Math.max(1, Math.floor(maxBinding / Math.max(normalizedGrid.wordCount * 4, 4)));
+        for (let offset = 0; offset < normalized.length; offset += maxBatch) {
+          const resource = acquireGpuResources(device, maxBatch), batch = normalized.slice(offset, offset + maxBatch);
+          try {
+            const dispatch = dispatchGpuBatch(device, batch, normalizedGrid, resource);
+            batches.push({ resources: resource, count: dispatch.count, outputBytes: dispatch.outputBytes, dispatchStarted: dispatch.dispatchStarted, dispatchTimings: dispatch.dispatchTimings });
+          } catch (error) { discardGpuResources(resource); throw error; }
+        }
+        let resolution = null;
+        const resolve = () => { if (!resolution) resolution = resolveResidentBatches(batches, cpu); return resolution; };
+        return Object.freeze({ schema: WEBGPU_FRONTIER_METRICS_RESIDENT_HANDLE_SCHEMA, status: 'resident', backend: 'webgpu', parity: 'deferred', candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, metricCount: FRONTIER_METRIC_COUNT, batches: batches.length, resolve });
+      } catch (error) {
+        for (const batch of batches) discardGpuResources(batch.resources);
+        deviceCache.reset();
+        return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid, cpu);
+      }
     },
   });
 }
