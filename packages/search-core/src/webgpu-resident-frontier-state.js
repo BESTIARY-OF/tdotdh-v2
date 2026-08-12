@@ -76,6 +76,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let residentOutputBase = outputIndex * labelsPerState;
   let pieceIndex = candidatePieceIndices[id.x];
   let candidateMaskBase = id.x * params.wordCount;
+  // Keep the resident-parent binding live even though the gather pass resolves
+  // child parents into the scratch source. The write is intentionally confined
+  // to the redundant residentNext mirror and never affects the canonical state.
+  if (parentIndex != ${RESIDENT_PARENT_SENTINEL}u && residentParents[residentParentBase] == ${RESIDENT_PARENT_SENTINEL}u) {
+    residentNext[residentOutputBase] = ${RESIDENT_PARENT_SENTINEL}u;
+  }
   for (var piece: u32 = 0u; piece < params.pieceCount; piece++) {
     for (var word: u32 = 0u; word < labelStride; word++) {
       let localOffset = localBase + piece * labelStride + word;
@@ -288,12 +294,14 @@ async function dispatch(device, resources, candidates, pieceIds, outputIndices, 
     device.queue.submit([gatherEncoder.finish()]);
     await device.queue.onSubmittedWorkDone();
   }
-  const encoder = device.createCommandEncoder();
   for (let index = 0; index < parentStateIndices.length; index++) {
     if (parentStateIndices[index] === RESIDENT_PARENT_SENTINEL) {
       device.queue.writeBuffer(buffers.seedParents, index * labelsPerState * 4, candidates[index].parentLabelMasks);
-      encoder.copyBufferToBuffer(buffers.seedParents, index * labelsPerState * 4, buffers.resolvedParents, index * labelsPerState * 4, labelsPerState * 4);
     }
+  }
+  const encoder = device.createCommandEncoder();
+  for (let index = 0; index < parentStateIndices.length; index++) {
+    if (parentStateIndices[index] === RESIDENT_PARENT_SENTINEL) encoder.copyBufferToBuffer(buffers.seedParents, index * labelsPerState * 4, buffers.resolvedParents, index * labelsPerState * 4, labelsPerState * 4);
   }
   const pass = encoder.beginComputePass();
   pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end();
@@ -304,6 +312,7 @@ async function dispatch(device, resources, candidates, pieceIds, outputIndices, 
   if (readDigests) encoder.copyBufferToBuffer(buffers.digests, 0, buffers.digestReadback, 0, digestBytes);
   const beforeSubmit = performance.now();
   device.queue.submit([encoder.finish()]);
+  await device.queue.onSubmittedWorkDone();
   const publishEncoder = device.createCommandEncoder(), publishPass = publishEncoder.beginComputePass();
   publishPass.setPipeline(resources.publishPipeline); publishPass.setBindGroup(0, resources.publishBindGroup); publishPass.dispatchWorkgroups(Math.ceil(count * labelsPerState / 64)); publishPass.end();
   device.queue.submit([publishEncoder.finish()]);
