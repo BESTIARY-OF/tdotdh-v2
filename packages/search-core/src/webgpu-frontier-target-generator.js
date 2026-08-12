@@ -140,17 +140,20 @@ function normalizeLock(value) {
   if (value == null) return Object.freeze({ enabled: 0, x: 0, y: 0 });
   return Object.freeze({ enabled: 1, x: coordinate(value.x, 'lockedOrigin.x'), y: coordinate(value.y, 'lockedOrigin.y') });
 }
-function normalizeInput(input, grid) {
-  const fieldCells = normalizeCells(input?.fieldCells, 'fieldCells', 1024), targetCells = normalizeCells(input?.targetCells, 'targetCells', 1024), pieceCells = normalizeCells(input?.pieceCells, 'pieceCells', 64), bounds = normalizeBounds(input?.bounds), lock = normalizeLock(input?.lockedOrigin);
+function normalizeInput(input, grid, caches = null) {
+  const fieldCells = caches?.fieldCells && Array.isArray(input?.fieldCells) ? (caches.fieldCells.get(input.fieldCells) || (() => { const value = normalizeCells(input.fieldCells, 'fieldCells', 1024); caches.fieldCells.set(input.fieldCells, value); return value; })()) : normalizeCells(input?.fieldCells, 'fieldCells', 1024);
+  const targetCells = caches?.targetCells && Array.isArray(input?.targetCells) ? (caches.targetCells.get(input.targetCells) || (() => { const value = normalizeCells(input.targetCells, 'targetCells', 1024); caches.targetCells.set(input.targetCells, value); return value; })()) : normalizeCells(input?.targetCells, 'targetCells', 1024);
+  const pieceCells = normalizeCells(input?.pieceCells, 'pieceCells', 64), bounds = caches?.bounds && input?.bounds && typeof input.bounds === 'object' ? (caches.bounds.get(input.bounds) || (() => { const value = normalizeBounds(input.bounds); caches.bounds.set(input.bounds, value); return value; })()) : normalizeBounds(input?.bounds), lock = normalizeLock(input?.lockedOrigin);
   const candidateCount = targetCells.length * pieceCells.length;
   if (candidateCount > MAX_FRONTIER_TARGET_GENERATION_CANDIDATES) throw new RangeError(`frontier target generation exceeds ${MAX_FRONTIER_TARGET_GENERATION_CANDIDATES} candidates`);
   return Object.freeze({ fieldCells, targetCells, pieceCells, bounds, lock, candidateCount, grid });
 }
 function normalizeBatchInput(inputs, grid) {
   if (!Array.isArray(inputs) || inputs.length === 0) throw new TypeError('frontier target generation batch must contain at least one input');
+  const caches = { fieldCells: new WeakMap(), targetCells: new WeakMap(), bounds: new WeakMap() };
   let candidateOffset = 0;
   const items = inputs.map((input, index) => {
-    const normalized = normalizeInput(input, grid), item = Object.freeze({ ...normalized, pieceId: input?.pieceId ?? index, candidateOffset });
+    const normalized = normalizeInput(input, grid, caches), item = Object.freeze({ ...normalized, pieceId: input?.pieceId ?? index, candidateOffset });
     candidateOffset += normalized.candidateCount;
     return item;
   });
@@ -292,27 +295,32 @@ function createPersistentGpuTargetRunner(device, grid, shaderSource) {
   return Object.freeze({
     reset: destroy,
     async run(normalized, { readback = true, isCancelled = null } = {}) {
-      assertNotCancelled(isCancelled);
-      const current = ensure(normalized), { resources, layout } = current, { buffers } = resources;
-      device.queue.writeBuffer(buffers.targets, 0, layout.targetValues); device.queue.writeBuffer(buffers.pieces, 0, layout.pieceValues); device.queue.writeBuffer(buffers.masks, 0, layout.fieldMasks); device.queue.writeBuffer(buffers.metas, 0, layout.metaValues); device.queue.writeBuffer(buffers.params, 0, new Int32Array([layout.itemCount, layout.candidateCount, grid.width, grid.height, grid.originX, grid.originY, 0, 0]));
-      assertNotCancelled(isCancelled);
+       assertNotCancelled(isCancelled);
+       const current = ensure(normalized), { resources, layout } = current, { buffers } = resources;
+       const dispatchStarted = performance.now();
+       const uploadStarted = dispatchStarted;
+       device.queue.writeBuffer(buffers.targets, 0, layout.targetValues); device.queue.writeBuffer(buffers.pieces, 0, layout.pieceValues); device.queue.writeBuffer(buffers.masks, 0, layout.fieldMasks); device.queue.writeBuffer(buffers.metas, 0, layout.metaValues); device.queue.writeBuffer(buffers.params, 0, new Int32Array([layout.itemCount, layout.candidateCount, grid.width, grid.height, grid.originX, grid.originY, 0, 0]));
+       const uploadMs = performance.now() - uploadStarted;
+       assertNotCancelled(isCancelled);
       const originBytes = Math.max(4, normalized.candidateCount * 2 * 4), countBytes = Math.max(4, normalized.candidateCount * 4);
       const snapshotRecordBytes = Math.max(4, normalized.candidateCount * FRONTIER_TARGET_RECORD_STRIDE * 4), snapshotValidityBytes = Math.max(4, normalized.candidateCount * 4), snapshotRecords = device.createBuffer({ size: snapshotRecordBytes, usage: usage.STORAGE | usage.COPY_SRC | usage.COPY_DST }), snapshotValidity = device.createBuffer({ size: snapshotValidityBytes, usage: usage.STORAGE | usage.COPY_SRC | usage.COPY_DST });
-      const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(resources.pipeline); pass.setBindGroup(0, resources.bindGroup); pass.dispatchWorkgroups(Math.ceil(normalized.candidateCount / 64)); pass.end(); encoder.copyBufferToBuffer(buffers.records, 0, buffers.residentRecords, 0, snapshotRecordBytes); encoder.copyBufferToBuffer(buffers.residentRecords, 0, snapshotRecords, 0, snapshotRecordBytes); encoder.copyBufferToBuffer(buffers.validity, 0, snapshotValidity, 0, snapshotValidityBytes); if (readback) { encoder.copyBufferToBuffer(buffers.origins, 0, buffers.originsReadback, 0, originBytes); encoder.copyBufferToBuffer(buffers.validity, 0, buffers.validityReadback, 0, countBytes); encoder.copyBufferToBuffer(buffers.residentRecords, 0, buffers.recordsReadback, 0, snapshotRecordBytes); } device.queue.submit([encoder.finish()]);
+       const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(resources.pipeline); pass.setBindGroup(0, resources.bindGroup); pass.dispatchWorkgroups(Math.ceil(normalized.candidateCount / 64)); pass.end(); encoder.copyBufferToBuffer(buffers.records, 0, buffers.residentRecords, 0, snapshotRecordBytes); encoder.copyBufferToBuffer(buffers.residentRecords, 0, snapshotRecords, 0, snapshotRecordBytes); encoder.copyBufferToBuffer(buffers.validity, 0, snapshotValidity, 0, snapshotValidityBytes); if (readback) { encoder.copyBufferToBuffer(buffers.origins, 0, buffers.originsReadback, 0, originBytes); encoder.copyBufferToBuffer(buffers.validity, 0, buffers.validityReadback, 0, countBytes); encoder.copyBufferToBuffer(buffers.residentRecords, 0, buffers.recordsReadback, 0, snapshotRecordBytes); }
+       const submitStarted = performance.now(); device.queue.submit([encoder.finish()]); const submitMs = performance.now() - submitStarted;
       // Resident callers consume GPU handles on the same queue. Submission
       // order is the synchronization boundary; waiting here would serialize
       // every breadth layer without making the returned data more correct.
-      if (readback) await device.queue.onSubmittedWorkDone();
+       let readbackMs = 0;
+       if (readback) { const readbackStarted = performance.now(); await device.queue.onSubmittedWorkDone(); readbackMs += performance.now() - readbackStarted; }
       if (readback) assertNotCancelled(isCancelled);
       let items = null, recordSample = null;
       if (readback) {
-        await buffers.originsReadback.mapAsync(mapMode.READ); const rawOrigins = Array.from(new Int32Array(buffers.originsReadback.getMappedRange().slice(0, normalized.candidateCount * 2 * 4))); buffers.originsReadback.unmap(); await buffers.validityReadback.mapAsync(mapMode.READ); const validity = Array.from(new Uint32Array(buffers.validityReadback.getMappedRange().slice(0, normalized.candidateCount * 4))); buffers.validityReadback.unmap(); await buffers.recordsReadback.mapAsync(mapMode.READ); recordSample = Object.freeze(Array.from(new Int32Array(buffers.recordsReadback.getMappedRange().slice(0, Math.min(normalized.candidateCount, 5) * FRONTIER_TARGET_RECORD_STRIDE * 4)))); buffers.recordsReadback.unmap();
+         const mapStarted = performance.now(); await buffers.originsReadback.mapAsync(mapMode.READ); const rawOrigins = Array.from(new Int32Array(buffers.originsReadback.getMappedRange().slice(0, normalized.candidateCount * 2 * 4))); buffers.originsReadback.unmap(); await buffers.validityReadback.mapAsync(mapMode.READ); const validity = Array.from(new Uint32Array(buffers.validityReadback.getMappedRange().slice(0, normalized.candidateCount * 4))); buffers.validityReadback.unmap(); await buffers.recordsReadback.mapAsync(mapMode.READ); recordSample = Object.freeze(Array.from(new Int32Array(buffers.recordsReadback.getMappedRange().slice(0, Math.min(normalized.candidateCount, 5) * FRONTIER_TARGET_RECORD_STRIDE * 4)))); buffers.recordsReadback.unmap(); readbackMs += performance.now() - mapStarted;
         assertNotCancelled(isCancelled);
         items = normalized.items.map(item => { const start = item.candidateOffset, origins = Array.from({ length: item.candidateCount }, (_, index) => ({ x: rawOrigins[(start + index) * 2], y: rawOrigins[(start + index) * 2 + 1] })), itemValidity = validity.slice(start, start + item.candidateCount); return { pieceId: item.pieceId, targetCount: item.targetCells.length, pieceCount: item.pieceCells.length, origins, validity: itemValidity, candidateCount: item.candidateCount }; });
       }
       dispatchCount += 1;
       const snapshot = { records: snapshotRecords, validity: snapshotValidity }; residentSnapshots.add(snapshot); let released = false; const release = () => { if (released) return; released = true; residentSnapshots.delete(snapshot); snapshot.records.destroy(); snapshot.validity.destroy(); };
-      return { items, recordSample, persistent: true, dispatch: 'webgpu-frontier-target-resident', dispatchCount, residentHandle: Object.freeze({ schema: 'tdotdh.webgpu-frontier-target-records.v0', device, recordsBuffer: snapshotRecords, recordsOffsetBytes: 0, recordStrideBytes: FRONTIER_TARGET_RECORD_STRIDE * 4, validityBuffer: snapshotValidity, validityOffsetBytes: 0, validityStrideBytes: 4, targetCellsBuffer: buffers.targets, targetCellsOffsetBytes: 0, targetCellsStrideBytes: 8, recordCount: normalized.candidateCount, itemCount: normalized.items.length, itemMetadata: Object.freeze(normalized.items.map((item, index) => Object.freeze({ itemOrdinal: index, pieceId: item.pieceId, targetCount: item.targetCells.length, targetOffset: layout.targetOffsets[index], pieceCount: item.pieceCells.length, candidateOffset: item.candidateOffset }))), generation: dispatchCount, release }), bufferCapacity: { rows: resources.rowCapacity, items: resources.itemCapacity, targets: resources.targetCapacity, pieces: resources.pieceCapacity, masks: resources.maskCapacity, metas: resources.metaCapacity } };
+       return { items, recordSample, dispatchTimings: { uploadMs: Number(uploadMs.toFixed(2)), submitMs: Number(submitMs.toFixed(2)), readbackMs: Number(readbackMs.toFixed(2)), totalMs: Number((performance.now() - dispatchStarted).toFixed(2)) }, persistent: true, dispatch: 'webgpu-frontier-target-resident', dispatchCount, residentHandle: Object.freeze({ schema: 'tdotdh.webgpu-frontier-target-records.v0', device, recordsBuffer: snapshotRecords, recordsOffsetBytes: 0, recordStrideBytes: FRONTIER_TARGET_RECORD_STRIDE * 4, validityBuffer: snapshotValidity, validityOffsetBytes: 0, validityStrideBytes: 4, targetCellsBuffer: buffers.targets, targetCellsOffsetBytes: 0, targetCellsStrideBytes: 8, recordCount: normalized.candidateCount, itemCount: normalized.items.length, itemMetadata: Object.freeze(normalized.items.map((item, index) => Object.freeze({ itemOrdinal: index, pieceId: item.pieceId, targetCount: item.targetCells.length, targetOffset: layout.targetOffsets[index], pieceCount: item.pieceCells.length, candidateOffset: item.candidateOffset }))), generation: dispatchCount, release }), bufferCapacity: { rows: resources.rowCapacity, items: resources.itemCapacity, targets: resources.targetCapacity, pieces: resources.pieceCapacity, masks: resources.maskCapacity, metas: resources.metaCapacity } };
     },
   });
 }
@@ -367,7 +375,7 @@ export function createWebGpuFrontierTargetGenerator({ gpu = globalThis.navigator
           return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'rejected', backend: 'webgpu', parity: 'rejected', reason: parityMismatchReason(resident.items || [], cpuItems()), batch: 'resident', candidateCount: normalized.candidateCount, items: cpuItems(), readback: 'result-boundary' });
         }
         const items = verifyParity ? resident.items : Object.freeze(normalized.items.map(item => Object.freeze({ pieceId: item.pieceId, targetCount: item.targetCells.length, pieceCount: item.pieceCells.length, candidateCount: item.candidateCount })));
-        return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'webgpu', parity: verifyParity ? 'verified' : 'deferred', batch: 'resident', candidateCount: normalized.candidateCount, items, ...(verifyParity && resident.recordSample ? { recordSample: resident.recordSample } : {}), readback: verifyParity ? 'result-boundary' : 'deferred', persistent: true, dispatch: resident.dispatch, dispatchCount: resident.dispatchCount, residentHandle: resident.residentHandle, bufferCapacity: resident.bufferCapacity });
+        return Object.freeze({ schema: WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA, status: 'completed', backend: 'webgpu', parity: verifyParity ? 'verified' : 'deferred', batch: 'resident', candidateCount: normalized.candidateCount, items, ...(verifyParity && resident.recordSample ? { recordSample: resident.recordSample } : {}), ...(resident.dispatchTimings ? { dispatchTimings: resident.dispatchTimings } : {}), readback: verifyParity ? 'result-boundary' : 'deferred', persistent: true, dispatch: resident.dispatch, dispatchCount: resident.dispatchCount, residentHandle: resident.residentHandle, bufferCapacity: resident.bufferCapacity });
       } catch (error) { if (error?.name === 'AbortError' || isCancelled?.()) return Object.freeze({ ...status, status: 'cancelled', backend: 'webgpu', parity: 'deferred', reason: 'frontier-target-generation-cancelled', candidateCount: normalized.candidateCount, items: cpuItems(), readback: 'deferred' }); persistentRunner?.reset(); persistentRunner = null; deviceCache.reset(); return Object.freeze({ ...status, status: 'unavailable', reason: `webgpu-resident-batch-execution-failed:${error?.message || String(error)}`, candidateCount: normalized.candidateCount, items: cpuItems(), readback: 'cpu-fallback' }); }
       },
   });

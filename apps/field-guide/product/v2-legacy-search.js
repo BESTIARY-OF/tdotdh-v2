@@ -18,7 +18,7 @@ import { createLabeledFrontierStateCandidate, createLabeledFrontierStateCandidat
 import { canonicalSignatureFromLabeledFrontierState } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 import { DEFAULT_FRONTIER_GRID } from '../../../packages/search-core/src/webgpu-frontier-topology.js';
 import { MAX_FRONTIER_GENERATION_CANDIDATES } from '../../../packages/search-core/src/webgpu-frontier-generator.js?v=20260811-pipelinecache1';
-import { MAX_FRONTIER_TARGET_GENERATION_CANDIDATES } from '../../../packages/search-core/src/webgpu-frontier-target-generator.js?v=20260811-resident3';
+import { MAX_FRONTIER_TARGET_GENERATION_CANDIDATES } from '../../../packages/search-core/src/webgpu-frontier-target-generator.js?v=20260812-target-timing3';
 import { createWebGpuFrontierNavigationScheduler, decodeWebGpuFrontierNavigationRow } from '../../../packages/search-core/src/webgpu-frontier-navigation-plan.js?v=20260812-resident-merged-submit1';
 
 function key(x, y) { return `${x},${y}`; }
@@ -320,13 +320,14 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
   }
   const items = [];
   const residentNavigationEntries = [];
-  let totalCandidateCount = 0, batches = 0, backend = 'compute-shader', generationParity = 'verified', fallbackReason = null, recordBackend = 'cpu-oracle', recordParity = 'oracle', recordInputCount = 0, recordOutputCount = 0, persistent = false, persistentDispatchCount = 0, persistentBufferCapacity = null, recordPersistent = false, recordDispatchCount = 0, recordBufferCapacity = null, recordSample = null, recordReason = null, residentItemShape = null;
+  let totalCandidateCount = 0, batches = 0, backend = 'compute-shader', generationParity = 'verified', fallbackReason = null, recordBackend = 'cpu-oracle', recordParity = 'oracle', recordInputCount = 0, recordOutputCount = 0, persistent = false, persistentDispatchCount = 0, persistentBufferCapacity = null, recordPersistent = false, recordDispatchCount = 0, recordBufferCapacity = null, recordSample = null, recordReason = null, residentItemShape = null, residentDispatchTimings = [];
   for (const chunk of chunks) {
     await yieldToEventLoop();
     if (isCancelled()) return generated;
     const result = !materializeCandidates && typeof frontierTargetGenerator.generateBatchResident === 'function'
       ? await frontierTargetGenerator.generateBatchResident(chunk.inputs, { isCancelled, verifyParity: verifyResidentNavigation })
       : await frontierTargetGenerator.generateBatch(chunk.inputs, { isCancelled });
+    if (result?.dispatchTimings) residentDispatchTimings.push(result.dispatchTimings);
     if (result?.backend) backend = result.backend;
     if (result?.parity === 'deferred') generationParity = 'deferred';
     if (result?.reason) fallbackReason = result.reason;
@@ -429,7 +430,7 @@ async function generateFrontierTargetTranslationsAcrossBeam(plans, frontierTarge
     generated[ref.planIndex] = byTarget;
   }
   const inputCount = planGroups.reduce((sum, group) => sum + group.inputs.length, 0);
-  onGeneration({ status: items.length === inputCount ? generationParity === 'deferred' ? 'resident' : 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? generationParity : 'oracle', reason: items.length === inputCount ? undefined : (fallbackReason || 'frontier-generator-batch-fallback'), candidateCount: totalCandidateCount, batches, batch: 'beam', residentEntryCount: residentNavigationEntries.length, residentExpectedRows: residentNavigationEntries.reduce((sum, entry) => sum + (entry.expectedRows?.length || 0), 0), ...(residentItemShape ? { residentItemShape } : {}), ...(recordSample ? { recordSample } : {}), ...(persistent ? { persistent: true, dispatch: 'webgpu-frontier-target-resident', dispatchCount: persistentDispatchCount, bufferCapacity: persistentBufferCapacity } : {}), candidateRecords: { backend: recordBackend, parity: recordParity, inputCount: recordInputCount, outputCount: recordOutputCount, ...(recordReason ? { reason: recordReason } : {}), ...(recordPersistent ? { persistent: true, dispatch: 'webgpu-frontier-record-compaction-resident', dispatchCount: recordDispatchCount, bufferCapacity: recordBufferCapacity } : {}) } });
+  onGeneration({ status: items.length === inputCount ? generationParity === 'deferred' ? 'resident' : 'used' : 'fallback', backend: items.length === inputCount ? backend : 'cpu-oracle', parity: items.length === inputCount ? generationParity : 'oracle', reason: items.length === inputCount ? undefined : (fallbackReason || 'frontier-generator-batch-fallback'), candidateCount: totalCandidateCount, batches, batch: 'beam', residentEntryCount: residentNavigationEntries.length, residentExpectedRows: residentNavigationEntries.reduce((sum, entry) => sum + (entry.expectedRows?.length || 0), 0), ...(residentItemShape ? { residentItemShape } : {}), ...(residentDispatchTimings.length ? { residentDispatchTimings } : {}), ...(recordSample ? { recordSample } : {}), ...(persistent ? { persistent: true, dispatch: 'webgpu-frontier-target-resident', dispatchCount: persistentDispatchCount, bufferCapacity: persistentBufferCapacity } : {}), candidateRecords: { backend: recordBackend, parity: recordParity, inputCount: recordInputCount, outputCount: recordOutputCount, ...(recordReason ? { reason: recordReason } : {}), ...(recordPersistent ? { persistent: true, dispatch: 'webgpu-frontier-record-compaction-resident', dispatchCount: recordDispatchCount, bufferCapacity: recordBufferCapacity } : {}) } });
   generated.residentNavigation = residentNavigationEntries;
   return generated;
 }
