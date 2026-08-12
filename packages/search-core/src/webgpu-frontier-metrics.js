@@ -216,7 +216,11 @@ async function runGpuBatch(device, normalized, grid, shaderSource, pipelineCache
       { binding: 0, resource: { buffer: buffers.parent } }, { binding: 1, resource: { buffer: buffers.candidate } }, { binding: 2, resource: { buffer: buffers.centroid } }, { binding: 3, resource: { buffer: buffers.ring } }, { binding: 4, resource: { buffer: buffers.output } }, { binding: 5, resource: { buffer: buffers.params } },
     ] });
     const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end(); encoder.copyBufferToBuffer(buffers.output, 0, buffers.readback, 0, outputBytes);
-    device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone(); await buffers.readback.mapAsync(GPUMapMode.READ);
+    device.queue.submit([encoder.finish()]);
+    // mapAsync is the explicit result boundary here: it waits for the copy to
+    // become visible, so an additional queue-wide completion wait only adds a
+    // host round trip to every metric batch.
+    await buffers.readback.mapAsync(GPUMapMode.READ);
     const values = Array.from(new Int32Array(buffers.readback.getMappedRange().slice(0, count * FRONTIER_METRIC_COUNT * 4))); buffers.readback.unmap();
     return Array.from({ length: count }, (_, index) => values.slice(index * FRONTIER_METRIC_COUNT, (index + 1) * FRONTIER_METRIC_COUNT));
   } finally { Object.values(buffers).forEach(buffer => buffer.destroy()); }
