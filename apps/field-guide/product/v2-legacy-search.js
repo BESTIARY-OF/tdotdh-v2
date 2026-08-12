@@ -1298,6 +1298,13 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     if (navigationCancellation) navigationCancellation(cancelled);
     if (cancelled) return { type: 'done', placements: null, metrics: null, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierDedup: frontierDedupReceipt };
     const navigationBatchReceipt = navigationBatch?.({ stage: 'frontier-expansion', backend: navigationExpansionBackend, ownership: navigationExpansionBackend === 'webgpu' ? 'gpu-first' : 'cpu-oracle-fallback', depth, nodeOffset: restoredNodeOffset + nodes, candidateCount: beam.length });
+    const candidatePreparationTimings = {};
+    let candidatePreparationBoundary = performance.now();
+    const markCandidatePreparationTiming = name => {
+      const now = performance.now();
+      candidatePreparationTimings[name] = Number((now - candidatePreparationBoundary).toFixed(2));
+      candidatePreparationBoundary = now;
+    };
     const nextBeam = [];
     const gpuStateBuckets = new Map();
     const cpuStateKeys = new Set();
@@ -1309,6 +1316,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       if (nodes - mainNodeStart >= NODE_LIMIT) break;
       beamPlans.push({ state });
     }
+    markCandidatePreparationTiming('beamPlanBuildMs');
     const useTargetGeneratedFrontier = options.disableGpuCandidateGeneration !== true && options.disableGpuTargetGeneration !== true && frontierTargetGeneratorStatus?.status === 'available';
     const skipRedundantGpuTargetPool = options.skipRedundantGpuTargetPool === true && useTargetGeneratedFrontier;
     const gpuTargetPools = await generateFrontierTargetPoolsAcrossBeam(
@@ -1318,6 +1326,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       receipt => { frontierTargetPoolReceipt = receipt; },
       frontierTargetPoolStatus,
     );
+    markCandidatePreparationTiming('targetPoolDispatchMs');
     if (skipRedundantGpuTargetPool) frontierTargetPoolReceipt = {
       status: 'skipped',
       backend: 'cpu-control',
@@ -1337,6 +1346,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       plan.targetPool = ringTargets.length ? ringTargets : frontierTargets;
     }
     for (let index = beamPlans.length - 1; index >= 0; index--) if (!beamPlans[index].targetPool?.length) beamPlans.splice(index, 1);
+    markCandidatePreparationTiming('targetPoolDecodeMs');
     const generatedByTargetBeam = useTargetGeneratedFrontier
       ? await generateFrontierTargetTranslationsAcrossBeam(beamPlans, frontierTargetGenerator, positionLocks, seedOrigin, receipt => { frontierTargetGenerationReceipt = receipt; }, frontierTargetGeneratorStatus, frontierCandidateRecords, navigationAvailability?.status !== 'available' || options.disableGpuResidentNavigation === true, isCancelled, options.verifyGpuResidentNavigation !== false)
       : null;
@@ -1344,6 +1354,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     const generatedByBeam = useGeneratedFrontier
       ? await generateFrontierTranslationsAcrossBeam(beamPlans, frontierGenerator, receipt => { frontierGenerationReceipt = receipt; }, frontierGeneratorStatus, frontierCandidateRecords)
       : null;
+    markCandidatePreparationTiming('targetGenerationDispatchMs');
     if (!useTargetGeneratedFrontier && !useGeneratedFrontier && frontierGenerator?.generate && frontierGenerationReceipt.status === 'cpu-oracle') frontierGenerationReceipt = { status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', candidateCount: 0 };
     if (navigationBatchReceipt) {
       const annotate = receipt => receipt?.status ? { ...receipt, navigationBatch: navigationBatchReceipt } : receipt;
@@ -1373,8 +1384,9 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
           if (selectedOptions.length) beamJobs.push({ state, entries: selectedOptions });
         }
       }
+      markCandidatePreparationTiming('navigationFallbackSelectionMs');
       navigationPlanHistory.push({ depth, status: 'fallback', backend: 'cpu-oracle', parity: 'oracle', rowCount: 0, selectedCount: beamJobs.reduce((sum, job) => sum + job.entries.length, 0), beamJobCount: beamJobs.length, nextBeamCount: null });
-      navigationPlanReceipt = { ...navigationPlanReceipt, history: navigationPlanHistory.slice(-64), expansion: { depth, beamPlanCount: beamPlans.length, selectedCount: beamJobs.reduce((sum, job) => sum + job.entries.length, 0), selectedPlanCount: beamJobs.length } };
+      navigationPlanReceipt = { ...navigationPlanReceipt, history: navigationPlanHistory.slice(-64), expansion: { depth, beamPlanCount: beamPlans.length, selectedCount: beamJobs.reduce((sum, job) => sum + job.entries.length, 0), selectedPlanCount: beamJobs.length }, candidatePreparationTimings };
     } else {
       const navigationRows = [], navigationRefs = [], targetPlanEntries = [], targetPieces = new Map();
       const residentNavigationEntries = generatedByTargetBeam?.residentNavigation || [], residentNavigationExpectedRows = residentNavigationEntries.flatMap(entry => entry.expectedRows || []);
@@ -1414,11 +1426,13 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
           }
         }
       }
+      markCandidatePreparationTiming('navigationInputBuildMs');
       const navigationPlan = useResidentNavigation
         ? await navigationScheduler.selectResidentCandidateRecords(residentNavigationEntries, { planCount: beamPlans.length, expectedRows: residentNavigationExpectedRows.length ? residentNavigationExpectedRows : null, captureTargetCounts: options.captureGpuResidentDiagnostics === true })
         : useFlatTargetPlan
         ? await navigationScheduler.selectCandidateRecords(targetPlanEntries, { planCount: beamPlans.length })
         : await navigationScheduler.select(navigationRows, { planCount: beamPlans.length });
+      markCandidatePreparationTiming('navigationDispatchMs');
       navigationPlanReceipt = { status: navigationPlan.rowCount === 0 ? 'not-used' : navigationPlan.status === 'completed' && navigationPlan.backend === 'webgpu' && navigationPlan.parity === 'verified' ? 'used' : navigationPlan.status, backend: navigationPlan.backend, parity: navigationPlan.parity, rowCount: navigationPlan.rowCount, selectedCount: navigationPlan.selectedCount, planCount: navigationPlan.planCount, inputDigest: navigationPlan.inputDigest, inputRepresentation: useResidentNavigation ? (residentNavigationEntries.some(entry => entry.direct) ? 'gpu-resident-target-records' : 'gpu-resident-compacted-records') : useFlatTargetPlan ? 'gpu-flat-target-records' : useTargetGeneratedFrontier ? 'flat-target-records' : 'materialized-candidates', ...(useResidentNavigation ? { resident: true, expectedRowsCount: residentNavigationExpectedRows.length } : {}), ...(navigationPlan.residentDiagnostics ? { residentDiagnostics: navigationPlan.residentDiagnostics } : {}), ...(navigationPlan.stageTimings ? { stageTimings: navigationPlan.stageTimings } : {}), ...(navigationPlan.selectedRecords ? { selectedRecords: navigationPlan.selectedRecords.slice(0, 32) } : {}), ...(navigationPlan.rowCount === 0 ? { reason: 'no-navigation-candidates' } : navigationPlan.reason ? { reason: navigationPlan.reason } : {}), ...(navigationPlan.dispatch ? { dispatch: navigationPlan.dispatch } : {}), ...(navigationPlan.persistent ? { persistent: true, bufferCapacity: navigationPlan.bufferCapacity, dispatchCount: navigationPlan.dispatchCount } : {}) };
       if (useResidentNavigation && navigationPlan.selectedRecords?.length) {
         const samples = navigationPlan.selectedRecords.slice(0, 32).map(record => {
@@ -1461,6 +1475,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         entries.push({ piece: ref.piece, candidate });
         selectedByPlan.set(ref.planIndex, entries);
       }
+      markCandidatePreparationTiming('navigationResultDecodeMs');
       const candidateGroups = beamPlans.map((plan, planIndex) => ({ planIndex, entries: selectedByPlan.get(planIndex) || [] })).filter(group => group.entries.length);
       const flattenedCandidates = candidateGroups.flatMap(group => group.entries.map(entry => ({ entry, planIndex: group.planIndex })));
       const filteredCandidates = await filterCandidates(flattenedCandidates.map(item => item.entry));
@@ -1473,6 +1488,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         const selectedOptions = filteredByPlan.get(planIndex) || [];
         if (selectedOptions.length) beamJobs.push({ state: plan.state, entries: selectedOptions });
       }
+      markCandidatePreparationTiming('candidateAdmissionMs');
     }
     markDepthTiming('candidatePreparationMs');
     const gpuSubstageTimings = {};
@@ -1551,7 +1567,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
     navigationPlanReceipt = { ...navigationPlanReceipt, expansion: { ...(navigationPlanReceipt.expansion || {}), beamJobCount: beamJobs.length, nextBeamCount: nextBeam.length } };
     const historyEntry = navigationPlanHistory[navigationPlanHistory.length - 1];
     markDepthTiming('rankingRetentionMs');
-    if (historyEntry) Object.assign(historyEntry, { beamJobCount: beamJobs.length, nextBeamCount: nextBeam.length, nextBeamSample: nextBeam.slice(0, 8).map(state => ({ placements: state.placements.map(placement => placement.id), family: state.centroidFamilyId, score: state.score })), controlPlaneMs: Number((performance.now() - depthTimingStarted).toFixed(2)), ...depthTimings, gpuSubstageTimings });
+    if (historyEntry) Object.assign(historyEntry, { beamJobCount: beamJobs.length, nextBeamCount: nextBeam.length, nextBeamSample: nextBeam.slice(0, 8).map(state => ({ placements: state.placements.map(placement => placement.id), family: state.centroidFamilyId, score: state.score })), controlPlaneMs: Number((performance.now() - depthTimingStarted).toFixed(2)), ...depthTimings, candidatePreparationTimings, gpuSubstageTimings });
     navigationPlanReceipt = { ...navigationPlanReceipt, history: navigationPlanHistory.slice(-64), stageHistory };
     for (const state of nextBeam) { if (!familyBuckets.has(state.centroidFamilyId)) familyBuckets.set(state.centroidFamilyId, []); familyBuckets.get(state.centroidFamilyId).push(state); }
     if (searchStrategy === 'breadth') {
