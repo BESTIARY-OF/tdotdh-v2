@@ -524,9 +524,11 @@ async function runWebGpuBatchReduction(deviceCache, normalizedInputs, grid, { re
     const summaryBuffer = device.createBuffer({ size: summaryByteLength, usage: usage.STORAGE | usage.COPY_DST | usage.COPY_SRC });
     const summaryReadback = device.createBuffer({ size: summaryByteLength, usage: usage.MAP_READ | usage.COPY_DST });
     const summaryParams = device.createBuffer({ size: 16, usage: usage.UNIFORM | usage.COPY_DST });
+    const emptySummaryParams = device.createBuffer({ size: 16, usage: usage.UNIFORM | usage.COPY_DST });
+    const emptySeedParams = device.createBuffer({ size: 16, usage: usage.UNIFORM | usage.COPY_DST });
     const summaryPipeline = pipelineCache.get(device, BATCH_LABEL_SUMMARY_SHADER);
     const seedPipeline = pipelineCache.get(device, BATCH_LABEL_SEED_SHADER);
-    labelResources.push(...labelBuffers, labelReadback, labelParams, seedParams, summaryBuffer, summaryReadback, summaryParams);
+    labelResources.push(...labelBuffers, labelReadback, labelParams, seedParams, emptySeedParams, summaryBuffer, summaryReadback, summaryParams, emptySummaryParams);
     const runBatchLabels = async active => {
       device.queue.writeBuffer(labelParams, 0, new Uint32Array([candidateCount, cellCount, grid.width, grid.height]));
       device.queue.writeBuffer(seedParams, 0, new Uint32Array([candidateCount, cellCount, wordCount, active ? 1 : 0]));
@@ -571,17 +573,65 @@ async function runWebGpuBatchReduction(deviceCache, normalizedInputs, grid, { re
       pass.setPipeline(summaryPipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(candidateCount * cellCount / 64)); pass.end();
       device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
     };
-    const occupiedResult = await runBatchLabels(true);
-    if (!readback) device.queue.writeBuffer(summaryBuffer, 0, new Uint32Array(candidateCount * 2));
-    if (!readback) await runSummary(occupiedResult.buffer, 0);
-    const emptyResult = await runBatchLabels(false);
-    if (!readback) {
-      await runSummary(emptyResult.buffer, 1);
+    const runResidentLabelsAndSummary = async () => {
+      // The normal diagnostic path intentionally keeps readbacks between label
+      // phases. The production path only needs the aggregate summary, so keep
+      // both label propagations and summaries in one command buffer. This
+      // removes four queue submissions and host waits from every batch.
+      device.queue.writeBuffer(summaryBuffer, 0, new Uint32Array(candidateCount * 2));
+      device.queue.writeBuffer(labelParams, 0, new Uint32Array([candidateCount, cellCount, grid.width, grid.height]));
+      device.queue.writeBuffer(seedParams, 0, new Uint32Array([candidateCount, cellCount, wordCount, 1]));
+      device.queue.writeBuffer(emptySeedParams, 0, new Uint32Array([candidateCount, cellCount, wordCount, 0]));
+      const encoder = device.createCommandEncoder();
+      const encodeLabels = seedParamBuffer => {
+        const seed = encoder.beginComputePass();
+        const seedGroup = device.createBindGroup({ layout: seedPipeline.getBindGroupLayout(0), entries: [
+          { binding: 0, resource: { buffer: occupiedBuffer } }, { binding: 1, resource: { buffer: labelBuffers[0] } }, { binding: 2, resource: { buffer: seedParamBuffer } },
+        ] });
+        seed.setPipeline(seedPipeline); seed.setBindGroup(0, seedGroup); seed.dispatchWorkgroups(Math.ceil((candidateCount * cellCount) / 64)); seed.end();
+        let current = 0;
+        const bindGroups = [
+          device.createBindGroup({ layout: labelPipeline.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: labelBuffers[0] } }, { binding: 1, resource: { buffer: labelBuffers[1] } }, { binding: 2, resource: { buffer: labelParams } },
+          ] }),
+          device.createBindGroup({ layout: labelPipeline.getBindGroupLayout(0), entries: [
+            { binding: 0, resource: { buffer: labelBuffers[1] } }, { binding: 1, resource: { buffer: labelBuffers[0] } }, { binding: 2, resource: { buffer: labelParams } },
+          ] }),
+        ];
+        for (let passIndex = 0; passIndex < grid.width + grid.height; passIndex += 1) {
+          const compute = encoder.beginComputePass();
+          compute.setPipeline(labelPipeline); compute.setBindGroup(0, bindGroups[current]); compute.dispatchWorkgroups(Math.ceil((candidateCount * cellCount) / 64)); compute.end();
+          current = 1 - current;
+        }
+        return labelBuffers[current];
+      };
+      const encodeSummary = (labelBuffer, mode) => {
+        const summaryParamBuffer = mode === 0 ? summaryParams : emptySummaryParams;
+        device.queue.writeBuffer(summaryParamBuffer, 0, new Uint32Array([candidateCount, cellCount, grid.width, mode]));
+        const pass = encoder.beginComputePass();
+        const bindGroup = device.createBindGroup({ layout: summaryPipeline.getBindGroupLayout(0), entries: [
+          { binding: 0, resource: { buffer: labelBuffer } }, { binding: 1, resource: { buffer: summaryBuffer } }, { binding: 2, resource: { buffer: summaryParamBuffer } },
+        ] });
+        pass.setPipeline(summaryPipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(candidateCount * cellCount / 64)); pass.end();
+      };
+      const occupiedLabelsBuffer = encodeLabels(seedParams);
+      encodeSummary(occupiedLabelsBuffer, 0);
+      const emptyLabelsBuffer = encodeLabels(emptySeedParams);
+      encodeSummary(emptyLabelsBuffer, 1);
+      encoder.copyBufferToBuffer(summaryBuffer, 0, summaryReadback, 0, summaryByteLength);
+      device.queue.submit([encoder.finish()]);
+      await device.queue.onSubmittedWorkDone();
       await summaryReadback.mapAsync(mapMode.READ);
       const summary = Array.from(new Uint32Array(summaryReadback.getMappedRange().slice(0, summaryByteLength)));
       summaryReadback.unmap();
+      return summary;
+    };
+    if (!readback) {
+      const summary = await runResidentLabelsAndSummary();
       return normalizedInputs.map((input, index) => ({ area: areas[index], occupiedComponentCount: summary[index * 2], holes: summary[index * 2 + 1] }));
     }
+    const occupiedResult = await runBatchLabels(true);
+    const emptyResult = await runBatchLabels(false);
     const occupiedLabels = occupiedResult.labels, emptyLabels = emptyResult.labels;
     return normalizedInputs.map((input, index) => {
       const wordStart = index * wordCount;
