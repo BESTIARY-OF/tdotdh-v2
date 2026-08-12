@@ -620,7 +620,6 @@ async function runWebGpuBatchReduction(deviceCache, normalizedInputs, grid, { re
       encodeSummary(emptyLabelsBuffer, 1);
       encoder.copyBufferToBuffer(summaryBuffer, 0, summaryReadback, 0, summaryByteLength);
       device.queue.submit([encoder.finish()]);
-      await device.queue.onSubmittedWorkDone();
       await summaryReadback.mapAsync(mapMode.READ);
       const summary = Array.from(new Uint32Array(summaryReadback.getMappedRange().slice(0, summaryByteLength)));
       summaryReadback.unmap();
