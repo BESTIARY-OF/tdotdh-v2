@@ -134,6 +134,30 @@ export function createLabeledFrontierStateCandidate({ parentPlacements, candidat
   return Object.freeze({ parentLabelMasks, candidateMask: createFrontierMaskFromCells(candidate.cells, normalizedGrid), candidatePieceIndex: pieceIndex, remainingMask: remainingMask(remainingIds), pieceIds: ids, ...(normalizedParentStateIndex == null ? {} : { parentStateIndex: normalizedParentStateIndex }) });
 }
 
+/**
+ * Build a beam's labeled candidates with shared parent preparation. The
+ * parent labels and piece-id normalization are invariant across candidates
+ * from one search state; sharing them avoids rebuilding the same CPU-side
+ * representation before the batch is uploaded to the GPU.
+ */
+export function createLabeledFrontierStateCandidateBatch({ parentPlacements, candidates, pieceIds, parentStateIndex = null } = {}, grid = DEFAULT_FRONTIER_GRID) {
+  const normalizedGrid = normalizeGrid(grid), ids = normalizePieceIds(pieceIds), placementList = Array.isArray(parentPlacements) ? parentPlacements : [];
+  if (!Array.isArray(candidates) || candidates.length === 0) throw new TypeError('candidates must be a non-empty array');
+  const parentLabelMasks = new Uint32Array(ids.length * normalizedGrid.wordCount);
+  for (const placement of placementList) {
+    const index = ids.indexOf(placement?.id);
+    if (index < 0 || !Array.isArray(placement.cells) || placement.cells.length === 0) throw new TypeError('parent placements must use pieceIds and contain cells');
+    setMask(parentLabelMasks, index * normalizedGrid.wordCount, placement.cells, normalizedGrid);
+  }
+  const normalizedParentStateIndex = normalizeParentStateIndex(parentStateIndex);
+  return Object.freeze(candidates.map((candidate, index) => {
+    if (!candidate || !Number.isSafeInteger(candidate.id) || !Array.isArray(candidate.cells) || candidate.cells.length === 0) throw new TypeError(`candidate ${index} must contain an integer id and non-empty cells`);
+    const pieceIndex = ids.indexOf(candidate.id);
+    if (pieceIndex < 0) throw new RangeError(`candidate ${index}.id must be present in pieceIds`);
+    return Object.freeze({ parentLabelMasks, candidateMask: createFrontierMaskFromCells(candidate.cells, normalizedGrid), candidatePieceIndex: pieceIndex, remainingMask: remainingMask(candidate.remainingIds), pieceIds: ids, ...(normalizedParentStateIndex == null ? {} : { parentStateIndex: normalizedParentStateIndex }) });
+  }));
+}
+
 function normalizeCandidates(candidates, grid) {
   if (!Array.isArray(candidates) || candidates.length === 0) throw new TypeError('labeled frontier state candidates must be a non-empty array');
   let pieceIds = null;

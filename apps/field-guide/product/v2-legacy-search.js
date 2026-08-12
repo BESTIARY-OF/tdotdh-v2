@@ -14,7 +14,7 @@ import { cpuScoreFrontierCandidate } from '../../../packages/search-core/src/web
 import { createFrontierMaskFromCells } from '../../../packages/search-core/src/webgpu-frontier-validator.js';
 import { createFrontierMetricsCandidate } from '../../../packages/search-core/src/webgpu-frontier-metrics.js?v=20260811-maskcache2';
 import { createFieldMetricsCandidate } from '../../../packages/search-core/src/webgpu-field-metrics.js?v=20260811-floodfill6';
-import { createLabeledFrontierStateCandidate } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
+import { createLabeledFrontierStateCandidate, createLabeledFrontierStateCandidateBatch } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 import { canonicalSignatureFromLabeledFrontierState } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 import { DEFAULT_FRONTIER_GRID } from '../../../packages/search-core/src/webgpu-frontier-topology.js';
 import { MAX_FRONTIER_GENERATION_CANDIDATES } from '../../../packages/search-core/src/webgpu-frontier-generator.js?v=20260811-pipelinecache1';
@@ -715,7 +715,9 @@ async function evaluateFrontierStateAcrossBeam(jobs, frontierState, onState = ()
     const pending = [];
     for (const [jobIndex, job] of jobs.entries()) {
       const pieceIds = [...new Set([...job.state.placements.map(placement => placement.id), ...job.state.remaining.map(piece => piece.id)])].sort((a, b) => a - b);
-      for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, entry, candidate: createLabeledFrontierStateCandidate({ parentPlacements: job.state.placements, candidate: { id: entry.piece.id, cells: entry.candidate.cells }, pieceIds, remainingIds: job.state.remaining.filter(piece => piece.id !== entry.piece.id).map(piece => piece.id), parentStateIndex: job.state.gpuState?.residentStateIndex }) });
+      const remainingIdsByPiece = new Map(job.state.remaining.map(piece => [piece.id, job.state.remaining.filter(candidate => candidate.id !== piece.id).map(candidate => candidate.id)]));
+      const candidates = createLabeledFrontierStateCandidateBatch({ parentPlacements: job.state.placements, pieceIds, parentStateIndex: job.state.gpuState?.residentStateIndex, candidates: job.entries.map(entry => ({ id: entry.piece.id, cells: entry.candidate.cells, remainingIds: remainingIdsByPiece.get(entry.piece.id) || [] })) });
+      for (const [entryIndex, entry] of job.entries.entries()) pending.push({ jobIndex, entryIndex, entry, candidate: candidates[entryIndex] });
     }
     if (!pending.length) return jobs;
     const result = frontierState.expand ? await frontierState.expand(pending.map(item => item.candidate), transitionOptions) : await frontierState.transition(pending.map(item => item.candidate), transitionOptions);

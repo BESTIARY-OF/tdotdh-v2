@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { canonicalSignatureFromLabeledFrontierState, createLabeledFrontierStateCandidate, cpuTransitionLabeledFrontierStates, createWebGpuLabeledFrontierState, WEBGPU_LABELED_FRONTIER_STATE_SCHEMA } from '../src/webgpu-labeled-frontier-state.js';
+import { canonicalSignatureFromLabeledFrontierState, createLabeledFrontierStateCandidate, createLabeledFrontierStateCandidateBatch, cpuTransitionLabeledFrontierStates, createWebGpuLabeledFrontierState, WEBGPU_LABELED_FRONTIER_STATE_SCHEMA } from '../src/webgpu-labeled-frontier-state.js';
 
 const candidateInput = {
   pieceIds: [3, 49, 97],
@@ -9,6 +9,15 @@ const candidateInput = {
 };
 const candidate = createLabeledFrontierStateCandidate(candidateInput);
 const cpu = cpuTransitionLabeledFrontierStates([candidate]);
+const batch = createLabeledFrontierStateCandidateBatch({
+  parentPlacements: candidateInput.parentPlacements,
+  pieceIds: candidateInput.pieceIds,
+  parentStateIndex: 7,
+  candidates: [candidateInput].map(({ candidate: entry, remainingIds }) => ({ id: entry.id, cells: entry.cells, remainingIds })),
+});
+assert.equal(batch.length, 1);
+assert.equal(batch[0].parentStateIndex, 7);
+assert.deepEqual(cpuTransitionLabeledFrontierStates(batch), cpu);
 
 const referencedCandidate = createLabeledFrontierStateCandidate({ ...candidateInput, parentStateIndex: 7 });
 assert.equal(referencedCandidate.parentStateIndex, 7);
