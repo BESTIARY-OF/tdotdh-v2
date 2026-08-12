@@ -62,6 +62,7 @@ struct Params { recordCount: u32, handleCount: u32, planCount: u32, reserved0: u
 @group(0) @binding(4) var<uniform> params: Params;
 @group(0) @binding(5) var<storage, read> validity: array<u32>;
 @group(0) @binding(6) var<storage, read_write> targetCounts: array<atomic<u32>>;
+@group(0) @binding(7) var<storage, read_write> bestTargets: array<u32>;
 
 fn handleFor(recordIndex: u32) -> u32 {
   for (var handle: u32 = 0u; handle < params.handleCount; handle = handle + 1u) {
@@ -92,6 +93,18 @@ fn countResident(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 @compute @workgroup_size(${FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE})
+fn chooseResidentTarget(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= params.planCount) { return; }
+  var bestTarget = 0xffffffffu;
+  var bestCount = 0xffffffffu;
+  for (var candidateTarget: u32 = 0u; candidateTarget < ${FRONTIER_NAVIGATION_RESIDENT_MAX_TARGETS}u; candidateTarget = candidateTarget + 1u) {
+    let candidateCount = atomicLoad(&targetCounts[id.x * ${FRONTIER_NAVIGATION_RESIDENT_MAX_TARGETS}u + candidateTarget]);
+    if (candidateCount != 0u && (candidateCount < bestCount || (candidateCount == bestCount && candidateTarget < bestTarget))) { bestCount = candidateCount; bestTarget = candidateTarget; }
+  }
+  bestTargets[id.x] = bestTarget;
+}
+
+@compute @workgroup_size(${FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE})
 fn selectResident(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= params.recordCount) { return; }
   let currentHandle = handleFor(id.x);
@@ -100,12 +113,7 @@ fn selectResident(@builtin(global_invocation_id) id: vec3<u32>) {
   if (validity[handleMeta[currentMeta + 4u] + id.x - handleMeta[currentMeta]] == 0u) { selected[id.x] = 0u; return; }
   let currentPlan = planFor(currentHandle, id.x);
   if (currentPlan == 0xffffffffu || currentPlan >= params.planCount) { selected[id.x] = 0u; return; }
-  var bestTarget = 0xffffffffu;
-  var bestCount = 0xffffffffu;
-  for (var candidateTarget: u32 = 0u; candidateTarget < ${FRONTIER_NAVIGATION_RESIDENT_MAX_TARGETS}u; candidateTarget = candidateTarget + 1u) {
-    let candidateCount = atomicLoad(&targetCounts[currentPlan * ${FRONTIER_NAVIGATION_RESIDENT_MAX_TARGETS}u + candidateTarget]);
-    if (candidateCount != 0u && (candidateCount < bestCount || (candidateCount == bestCount && candidateTarget < bestTarget))) { bestCount = candidateCount; bestTarget = candidateTarget; }
-  }
+  let bestTarget = bestTargets[currentPlan];
   selected[id.x] = select(0u, 1u, u32(records[id.x * 5u + 1u]) == bestTarget);
 }
 `;
@@ -438,6 +446,7 @@ function createPersistentGpuResidentNavigationRunner(device, shaderSource) {
         params: device.createBuffer({ size: 16, usage: usage.UNIFORM | usage.COPY_DST }),
         validity: device.createBuffer({ size: recordCountBytes, usage: usage.STORAGE | usage.COPY_DST }),
         targetCounts: device.createBuffer({ size: planTargetCapacity * FRONTIER_NAVIGATION_RESIDENT_MAX_TARGETS * 4, usage: usage.STORAGE | usage.COPY_DST | usage.COPY_SRC }),
+        bestTargets: device.createBuffer({ size: planTargetCapacity * 4, usage: usage.STORAGE }),
         prefixes: device.createBuffer({ size: recordCountBytes, usage: usage.STORAGE | usage.COPY_SRC }),
         groupTotals: device.createBuffer({ size: groupBytes, usage: usage.STORAGE | usage.COPY_SRC }),
         groupOffsets: device.createBuffer({ size: groupBytes, usage: usage.STORAGE | usage.COPY_DST }),
@@ -456,11 +465,13 @@ function createPersistentGpuResidentNavigationRunner(device, shaderSource) {
         { binding: 4, visibility: shaderStageCompute, buffer: { type: 'uniform' } },
         { binding: 5, visibility: shaderStageCompute, buffer: { type: 'read-only-storage' } },
         { binding: 6, visibility: shaderStageCompute, buffer: { type: 'storage' } },
+        { binding: 7, visibility: shaderStageCompute, buffer: { type: 'storage' } },
       ] }) : null;
       const pipelineLayout = explicitLayout ? device.createPipelineLayout({ bindGroupLayouts: [residentBindGroupLayout] }) : 'auto';
       const countPipeline = device.createComputePipeline({ layout: pipelineLayout, compute: { module, entryPoint: 'countResident' } });
+      const chooseTargetPipeline = device.createComputePipeline({ layout: pipelineLayout, compute: { module, entryPoint: 'chooseResidentTarget' } });
       const selectPipeline = device.createComputePipeline({ layout: pipelineLayout, compute: { module, entryPoint: 'selectResident' } });
-      const bindGroup = device.createBindGroup({ layout: residentBindGroupLayout || countPipeline.getBindGroupLayout(0), entries: [0, 1, 2, 3, 4, 5, 6].map((binding, index) => ({ binding, resource: { buffer: [buffers.records, buffers.handleMeta, buffers.piecePlans, buffers.selected, buffers.params, buffers.validity, buffers.targetCounts][index] } })) });
+      const bindGroup = device.createBindGroup({ layout: residentBindGroupLayout || countPipeline.getBindGroupLayout(0), entries: [0, 1, 2, 3, 4, 5, 6, 7].map((binding, index) => ({ binding, resource: { buffer: [buffers.records, buffers.handleMeta, buffers.piecePlans, buffers.selected, buffers.params, buffers.validity, buffers.targetCounts, buffers.bestTargets][index] } })) });
       const scanModule = device.createShaderModule({ code: FRONTIER_NAVIGATION_RESIDENT_SCAN_SHADER });
       const compactModule = device.createShaderModule({ code: FRONTIER_NAVIGATION_RESIDENT_COMPACT_SHADER });
       const scanPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: scanModule, entryPoint: 'scanResident' } });
@@ -469,7 +480,7 @@ function createPersistentGpuResidentNavigationRunner(device, shaderSource) {
       const scanBindGroup = device.createBindGroup({ layout: scanPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.selected } }, { binding: 1, resource: { buffer: buffers.prefixes } }, { binding: 2, resource: { buffer: buffers.groupTotals } }, { binding: 3, resource: { buffer: scanParams } }] });
       const compactBindGroup = device.createBindGroup({ layout: compactPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.records } }, { binding: 1, resource: { buffer: buffers.selected } }, { binding: 2, resource: { buffer: buffers.prefixes } }, { binding: 3, resource: { buffer: buffers.groupOffsets } }, { binding: 4, resource: { buffer: buffers.compactedRecords } }, { binding: 5, resource: { buffer: scanParams } }] });
       const previous = resources;
-      resources = { buffers: { ...buffers, scanParams }, countPipeline, selectPipeline, bindGroup, scanPipeline, compactPipeline, scanBindGroup, compactBindGroup, recordCapacity, handleCapacity, piecePlanCapacity, planTargetCapacity, groupCapacity };
+      resources = { buffers: { ...buffers, scanParams }, countPipeline, chooseTargetPipeline, selectPipeline, bindGroup, scanPipeline, compactPipeline, scanBindGroup, compactBindGroup, recordCapacity, handleCapacity, piecePlanCapacity, planTargetCapacity, groupCapacity };
       dispose(previous);
     } catch (error) { dispose({ buffers }); throw error; }
     return resources;
@@ -501,6 +512,7 @@ function createPersistentGpuResidentNavigationRunner(device, shaderSource) {
     }
     assertNotAborted(signal);
     const countPass = countEncoder.beginComputePass(); countPass.setPipeline(current.countPipeline); countPass.setBindGroup(0, current.bindGroup); countPass.dispatchWorkgroups(Math.ceil(recordCount / FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE)); countPass.end();
+    const chooseTargetPass = countEncoder.beginComputePass(); chooseTargetPass.setPipeline(current.chooseTargetPipeline); chooseTargetPass.setBindGroup(0, current.bindGroup); chooseTargetPass.dispatchWorkgroups(Math.ceil(resolvedPlanCount / FRONTIER_NAVIGATION_PLAN_WORKGROUP_SIZE)); chooseTargetPass.end();
     const countStarted = performance.now(); device.queue.submit([countEncoder.finish()]); await device.queue.onSubmittedWorkDone(); markStage('countAndUpload', countStarted); assertNotAborted(signal); if (lost) throw new Error('webgpu-device-lost');
     let targetCounts = null;
     if (captureTargetCounts) {
