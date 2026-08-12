@@ -193,9 +193,8 @@ function flattenMasks(candidates, property, wordCount) {
   return flat;
 }
 
-async function runGpuBatch(device, normalized, grid, shaderSource, pipelineCache) {
-  const dispatchStarted = performance.now();
-  const count = normalized.length, maskBytes = Math.max(4, count * grid.wordCount * 4), outputBytes = Math.max(4, count * FRONTIER_METRIC_COUNT * 4);
+function createGpuBatchResources(device, capacity, grid, shaderSource, pipelineCache) {
+  const maskBytes = Math.max(4, capacity * grid.wordCount * 4), outputBytes = Math.max(4, capacity * FRONTIER_METRIC_COUNT * 4);
   const buffers = {
     parent: device.createBuffer({ size: maskBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
     candidate: device.createBuffer({ size: maskBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
@@ -205,40 +204,62 @@ async function runGpuBatch(device, normalized, grid, shaderSource, pipelineCache
     params: device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }),
     readback: device.createBuffer({ size: outputBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
   };
-  try {
-    const uploadStarted = performance.now();
-    device.queue.writeBuffer(buffers.parent, 0, flattenMasks(normalized, 'parentMask', grid.wordCount));
-    device.queue.writeBuffer(buffers.candidate, 0, flattenMasks(normalized, 'candidateMask', grid.wordCount));
-    device.queue.writeBuffer(buffers.centroid, 0, flattenMasks(normalized, 'centroidMask', grid.wordCount));
-    device.queue.writeBuffer(buffers.ring, 0, flattenMasks(normalized, 'ringMask', grid.wordCount));
-    const bounds = normalized[0].bounds;
-    device.queue.writeBuffer(buffers.params, 0, new Int32Array([count, grid.wordCount, grid.width, grid.height, grid.originX, grid.originY, bounds.minX, bounds.maxX, bounds.minY, bounds.maxY, 0, 0]));
-    const uploadMs = performance.now() - uploadStarted;
-    const pipeline = pipelineCache.get(device, shaderSource);
-    const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: { buffer: buffers.parent } }, { binding: 1, resource: { buffer: buffers.candidate } }, { binding: 2, resource: { buffer: buffers.centroid } }, { binding: 3, resource: { buffer: buffers.ring } }, { binding: 4, resource: { buffer: buffers.output } }, { binding: 5, resource: { buffer: buffers.params } },
-    ] });
-    const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end(); encoder.copyBufferToBuffer(buffers.output, 0, buffers.readback, 0, outputBytes);
-    const submitStarted = performance.now();
-    device.queue.submit([encoder.finish()]);
-    const submitMs = performance.now() - submitStarted;
-    // mapAsync is the explicit result boundary here: it waits for the copy to
-    // become visible, so an additional queue-wide completion wait only adds a
-    // host round trip to every metric batch.
-    const readbackStarted = performance.now();
-    await buffers.readback.mapAsync(GPUMapMode.READ);
-    const values = Array.from(new Int32Array(buffers.readback.getMappedRange().slice(0, count * FRONTIER_METRIC_COUNT * 4))); buffers.readback.unmap();
-    const readbackMs = performance.now() - readbackStarted;
-    return {
-      metrics: Array.from({ length: count }, (_, index) => values.slice(index * FRONTIER_METRIC_COUNT, (index + 1) * FRONTIER_METRIC_COUNT)),
-      dispatchTimings: { uploadMs, submitMs, readbackMs, totalMs: performance.now() - dispatchStarted },
-    };
-  } finally { Object.values(buffers).forEach(buffer => buffer.destroy()); }
+  const pipeline = pipelineCache.get(device, shaderSource), bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
+    { binding: 0, resource: { buffer: buffers.parent } }, { binding: 1, resource: { buffer: buffers.candidate } }, { binding: 2, resource: { buffer: buffers.centroid } }, { binding: 3, resource: { buffer: buffers.ring } }, { binding: 4, resource: { buffer: buffers.output } }, { binding: 5, resource: { buffer: buffers.params } },
+  ] });
+  return Object.freeze({ device, capacity, buffers, pipeline, bindGroup });
+}
+
+function destroyGpuBatchResources(resources) { if (resources) Object.values(resources.buffers).forEach(buffer => buffer.destroy()); }
+
+async function runGpuBatch(device, normalized, grid, resources) {
+  const dispatchStarted = performance.now();
+  const count = normalized.length, maskBytes = Math.max(4, count * grid.wordCount * 4), outputBytes = Math.max(4, count * FRONTIER_METRIC_COUNT * 4);
+  if (count > resources.capacity || resources.device !== device) throw new RangeError('frontier metric batch exceeds reusable GPU capacity');
+  const { buffers, pipeline, bindGroup } = resources;
+  const uploadStarted = performance.now();
+  device.queue.writeBuffer(buffers.parent, 0, flattenMasks(normalized, 'parentMask', grid.wordCount));
+  device.queue.writeBuffer(buffers.candidate, 0, flattenMasks(normalized, 'candidateMask', grid.wordCount));
+  device.queue.writeBuffer(buffers.centroid, 0, flattenMasks(normalized, 'centroidMask', grid.wordCount));
+  device.queue.writeBuffer(buffers.ring, 0, flattenMasks(normalized, 'ringMask', grid.wordCount));
+  const bounds = normalized[0].bounds;
+  device.queue.writeBuffer(buffers.params, 0, new Int32Array([count, grid.wordCount, grid.width, grid.height, grid.originX, grid.originY, bounds.minX, bounds.maxX, bounds.minY, bounds.maxY, 0, 0]));
+  const uploadMs = performance.now() - uploadStarted;
+  const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end(); encoder.copyBufferToBuffer(buffers.output, 0, buffers.readback, 0, outputBytes);
+  const submitStarted = performance.now();
+  device.queue.submit([encoder.finish()]);
+  const submitMs = performance.now() - submitStarted;
+  // mapAsync is the explicit result boundary here: it waits for the copy to
+  // become visible, so an additional queue-wide completion wait only adds a
+  // host round trip to every metric batch.
+  const readbackStarted = performance.now();
+  await buffers.readback.mapAsync(GPUMapMode.READ);
+  const values = Array.from(new Int32Array(buffers.readback.getMappedRange().slice(0, count * FRONTIER_METRIC_COUNT * 4))); buffers.readback.unmap();
+  const readbackMs = performance.now() - readbackStarted;
+  return {
+    metrics: Array.from({ length: count }, (_, index) => values.slice(index * FRONTIER_METRIC_COUNT, (index + 1) * FRONTIER_METRIC_COUNT)),
+    dispatchTimings: { uploadMs, submitMs, readbackMs, totalMs: performance.now() - dispatchStarted },
+  };
 }
 
 export function createWebGpuFrontierMetrics({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, requiredLimits = { maxStorageBufferBindingSize: 262144 }, shaderSource = SHADER, deviceCache = createWebGpuDeviceCache({ gpu }) } = {}) {
   if (typeof shaderSource !== 'string' || !shaderSource.trim()) throw new TypeError('shaderSource must be a non-empty string');
   const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits }, pipelineCache = createWebGpuPipelineCache();
+  const reusableResources = [];
+  const acquireGpuResources = (device, capacity) => {
+    const reusable = reusableResources.find(resources => !resources.inUse && resources.device === device && resources.capacity === capacity);
+    if (reusable) { reusable.inUse = true; return reusable; }
+    const created = { ...createGpuBatchResources(device, capacity, normalizedGrid, shaderSource, pipelineCache), inUse: true };
+    reusableResources.push(created);
+    return created;
+  };
+  const releaseGpuResources = resources => { if (resources) resources.inUse = false; };
+  const discardGpuResources = resources => {
+    if (!resources) return;
+    destroyGpuBatchResources(resources);
+    const index = reusableResources.indexOf(resources);
+    if (index >= 0) reusableResources.splice(index, 1);
+  };
   return Object.freeze({
     async availability() {
       const probe = await probeWebGpuCapabilities({ gpu, requiredLimits: limits });
@@ -252,10 +273,14 @@ export function createWebGpuFrontierMetrics({ gpu = globalThis.navigator?.gpu, g
       let cpu = null;
       try {
         const device = await deviceCache.getDevice(), maxBinding = Number(device.limits?.maxStorageBufferBindingSize) || limits.maxStorageBufferBindingSize, maxBatch = Math.max(1, Math.floor(maxBinding / Math.max(normalizedGrid.wordCount * 4, 4))), metrics = [], gpuJobs = [], dispatchTimings = { calls: 0, uploadMs: 0, submitMs: 0, readbackMs: 0, totalMs: 0 };
-        // Submit all eligible batches before computing the CPU oracle. The
-        // oracle remains the exact parity gate, but its synchronous work can
-        // overlap the device queue's submitted metric dispatches.
-        for (let offset = 0; offset < normalized.length; offset += maxBatch) gpuJobs.push(runGpuBatch(device, normalized.slice(offset, offset + maxBatch), normalizedGrid, shaderSource, pipelineCache));
+        for (let offset = 0; offset < normalized.length; offset += maxBatch) {
+          const resource = acquireGpuResources(device, maxBatch), batch = normalized.slice(offset, offset + maxBatch);
+          gpuJobs.push((async () => {
+            try { return await runGpuBatch(device, batch, normalizedGrid, resource); }
+            catch (error) { discardGpuResources(resource); throw error; }
+            finally { releaseGpuResources(resource); }
+          })());
+        }
         cpu = cpuEvaluateFrontierMetrics(normalized, normalizedGrid);
         for (const job of gpuJobs) {
           const result = await job;
