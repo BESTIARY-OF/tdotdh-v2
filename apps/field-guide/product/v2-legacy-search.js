@@ -13,7 +13,7 @@ import { createFrontierEvaluationCandidate } from '../../../packages/search-core
 import { cpuScoreFrontierCandidate } from '../../../packages/search-core/src/webgpu-frontier-scorer.js?v=20260811-pipelinecache1';
 import { createFrontierMaskFromCells } from '../../../packages/search-core/src/webgpu-frontier-validator.js';
 import { createFrontierMetricsCandidate } from '../../../packages/search-core/src/webgpu-frontier-metrics.js?v=20260811-maskcache2';
-import { createFieldMetricsCandidate } from '../../../packages/search-core/src/webgpu-field-metrics.js?v=20260811-floodfill6';
+import { createFieldMetricsCandidate } from '../../../packages/search-core/src/webgpu-field-metrics.js?v=20260811-floodfill8';
 import { createLabeledFrontierStateCandidate, createLabeledFrontierStateCandidateBatch } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 import { canonicalSignatureFromLabeledFrontierState } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 import { DEFAULT_FRONTIER_GRID } from '../../../packages/search-core/src/webgpu-frontier-topology.js';

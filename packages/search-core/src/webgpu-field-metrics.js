@@ -162,6 +162,74 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   nextLabels[id.x] = label;
 }`;
 
+// The production SEDLEC grid is 64x64, so each row is an integral number of
+// u32 words.  Flood-fill state can therefore remain a bitset: one invocation
+// handles one word instead of one cell, while preserving the same fixed-point
+// propagation count and four-neighbor topology as the general label path.
+const OUTSIDE_MASK_SEED_SHADER = `
+struct Params { candidateCount: u32, wordCount: u32, width: u32, height: u32 };
+@group(0) @binding(0) var<storage, read> occupiedMasks: array<u32>;
+@group(0) @binding(1) var<storage, read_write> outsideMasks: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let totalWords = params.candidateCount * params.wordCount;
+  if (id.x >= totalWords) { return; }
+  let candidate = id.x / params.wordCount;
+  let word = id.x % params.wordCount;
+  let occupied = occupiedMasks[id.x];
+  var outside = 0u;
+  for (var bit: u32 = 0u; bit < 32u; bit++) {
+    let cell = word * 32u + bit;
+    if (cell < params.width * params.height) {
+      let x = cell % params.width;
+      let y = cell / params.width;
+      let boundary = x == 0u || y == 0u || x + 1u == params.width || y + 1u == params.height;
+      if (boundary && ((occupied >> bit) & 1u) == 0u) { outside = outside | (1u << bit); }
+    }
+  }
+  outsideMasks[candidate * params.wordCount + word] = outside;
+}`;
+
+const OUTSIDE_MASK_PROPAGATE_SHADER = `
+struct Params { candidateCount: u32, wordCount: u32, width: u32, height: u32 };
+@group(0) @binding(0) var<storage, read> currentMasks: array<u32>;
+@group(0) @binding(1) var<storage, read_write> nextMasks: array<u32>;
+@group(0) @binding(2) var<storage, read> occupiedMasks: array<u32>;
+@group(0) @binding(3) var<uniform> params: Params;
+
+fn currentWord(candidate: u32, word: i32) -> u32 {
+  if (word < 0 || word >= i32(params.wordCount)) { return 0u; }
+  return currentMasks[candidate * params.wordCount + u32(word)];
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let totalWords = params.candidateCount * params.wordCount;
+  if (id.x >= totalWords) { return; }
+  let candidate = id.x / params.wordCount;
+  let word = id.x % params.wordCount;
+  let rowWordCount = params.width / 32u;
+  let rowWord = word % rowWordCount;
+  let current = currentMasks[id.x];
+  var expanded = current;
+  var horizontalLeft = current;
+  var horizontalRight = current;
+  if (rowWord + 1u == rowWordCount) { horizontalLeft = horizontalLeft & 0x7fffffffu; }
+  if (rowWord == 0u) { horizontalRight = horizontalRight & 0xfffffffeu; }
+  expanded = expanded | (horizontalLeft << 1u) | (horizontalRight >> 1u);
+  if (rowWord > 0u) { expanded = expanded | (currentWord(candidate, i32(word) - 1) >> 31u); }
+  if (rowWord + 1u < rowWordCount) { expanded = expanded | (currentWord(candidate, i32(word) + 1) << 31u); }
+  expanded = expanded | currentWord(candidate, i32(word) - i32(rowWordCount));
+  expanded = expanded | currentWord(candidate, i32(word) + i32(rowWordCount));
+  nextMasks[id.x] = expanded & ~occupiedMasks[id.x];
+}`;
+
+const BITSET_METRICS_SHADER = SHADER
+  .replace('@group(0) @binding(2) var<storage, read> outsideLabels: array<u32>;', '@group(0) @binding(2) var<storage, read> outsideMasks: array<u32>;')
+  .replace('return select(0u, 1u, outsideLabels[candidate * params.width * params.height + offset] != 0u);', 'return (outsideMasks[candidate * params.wordCount + offset / 32u] >> (offset % 32u)) & 1u;');
+
 function normalizeGrid(grid = DEFAULT_FRONTIER_GRID) {
   const value = { ...DEFAULT_FRONTIER_GRID, ...grid };
   for (const key of ['width', 'height']) if (!Number.isSafeInteger(value[key]) || value[key] <= 0 || value[key] > 128) throw new TypeError(`grid.${key} must be a positive safe integer at most 128`);
@@ -272,9 +340,9 @@ export function cpuEvaluateFieldMetrics(candidates, grid = DEFAULT_FRONTIER_GRID
 function unavailable(reason, grid, cpu) { return Object.freeze({ schema: WEBGPU_FIELD_METRICS_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: String(reason), grid, metrics: cpu.metrics, candidateCount: cpu.candidateCount, wordCount: cpu.wordCount, parity: 'oracle' }); }
 function flatten(candidates, property, wordCount) { const flat = new Uint32Array(candidates.length * wordCount); candidates.forEach((candidate, index) => flat.set(candidate[property], index * wordCount)); return flat; }
 
-async function runGpuBatch(device, normalized, grid, shaderSource, pipelineCache) {
+async function runGpuBatch(device, normalized, grid, shaderSource, pipelineCache, useBitsetFloodFill = false) {
   const count = normalized.length, maskBytes = Math.max(4, count * grid.wordCount * 4), outputBytes = Math.max(4, count * FIELD_METRIC_COUNT * 4);
-  const cellCount = grid.width * grid.height, labelBytes = Math.max(4, count * cellCount * 4);
+  const cellCount = grid.width * grid.height, labelBytes = Math.max(4, count * (useBitsetFloodFill ? grid.wordCount : cellCount) * 4);
   const buffers = {
     occupied: device.createBuffer({ size: maskBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
     centroid: device.createBuffer({ size: maskBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
@@ -290,16 +358,18 @@ async function runGpuBatch(device, normalized, grid, shaderSource, pipelineCache
   try {
     device.queue.writeBuffer(buffers.occupied, 0, flatten(normalized, 'occupiedMask', grid.wordCount)); device.queue.writeBuffer(buffers.centroid, 0, flatten(normalized, 'centroidMask', grid.wordCount));
     device.queue.writeBuffer(buffers.params, 0, new Int32Array([count, grid.wordCount, grid.width, grid.height, grid.originX, grid.originY, 0, 0]));
-    const pipeline = pipelineCache.get(device, shaderSource);
-    const seedPipeline = pipelineCache.get(device, OUTSIDE_LABEL_SEED_SHADER), propagatePipeline = pipelineCache.get(device, OUTSIDE_LABEL_PROPAGATE_SHADER);
-    device.queue.writeBuffer(buffers.labelParams, 0, new Uint32Array([count, cellCount, grid.width, grid.height]));
+    const pipeline = pipelineCache.get(device, useBitsetFloodFill ? BITSET_METRICS_SHADER : shaderSource);
+    const seedShader = useBitsetFloodFill ? OUTSIDE_MASK_SEED_SHADER : OUTSIDE_LABEL_SEED_SHADER, propagateShader = useBitsetFloodFill ? OUTSIDE_MASK_PROPAGATE_SHADER : OUTSIDE_LABEL_PROPAGATE_SHADER;
+    const seedPipeline = pipelineCache.get(device, seedShader), propagatePipeline = pipelineCache.get(device, propagateShader);
+    device.queue.writeBuffer(buffers.labelParams, 0, new Uint32Array([count, useBitsetFloodFill ? grid.wordCount : cellCount, grid.width, grid.height]));
     let current = 0;
     const encoder = device.createCommandEncoder();
     const seed = encoder.beginComputePass();
-    seed.setPipeline(seedPipeline); seed.setBindGroup(0, device.createBindGroup({ layout: seedPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.occupied } }, { binding: 1, resource: { buffer: buffers.outsideLabels[current] } }, { binding: 2, resource: { buffer: buffers.labelParams } }] })); seed.dispatchWorkgroups(Math.ceil(count * cellCount / 64)); seed.end();
+    seed.setPipeline(seedPipeline); seed.setBindGroup(0, device.createBindGroup({ layout: seedPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.occupied } }, { binding: 1, resource: { buffer: buffers.outsideLabels[current] } }, { binding: 2, resource: { buffer: buffers.labelParams } }] })); seed.dispatchWorkgroups(Math.ceil(count * (useBitsetFloodFill ? grid.wordCount : cellCount) / 64)); seed.end();
     for (let pass = 0; pass < grid.width + grid.height; pass += 1) {
       const compute = encoder.beginComputePass();
-      compute.setPipeline(propagatePipeline); compute.setBindGroup(0, device.createBindGroup({ layout: propagatePipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.outsideLabels[current] } }, { binding: 1, resource: { buffer: buffers.outsideLabels[1 - current] } }, { binding: 2, resource: { buffer: buffers.labelParams } }] })); compute.dispatchWorkgroups(Math.ceil(count * cellCount / 64)); compute.end(); current = 1 - current;
+      const entries = useBitsetFloodFill ? [{ binding: 0, resource: { buffer: buffers.outsideLabels[current] } }, { binding: 1, resource: { buffer: buffers.outsideLabels[1 - current] } }, { binding: 2, resource: { buffer: buffers.occupied } }, { binding: 3, resource: { buffer: buffers.labelParams } }] : [{ binding: 0, resource: { buffer: buffers.outsideLabels[current] } }, { binding: 1, resource: { buffer: buffers.outsideLabels[1 - current] } }, { binding: 2, resource: { buffer: buffers.labelParams } }];
+      compute.setPipeline(propagatePipeline); compute.setBindGroup(0, device.createBindGroup({ layout: propagatePipeline.getBindGroupLayout(0), entries })); compute.dispatchWorkgroups(Math.ceil(count * (useBitsetFloodFill ? grid.wordCount : cellCount) / 64)); compute.end(); current = 1 - current;
     }
     const metricBindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.occupied } }, { binding: 1, resource: { buffer: buffers.centroid } }, { binding: 2, resource: { buffer: buffers.outsideLabels[current] } }, { binding: 3, resource: { buffer: buffers.output } }, { binding: 4, resource: { buffer: buffers.params } }] });
     const pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, metricBindGroup); pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end(); encoder.copyBufferToBuffer(buffers.output, 0, buffers.readback, 0, outputBytes); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone(); await buffers.readback.mapAsync(GPUMapMode.READ);
@@ -314,7 +384,7 @@ function nextFieldMetricsCapacity(value) {
   return capacity;
 }
 
-function createPersistentGpuFieldMetricsRunner(device, grid, shaderSource, pipelineCache) {
+function createPersistentGpuFieldMetricsRunner(device, grid, shaderSource, pipelineCache, useBitsetFloodFill = false) {
   const usage = globalThis.GPUBufferUsage, mapMode = globalThis.GPUMapMode, cellCount = grid.width * grid.height;
   let resources = null, queue = Promise.resolve(), lost = false;
   const dispose = bundle => {
@@ -328,7 +398,7 @@ function createPersistentGpuFieldMetricsRunner(device, grid, shaderSource, pipel
   const ensure = count => {
     const capacity = nextFieldMetricsCapacity(Math.max(1, count));
     if (resources?.capacity >= capacity) return resources;
-    const maskBytes = capacity * grid.wordCount * 4, labelBytes = capacity * cellCount * 4, outputBytes = capacity * FIELD_METRIC_COUNT * 4;
+    const maskBytes = capacity * grid.wordCount * 4, labelBytes = capacity * (useBitsetFloodFill ? grid.wordCount : cellCount) * 4, outputBytes = capacity * FIELD_METRIC_COUNT * 4;
     let buffers = null;
     try {
       buffers = {
@@ -343,9 +413,9 @@ function createPersistentGpuFieldMetricsRunner(device, grid, shaderSource, pipel
         labelParams: device.createBuffer({ size: 16, usage: usage.UNIFORM | usage.COPY_DST }),
         readback: device.createBuffer({ size: outputBytes, usage: usage.MAP_READ | usage.COPY_DST }),
       };
-      const metricPipeline = pipelineCache.get(device, shaderSource), seedPipeline = pipelineCache.get(device, OUTSIDE_LABEL_SEED_SHADER), propagatePipeline = pipelineCache.get(device, OUTSIDE_LABEL_PROPAGATE_SHADER);
+      const metricPipeline = pipelineCache.get(device, useBitsetFloodFill ? BITSET_METRICS_SHADER : shaderSource), seedShader = useBitsetFloodFill ? OUTSIDE_MASK_SEED_SHADER : OUTSIDE_LABEL_SEED_SHADER, propagateShader = useBitsetFloodFill ? OUTSIDE_MASK_PROPAGATE_SHADER : OUTSIDE_LABEL_PROPAGATE_SHADER, seedPipeline = pipelineCache.get(device, seedShader), propagatePipeline = pipelineCache.get(device, propagateShader);
       const seedGroup = device.createBindGroup({ layout: seedPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.occupied } }, { binding: 1, resource: { buffer: buffers.outsideLabels[0] } }, { binding: 2, resource: { buffer: buffers.labelParams } }] });
-      const propagateGroups = [0, 1].map(index => device.createBindGroup({ layout: propagatePipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.outsideLabels[index] } }, { binding: 1, resource: { buffer: buffers.outsideLabels[1 - index] } }, { binding: 2, resource: { buffer: buffers.labelParams } }] }));
+      const propagateGroups = [0, 1].map(index => device.createBindGroup({ layout: propagatePipeline.getBindGroupLayout(0), entries: useBitsetFloodFill ? [{ binding: 0, resource: { buffer: buffers.outsideLabels[index] } }, { binding: 1, resource: { buffer: buffers.outsideLabels[1 - index] } }, { binding: 2, resource: { buffer: buffers.occupied } }, { binding: 3, resource: { buffer: buffers.labelParams } }] : [{ binding: 0, resource: { buffer: buffers.outsideLabels[index] } }, { binding: 1, resource: { buffer: buffers.outsideLabels[1 - index] } }, { binding: 2, resource: { buffer: buffers.labelParams } }] }));
       const finalLabelIndex = (grid.width + grid.height) % 2;
       const metricGroup = device.createBindGroup({ layout: metricPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buffers.occupied } }, { binding: 1, resource: { buffer: buffers.centroid } }, { binding: 2, resource: { buffer: buffers.outsideLabels[finalLabelIndex] } }, { binding: 3, resource: { buffer: buffers.output } }, { binding: 4, resource: { buffer: buffers.params } }] });
       const previous = resources;
@@ -360,12 +430,12 @@ function createPersistentGpuFieldMetricsRunner(device, grid, shaderSource, pipel
     device.queue.writeBuffer(buffers.occupied, 0, flatten(normalized, 'occupiedMask', grid.wordCount));
     device.queue.writeBuffer(buffers.centroid, 0, flatten(normalized, 'centroidMask', grid.wordCount));
     device.queue.writeBuffer(buffers.params, 0, new Int32Array([count, grid.wordCount, grid.width, grid.height, grid.originX, grid.originY, 0, 0]));
-    device.queue.writeBuffer(buffers.labelParams, 0, new Uint32Array([count, cellCount, grid.width, grid.height]));
+    device.queue.writeBuffer(buffers.labelParams, 0, new Uint32Array([count, useBitsetFloodFill ? grid.wordCount : cellCount, grid.width, grid.height]));
     const encoder = device.createCommandEncoder();
-    const seed = encoder.beginComputePass(); seed.setPipeline(current.seedPipeline); seed.setBindGroup(0, current.seedGroup); seed.dispatchWorkgroups(Math.ceil(count * cellCount / 64)); seed.end();
+    const seed = encoder.beginComputePass(); seed.setPipeline(current.seedPipeline); seed.setBindGroup(0, current.seedGroup); seed.dispatchWorkgroups(Math.ceil(count * (useBitsetFloodFill ? grid.wordCount : cellCount) / 64)); seed.end();
     let labelIndex = 0;
     for (let pass = 0; pass < grid.width + grid.height; pass += 1) {
-      const compute = encoder.beginComputePass(); compute.setPipeline(current.propagatePipeline); compute.setBindGroup(0, current.propagateGroups[labelIndex]); compute.dispatchWorkgroups(Math.ceil(count * cellCount / 64)); compute.end(); labelIndex = 1 - labelIndex;
+      const compute = encoder.beginComputePass(); compute.setPipeline(current.propagatePipeline); compute.setBindGroup(0, current.propagateGroups[labelIndex]); compute.dispatchWorkgroups(Math.ceil(count * (useBitsetFloodFill ? grid.wordCount : cellCount) / 64)); compute.end(); labelIndex = 1 - labelIndex;
     }
     const metric = encoder.beginComputePass(); metric.setPipeline(current.metricPipeline); metric.setBindGroup(0, current.metricGroup); metric.dispatchWorkgroups(Math.ceil(count / 64)); metric.end(); encoder.copyBufferToBuffer(buffers.output, 0, buffers.readback, 0, Math.max(4, outputBytes));
     device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone(); if (lost) throw new Error('webgpu-device-lost');
@@ -385,16 +455,17 @@ export function createWebGpuFieldMetrics({ gpu = globalThis.navigator?.gpu, grid
       if (status.status !== 'available') return unavailable(status.reason, normalizedGrid, cpuEvaluateFieldMetrics(normalized, normalizedGrid));
       try {
         const device = await deviceCache.getDevice(), maxBinding = Number(device.limits?.maxStorageBufferBindingSize) || limits.maxStorageBufferBindingSize, maxBatch = Math.max(1, Math.floor(maxBinding / Math.max(normalizedGrid.wordCount * 8, 4))), metrics = [];
-        if (persistent && !persistentRunner) persistentRunner = createPersistentGpuFieldMetricsRunner(device, normalizedGrid, shaderSource, pipelineCache);
+        const useBitsetFloodFill = normalizedGrid.width % 32 === 0 && shaderSource === SHADER;
+        if (persistent && !persistentRunner) persistentRunner = createPersistentGpuFieldMetricsRunner(device, normalizedGrid, shaderSource, pipelineCache, useBitsetFloodFill);
         for (let offset = 0; offset < normalized.length; offset += maxBatch) {
           const batch = normalized.slice(offset, offset + maxBatch);
-          metrics.push(...(persistentRunner ? await persistentRunner.run(batch) : await runGpuBatch(device, batch, normalizedGrid, shaderSource, pipelineCache)));
+          metrics.push(...(persistentRunner ? await persistentRunner.run(batch) : await runGpuBatch(device, batch, normalizedGrid, shaderSource, pipelineCache, useBitsetFloodFill)));
         }
         if (verifyParity) {
           const cpu = cpuEvaluateFieldMetrics(normalized, normalizedGrid);
           if (JSON.stringify(metrics) !== JSON.stringify(cpu.metrics)) return unavailable('oracle-parity-mismatch', normalizedGrid, cpu);
         }
-        return Object.freeze({ schema: WEBGPU_FIELD_METRICS_SCHEMA, status: 'completed', backend: 'webgpu', metrics, candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, parity: verifyParity ? 'verified' : 'deferred' });
+        return Object.freeze({ schema: WEBGPU_FIELD_METRICS_SCHEMA, status: 'completed', backend: 'webgpu', metrics, candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, parity: verifyParity ? 'verified' : 'deferred', algorithm: useBitsetFloodFill ? 'word-bitset-flood-fill' : 'cell-label-flood-fill' });
       } catch (error) {
         persistentRunner?.reset(); persistentRunner = null; deviceCache.reset();
         return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid, cpuEvaluateFieldMetrics(normalized, normalizedGrid));
