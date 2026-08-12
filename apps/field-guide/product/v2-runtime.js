@@ -11,6 +11,9 @@ import { createWebGpuFrontierDeduplicator, cpuDeduplicateFrontierStates } from '
 
 const geometry = createDisplayGeometry({ kind: 'flatland', dimension: 2 });
 const rendererAdapter = createRendererAdapter();
+const rendererCapabilities = rendererAdapter.capabilities;
+const rendererBoundarySummary = `Renderer boundary: flatland=${rendererCapabilities.projections.flatland}; backend=${rendererCapabilities.backend || 'unavailable'}; sphere/hypersphere/cube/hypercube/simplex=vocabulary-only.`;
+const rendererBoundaryTitle = detail => `${detail} ${rendererBoundarySummary}`;
 const cpuOracle = async request => ({
   canonicalSignature: request.deterministicKey,
   placements: null,
@@ -67,6 +70,7 @@ window.__TDOTDH_V2_RUNTIME__ = Object.freeze({
   gpuFrontierDeduplicator,
   runCandidateParity,
   rendererAdapter,
+  rendererCapabilities,
   workerUrl: workerUrl.href,
   rendererRequest: cells => createRendererRequest({ geometry, cells }),
   acceleration: cpuOracleFirst.availability(),
@@ -75,7 +79,9 @@ window.__TDOTDH_V2_RUNTIME__ = Object.freeze({
 const status = document.querySelector('#v2RuntimeStatus');
 if (status) {
   status.textContent = 'V2 product · CPU oracle active · probing GPU navigation';
-  status.title = 'Chrome graphics acceleration is not sufficient evidence by itself; this label changes only after the page dispatches navigation kernels and verifies CPU parity.';
+  status.title = rendererBoundaryTitle('Chrome graphics acceleration is not sufficient evidence by itself; this label changes only after the page dispatches navigation kernels and verifies CPU parity.');
+  status.dataset.rendererBackend = rendererCapabilities.backend || 'unavailable';
+  status.dataset.rendererProjection = 'flatland';
   status.dataset.backend = 'cpu-oracle';
 }
 
@@ -104,28 +110,28 @@ void probeProductWorker().then(probe => {
   if (status) {
     status.dataset.workerGpu = probe.workerNavigatorGpu ? 'available' : 'unavailable';
     const unavailableStages = Object.entries(probe.stageAvailability || {}).filter(([, stage]) => stage?.status !== 'available').map(([name, stage]) => `${name}=${stage?.reason || stage?.status || 'unknown'}`);
-    status.title = `${status.title || 'v2 runtime'} Worker probe: ${probe.workerNavigatorGpu ? 'navigator.gpu exposed' : 'navigator.gpu unavailable'}; ${unavailableStages.length ? `stage availability: ${unavailableStages.join(', ')}` : 'all stages available'}.`;
+    status.title = rendererBoundaryTitle(`Worker probe: ${probe.workerNavigatorGpu ? 'navigator.gpu exposed' : 'navigator.gpu unavailable'}; ${unavailableStages.length ? `stage availability: ${unavailableStages.join(', ')}` : 'all stages available'}.`);
   }
 }).catch(error => {
-  if (status) { status.dataset.workerGpu = 'probe-failed'; status.title = `${status.title || 'v2 runtime'} Worker probe failed: ${error.message}`; }
+  if (status) { status.dataset.workerGpu = 'probe-failed'; status.title = rendererBoundaryTitle(`Worker probe failed: ${error.message}`); }
 });
 
 void gpuScorer.availability().then(async capability => {
   if (capability.status !== 'available') {
-    if (status) { status.textContent = `V2 product · CPU oracle active · WebGPU unavailable (${capability.reason || 'adapter unavailable'})`; status.title = 'This page did not obtain a usable WebGPU adapter. Chrome hardware acceleration can still be enabled independently.'; }
+    if (status) { status.textContent = `V2 product · CPU oracle active · WebGPU unavailable (${capability.reason || 'adapter unavailable'})`; status.title = rendererBoundaryTitle('This page did not obtain a usable WebGPU adapter. Chrome hardware acceleration can still be enabled independently.'); }
     return;
   }
   const execution = await probeWebGpuExecutionCapabilities({ deviceCache: gpuDeviceCache, requiredLimits: { maxStorageBufferBindingSize: 65536 } });
   window.__TDOTDH_V2_RUNTIME__ = Object.freeze({ ...window.__TDOTDH_V2_RUNTIME__, gpuExecution: execution });
   if (!execution.deviceAvailable) {
-    if (status) { status.textContent = `V2 product · CPU oracle active · WebGPU unavailable (${execution.reason})`; status.title = 'The page exposed a WebGPU adapter but could not create a usable device, so accelerated search remains disabled.'; }
+    if (status) { status.textContent = `V2 product · CPU oracle active · WebGPU unavailable (${execution.reason})`; status.title = rendererBoundaryTitle('The page exposed a WebGPU adapter but could not create a usable device, so accelerated search remains disabled.'); }
     return;
   }
   const values = [0, 1, 17, 255];
   const gpuResult = await gpuScorer.score(values);
   const parity = gpuResult.status === 'completed' && JSON.stringify(gpuResult.scores) === JSON.stringify(cpuCandidateScores(values));
   if (!parity || !status) {
-    if (status) { status.textContent = 'V2 product · CPU oracle active · WebGPU scorer parity failed'; status.title = 'A WebGPU dispatch completed but did not match the CPU oracle, so the product refused to use it.'; }
+    if (status) { status.textContent = 'V2 product · CPU oracle active · WebGPU scorer parity failed'; status.title = rendererBoundaryTitle('A WebGPU dispatch completed but did not match the CPU oracle, so the product refused to use it.'); }
     return;
   }
   const candidates = [
@@ -154,19 +160,19 @@ void gpuScorer.availability().then(async capability => {
     && JSON.stringify(dedupResult.keep) === JSON.stringify(dedupCpu.keep);
   if (prefilterParity && targetPoolParity && dedupParity) {
     status.textContent = 'V2 product · GPU smoke parity verified · real search receipt pending';
-    status.title = 'Startup smoke kernels for scoring, occupancy prefiltering, target navigation, and deduplication matched the CPU oracle. This is capability evidence, not a full-search performance claim.';
+    status.title = rendererBoundaryTitle('Startup smoke kernels for scoring, occupancy prefiltering, target navigation, and deduplication matched the CPU oracle. This is capability evidence, not a full-search performance claim.');
     status.dataset.backend = 'webgpu';
   } else if (prefilterParity && targetPoolParity) {
     status.textContent = `V2 product · GPU target navigation verified · dedup unavailable (${dedupResult.reason || 'parity failed'})`;
-    status.title = 'GPU scorer, occupancy prefilter, and target navigation passed parity, but frontier deduplication did not; the product kept CPU exact-signature admission in control.';
+    status.title = rendererBoundaryTitle('GPU scorer, occupancy prefilter, and target navigation passed parity, but frontier deduplication did not; the product kept CPU exact-signature admission in control.');
     status.dataset.backend = 'cpu-oracle';
   } else if (prefilterParity) {
     status.textContent = `V2 product · GPU scorer/prefilter verified · target navigation unavailable (${targetPoolResult.reason || 'parity failed'})`;
-    status.title = 'GPU scorer and occupancy prefilter passed parity, but target navigation did not; the product kept the CPU oracle in control.';
+    status.title = rendererBoundaryTitle('GPU scorer and occupancy prefilter passed parity, but target navigation did not; the product kept the CPU oracle in control.');
     status.dataset.backend = 'cpu-oracle';
   } else {
     status.textContent = 'V2 product · CPU oracle active · GPU navigation parity failed';
-    status.title = 'A GPU navigation dispatch did not match the CPU oracle, so the product refused to use the accelerated result.';
+    status.title = rendererBoundaryTitle('A GPU navigation dispatch did not match the CPU oracle, so the product refused to use the accelerated result.');
     status.dataset.backend = 'cpu-oracle';
   }
 }).catch(() => {});
