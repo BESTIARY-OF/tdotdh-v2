@@ -4,17 +4,35 @@ function inGrid(x, y, grid) {
   return x >= grid.originX && x < grid.originX + grid.width && y >= grid.originY && y < grid.originY + grid.height;
 }
 
-function flattenCells(items, property) {
-  const offsets = [], values = [];
+function encodeCells(cells) {
+  const values = new Int32Array(cells.length * 2);
+  for (let index = 0; index < cells.length; index += 1) {
+    values[index * 2] = cells[index].x;
+    values[index * 2 + 1] = cells[index].y;
+  }
+  return values;
+}
+
+function flattenCells(items, property, caches = null) {
+  const offsets = [];
   let offset = 0;
   for (const item of items) {
     offsets.push(offset);
-    for (const cell of item[property]) values.push(cell.x, cell.y);
-    // The shader indexes flattened coordinate pairs, so offsets are measured
-    // in i32 values rather than logical cells.
     offset += item[property].length * 2;
   }
-  return { offsets: Object.freeze(offsets), values: Int32Array.from(values) };
+  const values = new Int32Array(offset);
+  let writeOffset = 0;
+  for (const item of items) {
+    const cells = item[property];
+    const cached = caches?.cells?.get(cells);
+    const encoded = cached || encodeCells(cells);
+    if (!cached) caches?.cells?.set(cells, encoded);
+    values.set(encoded, writeOffset);
+    writeOffset += encoded.length;
+  }
+  // The shader indexes flattened coordinate pairs, so offsets are measured
+  // in i32 values rather than logical cells.
+  return { offsets: Object.freeze(offsets), values };
 }
 
 function createMask(cells, grid) {
@@ -27,9 +45,14 @@ function createMask(cells, grid) {
   return mask;
 }
 
-function flattenMasks(items, grid) {
+function flattenMasks(items, grid, caches = null) {
   const flat = new Uint32Array(items.length * grid.wordCount);
-  items.forEach((item, index) => flat.set(createMask(item.fieldCells, grid), index * grid.wordCount));
+  items.forEach((item, index) => {
+    const cached = caches?.masks?.get(item.fieldCells);
+    const mask = cached || createMask(item.fieldCells, grid);
+    if (!cached) caches?.masks?.set(item.fieldCells, mask);
+    flat.set(mask, index * grid.wordCount);
+  });
   return flat;
 }
 
@@ -39,12 +62,12 @@ function flattenMasks(items, grid) {
  * side; GPU stages consume these typed arrays and preserve item order through
  * candidateOffset and the per-item metadata rows.
  */
-export function createWebGpuFrontierBatchLayout(items, grid) {
+export function createWebGpuFrontierBatchLayout(items, grid, caches = null) {
   if (!Array.isArray(items) || items.length === 0) throw new TypeError('frontier batch layout items must be non-empty');
   if (!grid || !Number.isSafeInteger(grid.width) || !Number.isSafeInteger(grid.height) || !Number.isSafeInteger(grid.wordCount)) throw new TypeError('frontier batch layout grid is invalid');
-  const targets = flattenCells(items, 'targetCells');
-  const pieces = flattenCells(items, 'pieceCells');
-  const fieldMasks = flattenMasks(items, grid);
+  const targets = flattenCells(items, 'targetCells', caches);
+  const pieces = flattenCells(items, 'pieceCells', caches);
+  const fieldMasks = flattenMasks(items, grid, caches);
   const metas = [];
   items.forEach((item, index) => {
     const lock = item.lock || { enabled: 0, x: 0, y: 0 };

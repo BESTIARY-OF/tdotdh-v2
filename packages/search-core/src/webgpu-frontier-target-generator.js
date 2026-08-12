@@ -1,7 +1,7 @@
 import { probeWebGpuCapabilities } from './webgpu-capability-probe.js';
 import { DEFAULT_FRONTIER_GRID } from './webgpu-frontier-validator.js';
 import { createWebGpuDeviceCache } from './webgpu-device-cache.js';
-import { createWebGpuFrontierBatchLayout } from './webgpu-frontier-batch-layout.js?v=20260810-layout3';
+import { createWebGpuFrontierBatchLayout } from './webgpu-frontier-batch-layout.js?v=20260812-layout4';
 
 export const WEBGPU_FRONTIER_TARGET_GENERATOR_SCHEMA = 'tdotdh.webgpu-frontier-target-generator.v0';
 export const MAX_FRONTIER_TARGET_GENERATION_CANDIDATES = 16384;
@@ -245,6 +245,7 @@ function assertNotCancelled(isCancelled) {
 
 function createPersistentGpuTargetRunner(device, grid, shaderSource) {
   const usage = globalThis.GPUBufferUsage, mapMode = globalThis.GPUMapMode;
+  const layoutCaches = { cells: new WeakMap(), masks: new WeakMap() };
   let resources = null, retiredResources = [], residentSnapshots = new Set(), dispatchCount = 0;
   const destroyResources = bundle => { if (bundle) for (const buffer of Object.values(bundle.buffers)) buffer.destroy(); };
   const destroy = () => {
@@ -256,7 +257,7 @@ function createPersistentGpuTargetRunner(device, grid, shaderSource) {
     retiredResources = [];
   };
   const ensure = (normalized) => {
-    const layout = createWebGpuFrontierBatchLayout(normalized.items, grid);
+    const layout = createWebGpuFrontierBatchLayout(normalized.items, grid, layoutCaches);
     const rows = nextCapacity(Math.max(1, normalized.candidateCount));
     const items = nextCapacity(Math.max(1, normalized.items.length));
     const targets = nextCapacity(Math.max(1, layout.targetValues.length));
