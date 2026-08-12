@@ -259,11 +259,10 @@ function createPersistentGpuDedupRunner(device, shaderSource) {
     device.queue.writeBuffer(buffers.params, 0, new Uint32Array([rows.length, current.tableCapacity - 1, digestRef.offsetWords, digestRef.strideWords]));
     const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
     pass.setPipeline(current.residentPipeline); pass.setBindGroup(0, residentBindGroup); pass.dispatchWorkgroups(Math.ceil(rows.length / FRONTIER_DEDUP_WORKGROUP_SIZE)); pass.end();
-    device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
-    const finalizeEncoder = device.createCommandEncoder(), finalizePass = finalizeEncoder.beginComputePass();
+    const finalizePass = encoder.beginComputePass();
     finalizePass.setPipeline(current.residentFinalizePipeline); finalizePass.setBindGroup(0, residentFinalizeGroup); finalizePass.dispatchWorkgroups(Math.ceil(rows.length / FRONTIER_DEDUP_WORKGROUP_SIZE)); finalizePass.end();
-    finalizeEncoder.copyBufferToBuffer(buffers.keep, 0, buffers.readback, 0, rows.length * 4);
-    device.queue.submit([finalizeEncoder.finish()]); await device.queue.onSubmittedWorkDone();
+    encoder.copyBufferToBuffer(buffers.keep, 0, buffers.readback, 0, rows.length * 4);
+    device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
     await buffers.readback.mapAsync(mapMode.READ); const result = Array.from(new Uint32Array(buffers.readback.getMappedRange().slice(0, rows.length * 4))); buffers.readback.unmap();
     return result;
   };
