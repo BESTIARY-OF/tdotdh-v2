@@ -25,6 +25,7 @@ function key(x, y) { return `${x},${y}`; }
 function adjacent(p) { return [{ x: p.x + 1, y: p.y }, { x: p.x - 1, y: p.y }, { x: p.x, y: p.y + 1 }, { x: p.x, y: p.y - 1 }]; }
 const frontierMaskCache = new WeakMap();
 const frontierStateInputCache = new WeakMap();
+const frontierCellsCache = new WeakMap();
 function cachedFrontierMask(cells) {
   let mask = frontierMaskCache.get(cells);
   if (!mask) { mask = createFrontierMaskFromCells(cells); frontierMaskCache.set(cells, mask); }
@@ -43,6 +44,34 @@ function frontierInputForState(state, centroidId) {
   input = Object.freeze({ parentCells, parentMask: cachedFrontierMask(parentCells), centroidCells, centroidMask: cachedFrontierMask(centroidCells), ringCells, ringMask: cachedFrontierMask(ringCells) });
   inputs.set(centroidId, input);
   return input;
+}
+function frontierCellsForState(state) {
+  let frontier = frontierCellsCache.get(state);
+  if (frontier) return frontier;
+  frontier = new Map();
+  for (const cellKey of state.field) {
+    const [x, y] = cellKey.split(',').map(Number);
+    for (const next of adjacent({ x, y })) {
+      const nextKey = key(next.x, next.y);
+      if (!state.field.has(nextKey)) frontier.set(nextKey, next);
+    }
+  }
+  frontierCellsCache.set(state, frontier);
+  return frontier;
+}
+function frontierCellsAfterCandidate(state, candidate) {
+  const frontier = new Map(frontierCellsForState(state));
+  const nextField = new Set(state.field);
+  for (const cell of candidate.cells) {
+    const cellKey = key(cell.x, cell.y);
+    nextField.add(cellKey);
+    frontier.delete(cellKey);
+  }
+  for (const cell of candidate.cells) for (const next of adjacent(cell)) {
+    const nextKey = key(next.x, next.y);
+    if (!nextField.has(nextKey)) frontier.set(nextKey, next);
+  }
+  return frontier;
 }
 function unionFrontierMasks(parentMask, candidateMask) {
   const occupiedMask = new Uint32Array(parentMask.length);
@@ -1297,13 +1326,16 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       if (field.size !== cellCount) return null;
       const bounds = fieldMetrics(placements, centroidId);
       const score = Number(savedState.score) || 0;
-      beam.push({ placements, field, remaining: pieces.filter(piece => !ids.has(piece.id)), bounds, score, rankScore: Number.isFinite(savedState.rankScore) ? Number(savedState.rankScore) : canonicalFrontierRankScore(score), hintMatches: Number(savedState.hintMatches) || 0, centroidFamily: bounds.centroidFamily, centroidFamilyId: bounds.centroidFamilyId, centroidSeed: bounds.centroidSeed, gpuState: null });
+      const restoredState = { placements, field, remaining: pieces.filter(piece => !ids.has(piece.id)), bounds, score, rankScore: Number.isFinite(savedState.rankScore) ? Number(savedState.rankScore) : canonicalFrontierRankScore(score), hintMatches: Number(savedState.hintMatches) || 0, centroidFamily: bounds.centroidFamily, centroidFamilyId: bounds.centroidFamilyId, centroidSeed: bounds.centroidSeed, gpuState: null };
+      frontierCellsCache.set(restoredState, frontierCellsForState(restoredState));
+      beam.push(restoredState);
     }
     return { beam, depth: Math.max(0, Number(checkpoint.depth) || 0), nodeOffset: Math.max(0, Number(checkpoint.nodeOffset) || 0), randomState: Number.isSafeInteger(checkpoint.randomState) ? checkpoint.randomState : null };
   };
   const restored = restoreCheckpoint(options.resumeCheckpoint);
   if (restored?.randomState != null) random.restore(restored.randomState);
   const seed = { placements: [seedPlacement], field: new Set(seedCells.map(c => key(c.x, c.y))), remaining: pieces.filter(p => p.id !== centroidId), bounds: fieldMetrics([seedPlacement], centroidId), hintMatches: 0 }, seedBranches = restored ? [] : searchStrategy === 'breadth' && !gpuFirstSearch ? await lockedSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, centroidRing, positionLocks, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; }) : targetFamily ? await targetSeedBranches(pieces, centroidId, seedPlacement, seedOrigin, seedSet, targetSeed, positionLocks, random, fieldMetricsAdapter, receipt => { fieldMetricsReceipt = receipt; }) : [];
+  frontierCellsCache.set(seed, frontierCellsForState(seed));
   if (!restored && targetFamily && (!targetSeed || !seedBranches.length)) targetFamily = null;
   let navigationPlanReceipt = { status: 'cpu-oracle', backend: 'cpu-oracle', parity: 'oracle', rowCount: 0, selectedCount: 0, planCount: 0 };
   let residentDecodeReceipt = null;
@@ -1375,11 +1407,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
       reason: 'redundant-with-gpu-target-generation-input',
     };
     for (const [planIndex, plan] of beamPlans.entries()) {
-      const state = plan.state, openCentroid = [...centroidRing].filter(ringKey => !state.field.has(ringKey)), frontier = new Map();
-      for (const cellKey of state.field) {
-        const [x, y] = cellKey.split(',').map(Number);
-        for (const next of adjacent({ x, y })) if (!state.field.has(key(next.x, next.y))) frontier.set(key(next.x, next.y), next);
-      }
+      const state = plan.state, openCentroid = [...centroidRing].filter(ringKey => !state.field.has(ringKey)), frontier = frontierCellsForState(state);
       const gpuPool = gpuTargetPools?.[planIndex], gpuRing = gpuPool ? new Set(gpuPool.ringCells.map(cell => key(cell.x, cell.y))) : null, gpuFrontier = gpuPool ? new Set(gpuPool.frontierCells.map(cell => key(cell.x, cell.y))) : null;
       const ringTargets = openCentroid.map(ringKey => frontier.get(ringKey)).filter(cell => cell && (!gpuRing || gpuRing.has(key(cell.x, cell.y)))), frontierTargets = [...frontier.values()].filter(cell => !gpuFrontier || gpuFrontier.has(key(cell.x, cell.y)));
       plan.targetPool = ringTargets.length ? ringTargets : frontierTargets;
@@ -1599,7 +1627,9 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         }
         const familyId = metrics.centroidFamilyId;
         const score = option.score + (targetFamily && targetSeedCompatible(metrics.centroidSeed, targetSeed) ? -220 : 0);
-        nextBeam.push({ placements, field, remaining: state.remaining.filter(p => p.id !== option.piece.id), bounds: metrics, score, rankScore: canonicalFrontierRankScore(score), hintMatches: option.hintMatches, centroidFamily: metrics.centroidFamily, centroidFamilyId: familyId, centroidSeed: metrics.centroidSeed, gpuState: option.gpuState || null });
+        const nextState = { placements, field, remaining: state.remaining.filter(p => p.id !== option.piece.id), bounds: metrics, score, rankScore: canonicalFrontierRankScore(score), hintMatches: option.hintMatches, centroidFamily: metrics.centroidFamily, centroidFamilyId: familyId, centroidSeed: metrics.centroidSeed, gpuState: option.gpuState || null };
+        frontierCellsCache.set(nextState, frontierCellsAfterCandidate(state, option.candidate));
+        nextBeam.push(nextState);
       }
     }
     const familyBuckets = new Map();
