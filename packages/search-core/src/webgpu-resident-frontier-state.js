@@ -218,6 +218,7 @@ function destroyResources(resources) { if (resources) Object.values(resources.bu
 async function readback(buffer, bytes) { await buffer.mapAsync(GPUMapMode.READ); const values = Array.from(new Uint32Array(buffer.getMappedRange().slice(0, bytes))); buffer.unmap(); return values; }
 
 async function dispatch(device, resources, candidates, pieceIds, outputIndices, grid, { readLabels = true } = {}) {
+  const dispatchStarted = performance.now();
   const { buffers, pipeline, bindGroup, labelsPerState } = resources, count = candidates.length, labelBytes = count * labelsPerState * 4, maskBytes = count * grid.wordCount * 4, hashBytes = count * 4, digestBytes = hashBytes * 2;
   // Resident children read their parent labels from residentParents. Roots
   // read the explicit seed buffer; do not write and read residentParents in
@@ -234,6 +235,7 @@ async function dispatch(device, resources, candidates, pieceIds, outputIndices, 
   device.queue.writeBuffer(buffers.parentStateIndices, 0, Uint32Array.from(parentStateIndices));
   device.queue.writeBuffer(buffers.outputStateIndices, 0, Uint32Array.from(outputIndices));
   device.queue.writeBuffer(buffers.params, 0, new Int32Array([count, grid.wordCount, pieceIds.length, grid.width, grid.height, grid.originX, grid.originY, 0]));
+  const uploadMs = performance.now() - dispatchStarted;
   const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
   pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end();
   if (readLabels) {
@@ -241,14 +243,16 @@ async function dispatch(device, resources, candidates, pieceIds, outputIndices, 
     encoder.copyBufferToBuffer(buffers.canonicalLabels, 0, buffers.canonicalReadback, 0, labelBytes);
   }
   encoder.copyBufferToBuffer(buffers.digests, 0, buffers.digestReadback, 0, digestBytes);
+  const beforeSubmit = performance.now();
   device.queue.submit([encoder.finish()]);
+  const submitMs = performance.now() - beforeSubmit;
   const [nextLabels, canonicalLabels, digestValues] = await Promise.all([
     readLabels ? readback(buffers.nextReadback, labelBytes) : Promise.resolve([]),
     readLabels ? readback(buffers.canonicalReadback, labelBytes) : Promise.resolve([]),
     readback(buffers.digestReadback, digestBytes),
-  ]), absoluteHashes = [], canonicalHashes = [];
+  ]), readbackMs = performance.now() - beforeSubmit - submitMs, absoluteHashes = [], canonicalHashes = [];
   for (let index = 0; index < count; index++) { absoluteHashes.push(digestValues[index * 2]); canonicalHashes.push(digestValues[index * 2 + 1]); }
-  return { nextLabels, canonicalLabels, absoluteHashes, canonicalHashes, readback: readLabels ? 'full-labels-and-digests' : 'state-digests-only' };
+  return { nextLabels, canonicalLabels, absoluteHashes, canonicalHashes, readback: readLabels ? 'full-labels-and-digests' : 'state-digests-only', dispatchTimings: { uploadMs: Number(uploadMs.toFixed(2)), submitMs: Number(submitMs.toFixed(2)), readbackMs: Number(readbackMs.toFixed(2)), totalMs: Number((performance.now() - dispatchStarted).toFixed(2)) } };
 }
 
 /**
@@ -262,7 +266,8 @@ export function createWebGpuResidentFrontierState({ gpu = globalThis.navigator?.
   if (!Number.isSafeInteger(batchCapacity) || batchCapacity <= 0 || batchCapacity > capacity) throw new TypeError('resident frontier batch capacity is invalid');
   const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits }, residentDeviceCache = deviceCache || createWebGpuDeviceCache({ gpu, requiredLimits: limits });
   let resources = null, pieceIds = null, epoch = 0, residentCount = 0, layer = null;
-  const reset = () => { destroyResources(resources); resources = null; pieceIds = null; epoch = 0; residentCount = 0; layer = null; residentDeviceCache.reset(); };
+  let dispatchTimingTotals = { calls: 0, uploadMs: 0, submitMs: 0, readbackMs: 0, totalMs: 0 };
+  const reset = () => { destroyResources(resources); resources = null; pieceIds = null; epoch = 0; residentCount = 0; layer = null; dispatchTimingTotals = { calls: 0, uploadMs: 0, submitMs: 0, readbackMs: 0, totalMs: 0 }; residentDeviceCache.reset(); };
   const availability = async () => { const probe = await probeWebGpuCapabilities({ gpu, requiredLimits: limits }); return probe.adapterAvailable && probe.requiredLimitsSatisfied ? Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'available', backend: 'webgpu', capacity, batchCapacity, grid: normalizedGrid }) : Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'unavailable', backend: 'webgpu', reason: probe.adapterAvailable ? 'webgpu-required-limits-unsatisfied' : 'webgpu-adapter-unavailable', capacity, batchCapacity, grid: normalizedGrid }); };
   const beginLayer = () => { if (layer) throw new Error('resident frontier layer is already active'); layer = { nextSlot: 0, pieceIds: null, pendingEpoch: epoch + 1 }; return Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'layer-open', epoch, nextEpoch: layer.pendingEpoch }); };
   const commitLayer = () => { if (!layer) return Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'idle', epoch }); const committed = Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'layer-committed', epoch: layer.pendingEpoch, outputCount: layer.nextSlot }); epoch = layer.pendingEpoch; residentCount = layer.nextSlot; layer = null; if (resources) { const old = resources.buffers.residentParents; resources.buffers.residentParents = resources.buffers.residentNext; resources.buffers.residentNext = old; const bindingBuffers = [resources.buffers.seedParents, resources.buffers.candidateMasks, resources.buffers.candidatePieceIndices, resources.buffers.remainingMasks, resources.buffers.nextLabels, resources.buffers.canonicalLabels, resources.buffers.digests, resources.buffers.params, resources.buffers.residentParents, resources.buffers.residentNext, resources.buffers.residentCanonical, resources.buffers.parentStateIndices, resources.buffers.outputStateIndices]; resources.bindGroup = resources.device.createBindGroup({ layout: resources.pipeline.getBindGroupLayout(0), entries: bindingBuffers.map((buffer, binding) => ({ binding, resource: { buffer } })) }); } return committed; };
@@ -288,14 +293,14 @@ export function createWebGpuResidentFrontierState({ gpu = globalThis.navigator?.
         if (!resources) { resources = makeResources(device, capacity, batchCapacity, pieceIds.length, normalizedGrid, shaderSource); resources.device = device; }
         if (resources.pieceCount !== pieceIds.length || resources.grid.wordCount !== normalizedGrid.wordCount) { reset(); return unavailable('resident-frontier-shape-changed', fallbackCpu(), { parentReference }); }
         for (const candidate of normalized) if (candidate.parentStateIndex != null && candidate.parentStateIndex >= residentCount) return unavailable('resident-parent-reference-not-in-input-layer', fallbackCpu(), { capacity, epoch: layer.pendingEpoch, residentCount, parentReference });
-        const nextLabels = [], canonicalLabels = [], absoluteHashes = [], canonicalHashes = [], residentStateIndices = [], append = (target, values) => { for (const value of values) target.push(value); };
-        for (let offset = 0; offset < normalized.length; offset += batchCapacity) { const batch = normalized.slice(offset, offset + batchCapacity), outputIndices = batch.map((_, index) => layer.nextSlot + offset + index); const result = await dispatch(device, resources, batch, pieceIds, outputIndices, normalizedGrid, { readLabels: verifyParity }); append(nextLabels, result.nextLabels); append(canonicalLabels, result.canonicalLabels); append(absoluteHashes, result.absoluteHashes); append(canonicalHashes, result.canonicalHashes); append(residentStateIndices, outputIndices); }
+        const nextLabels = [], canonicalLabels = [], absoluteHashes = [], canonicalHashes = [], residentStateIndices = [], dispatchTimings = { calls: 0, uploadMs: 0, submitMs: 0, readbackMs: 0, totalMs: 0 }, append = (target, values) => { for (const value of values) target.push(value); };
+        for (let offset = 0; offset < normalized.length; offset += batchCapacity) { const batch = normalized.slice(offset, offset + batchCapacity), outputIndices = batch.map((_, index) => layer.nextSlot + offset + index); const result = await dispatch(device, resources, batch, pieceIds, outputIndices, normalizedGrid, { readLabels: verifyParity }); append(nextLabels, result.nextLabels); append(canonicalLabels, result.canonicalLabels); append(absoluteHashes, result.absoluteHashes); append(canonicalHashes, result.canonicalHashes); append(residentStateIndices, outputIndices); for (const name of ['uploadMs', 'submitMs', 'readbackMs', 'totalMs']) { dispatchTimings[name] += result.dispatchTimings?.[name] || 0; dispatchTimingTotals[name] += result.dispatchTimings?.[name] || 0; } dispatchTimings.calls += 1; dispatchTimingTotals.calls += 1; }
         if (verifyParity) {
           const actual = { nextLabels, canonicalLabels, absoluteHashes, canonicalHashes }, expected = { nextLabels: cpu.nextLabels, canonicalLabels: cpu.canonicalLabels, absoluteHashes: cpu.absoluteHashes, canonicalHashes: cpu.canonicalHashes };
           if (!equalArrays(nextLabels, cpu.nextLabels) || !equalArrays(canonicalLabels, cpu.canonicalLabels) || !equalArrays(absoluteHashes, cpu.absoluteHashes) || !equalArrays(canonicalHashes, cpu.canonicalHashes)) return unavailable(parityMismatchReason(actual, expected, { labelsPerState: cpu.pieceCount * cpu.wordCount, pieceCount: cpu.pieceCount, wordCount: cpu.wordCount, parentStateIndices: normalized.map(candidate => candidate.parentStateIndex), candidatePieceIndices: normalized.map(candidate => candidate.candidatePieceIndex), seedParents: normalized.map(candidate => candidate.parentLabelMasks), candidateMasks: normalized.map(candidate => candidate.candidateMask) }), cpu, { capacity, epoch: layer.pendingEpoch, parentReference });
         }
         layer.nextSlot += normalized.length;
-        return Object.freeze({ schema: WEBGPU_LABELED_FRONTIER_STATE_SCHEMA, status: 'completed', backend: 'webgpu', pieceIds, nextLabels, canonicalLabels, absoluteHashes, canonicalHashes, candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, pieceCount: pieceIds.length, parity: verifyParity ? 'verified' : 'deferred', persistent: true, resident: true, residentEpoch: layer.pendingEpoch, residentStateIndices, bufferCapacity: capacity, batchCapacity, parentReference, readback: verifyParity ? 'full-labels-and-digests' : 'state-digests-only' });
+        return Object.freeze({ schema: WEBGPU_LABELED_FRONTIER_STATE_SCHEMA, status: 'completed', backend: 'webgpu', pieceIds, nextLabels, canonicalLabels, absoluteHashes, canonicalHashes, candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, pieceCount: pieceIds.length, parity: verifyParity ? 'verified' : 'deferred', persistent: true, resident: true, residentEpoch: layer.pendingEpoch, residentStateIndices, bufferCapacity: capacity, batchCapacity, parentReference, readback: verifyParity ? 'full-labels-and-digests' : 'state-digests-only', dispatchTimings, dispatchTimingTotals: { ...dispatchTimingTotals } });
       } catch (error) { reset(); return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, fallbackCpu(), { parentReference }); }
     },
   });

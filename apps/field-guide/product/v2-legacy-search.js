@@ -734,7 +734,7 @@ async function evaluateFrontierStateAcrossBeam(jobs, frontierState, onState = ()
         else if (Array.isArray(result.nextLabels) && result.nextLabels.length >= labelStart + labelsPerCandidate) Object.assign(statePayload, { nextLabels: result.nextLabels.slice(labelStart, labelStart + labelsPerCandidate), ...(canonicalLabels ? { canonicalLabels } : {}) });
         jobs[item.jobIndex].entries[item.entryIndex] = { ...item.entry, gpuState: statePayload };
       }
-      onState({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, persistent: result.persistent === true, resident: result.navigator?.status === 'resident', navigatorEpoch: result.navigator?.epoch, bufferCapacity: result.bufferCapacity, candidateCount: pending.length, batch: 'beam', parentReference: result.parentReference });
+      onState({ status: 'used', backend: result.backend || 'compute-shader', parity: result.parity, persistent: result.persistent === true, resident: result.navigator?.status === 'resident', navigatorEpoch: result.navigator?.epoch, bufferCapacity: result.bufferCapacity, candidateCount: pending.length, batch: 'beam', parentReference: result.parentReference, ...(result.dispatchTimings ? { dispatchTimings: result.dispatchTimings } : {}), ...(result.dispatchTimingTotals ? { dispatchTimingTotals: result.dispatchTimingTotals } : {}) });
       return jobs;
     }
     onState({ status: 'fallback', reason: result?.reason || 'frontier-state-unavailable', candidateCount: pending.length, batch: 'beam' });
