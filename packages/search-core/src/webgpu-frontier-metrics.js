@@ -194,6 +194,7 @@ function flattenMasks(candidates, property, wordCount) {
 }
 
 async function runGpuBatch(device, normalized, grid, shaderSource, pipelineCache) {
+  const dispatchStarted = performance.now();
   const count = normalized.length, maskBytes = Math.max(4, count * grid.wordCount * 4), outputBytes = Math.max(4, count * FRONTIER_METRIC_COUNT * 4);
   const buffers = {
     parent: device.createBuffer({ size: maskBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
@@ -205,24 +206,33 @@ async function runGpuBatch(device, normalized, grid, shaderSource, pipelineCache
     readback: device.createBuffer({ size: outputBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }),
   };
   try {
+    const uploadStarted = performance.now();
     device.queue.writeBuffer(buffers.parent, 0, flattenMasks(normalized, 'parentMask', grid.wordCount));
     device.queue.writeBuffer(buffers.candidate, 0, flattenMasks(normalized, 'candidateMask', grid.wordCount));
     device.queue.writeBuffer(buffers.centroid, 0, flattenMasks(normalized, 'centroidMask', grid.wordCount));
     device.queue.writeBuffer(buffers.ring, 0, flattenMasks(normalized, 'ringMask', grid.wordCount));
     const bounds = normalized[0].bounds;
     device.queue.writeBuffer(buffers.params, 0, new Int32Array([count, grid.wordCount, grid.width, grid.height, grid.originX, grid.originY, bounds.minX, bounds.maxX, bounds.minY, bounds.maxY, 0, 0]));
+    const uploadMs = performance.now() - uploadStarted;
     const pipeline = pipelineCache.get(device, shaderSource);
     const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
       { binding: 0, resource: { buffer: buffers.parent } }, { binding: 1, resource: { buffer: buffers.candidate } }, { binding: 2, resource: { buffer: buffers.centroid } }, { binding: 3, resource: { buffer: buffers.ring } }, { binding: 4, resource: { buffer: buffers.output } }, { binding: 5, resource: { buffer: buffers.params } },
     ] });
     const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.dispatchWorkgroups(Math.ceil(count / 64)); pass.end(); encoder.copyBufferToBuffer(buffers.output, 0, buffers.readback, 0, outputBytes);
+    const submitStarted = performance.now();
     device.queue.submit([encoder.finish()]);
+    const submitMs = performance.now() - submitStarted;
     // mapAsync is the explicit result boundary here: it waits for the copy to
     // become visible, so an additional queue-wide completion wait only adds a
     // host round trip to every metric batch.
+    const readbackStarted = performance.now();
     await buffers.readback.mapAsync(GPUMapMode.READ);
     const values = Array.from(new Int32Array(buffers.readback.getMappedRange().slice(0, count * FRONTIER_METRIC_COUNT * 4))); buffers.readback.unmap();
-    return Array.from({ length: count }, (_, index) => values.slice(index * FRONTIER_METRIC_COUNT, (index + 1) * FRONTIER_METRIC_COUNT));
+    const readbackMs = performance.now() - readbackStarted;
+    return {
+      metrics: Array.from({ length: count }, (_, index) => values.slice(index * FRONTIER_METRIC_COUNT, (index + 1) * FRONTIER_METRIC_COUNT)),
+      dispatchTimings: { uploadMs, submitMs, readbackMs, totalMs: performance.now() - dispatchStarted },
+    };
   } finally { Object.values(buffers).forEach(buffer => buffer.destroy()); }
 }
 
@@ -241,16 +251,21 @@ export function createWebGpuFrontierMetrics({ gpu = globalThis.navigator?.gpu, g
       if (status.status !== 'available') return unavailable(status.reason, normalizedGrid, cpuEvaluateFrontierMetrics(normalized, normalizedGrid));
       let cpu = null;
       try {
-        const device = await deviceCache.getDevice(), maxBinding = Number(device.limits?.maxStorageBufferBindingSize) || limits.maxStorageBufferBindingSize, maxBatch = Math.max(1, Math.floor(maxBinding / Math.max(normalizedGrid.wordCount * 4, 4))), metrics = [], gpuJobs = [];
+        const device = await deviceCache.getDevice(), maxBinding = Number(device.limits?.maxStorageBufferBindingSize) || limits.maxStorageBufferBindingSize, maxBatch = Math.max(1, Math.floor(maxBinding / Math.max(normalizedGrid.wordCount * 4, 4))), metrics = [], gpuJobs = [], dispatchTimings = { calls: 0, uploadMs: 0, submitMs: 0, readbackMs: 0, totalMs: 0 };
         // Submit all eligible batches before computing the CPU oracle. The
         // oracle remains the exact parity gate, but its synchronous work can
         // overlap the device queue's submitted metric dispatches.
         for (let offset = 0; offset < normalized.length; offset += maxBatch) gpuJobs.push(runGpuBatch(device, normalized.slice(offset, offset + maxBatch), normalizedGrid, shaderSource, pipelineCache));
         cpu = cpuEvaluateFrontierMetrics(normalized, normalizedGrid);
-        for (const job of gpuJobs) metrics.push(...await job);
+        for (const job of gpuJobs) {
+          const result = await job;
+          metrics.push(...result.metrics);
+          dispatchTimings.calls += 1;
+          for (const name of ['uploadMs', 'submitMs', 'readbackMs', 'totalMs']) dispatchTimings[name] += result.dispatchTimings[name];
+        }
         const parity = JSON.stringify(metrics) === JSON.stringify(cpu.metrics);
         if (!parity) return unavailable('oracle-parity-mismatch', normalizedGrid, cpu);
-        return Object.freeze({ schema: WEBGPU_FRONTIER_METRICS_SCHEMA, status: 'completed', backend: 'webgpu', metrics, candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, parity: 'verified' });
+        return Object.freeze({ schema: WEBGPU_FRONTIER_METRICS_SCHEMA, status: 'completed', backend: 'webgpu', metrics, candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, parity: 'verified', dispatchTimings: Object.freeze(Object.fromEntries(Object.entries(dispatchTimings).map(([name, value]) => [name, name === 'calls' ? value : Number(value.toFixed(2))]))) });
       } catch (error) { deviceCache.reset(); return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, normalizedGrid, cpu || cpuEvaluateFrontierMetrics(normalized, normalizedGrid)); }
     },
   });
