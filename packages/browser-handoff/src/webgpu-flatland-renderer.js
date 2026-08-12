@@ -69,6 +69,7 @@ export function createWebGpuFlatlandRenderer({ runtime = globalThis } = {}) {
   }
 
   async function render({ canvas, cells, bounds } = {}) {
+    const startedAt = typeof runtime.performance?.now === 'function' ? runtime.performance.now() : Date.now();
     const normalized = normalizeCells(cells);
     if (!canvas?.getContext) return unavailable('canvas-unavailable');
     const { device, reason } = await getDevice();
@@ -110,7 +111,8 @@ export function createWebGpuFlatlandRenderer({ runtime = globalThis } = {}) {
     const pass = encoder.beginRenderPass({ colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: 'clear', storeOp: 'store' }] });
     pass.setPipeline(pipeline); pass.setBindGroup(0, bindGroup); pass.draw(6, normalized.length); pass.end();
     device.queue.submit([encoder.finish()]);
-    return Object.freeze({ schema: WEBGPU_FLATLAND_RENDERER_SCHEMA, status: 'rendered', backend: 'webgpu', projection: 'flatland', cellCount: normalized.length });
+    const elapsedMs = (typeof runtime.performance?.now === 'function' ? runtime.performance.now() : Date.now()) - startedAt;
+    return Object.freeze({ schema: WEBGPU_FLATLAND_RENDERER_SCHEMA, status: 'rendered', backend: 'webgpu', projection: 'flatland', cellCount: normalized.length, elapsedMs: Number(elapsedMs.toFixed(2)) });
   }
 
   return Object.freeze({

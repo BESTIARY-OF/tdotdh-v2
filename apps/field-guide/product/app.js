@@ -516,7 +516,7 @@ function renderBoard() {
   }
   const gpuRuntime = window.__TDOTDH_V2_RUNTIME__, gpuCanvas = document.createElement('canvas');
   gpuCanvas.className = 'board-gpu-canvas'; gpuCanvas.setAttribute('aria-hidden', 'true'); board.appendChild(gpuCanvas);
-  updateMetrics(metrics); requestAnimationFrame(() => { fitBoardToViewport(); if (typeof gpuRuntime?.renderFlatland !== 'function') { gpuCanvas.remove(); return; } void gpuRuntime.renderFlatland({ canvas: gpuCanvas, cells: gpuCells, bounds: { minX: metrics.minX, minY: metrics.minY, width: metrics.width, height: metrics.height } }).then(result => { gpuCanvas.dataset.rendererStatus = result.status; if (result.status !== 'rendered') gpuCanvas.remove(); }).catch(() => gpuCanvas.remove()); });
+  updateMetrics(metrics); requestAnimationFrame(() => { fitBoardToViewport(); if (typeof gpuRuntime?.renderFlatland !== 'function') { gpuCanvas.remove(); return; } void gpuRuntime.renderFlatland({ canvas: gpuCanvas, cells: gpuCells, bounds: { minX: metrics.minX, minY: metrics.minY, width: metrics.width, height: metrics.height } }).then(result => { gpuCanvas.dataset.rendererStatus = result.status; if (result.status === 'rendered') gpuCanvas.dataset.rendererElapsedMs = String(result.elapsedMs); if (result.status !== 'rendered') gpuCanvas.remove(); }).catch(() => gpuCanvas.remove()); });
 }
 function fitBoardToViewport() {
   if (!app.placements) return;
