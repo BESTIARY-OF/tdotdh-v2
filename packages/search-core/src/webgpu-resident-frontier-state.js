@@ -296,18 +296,19 @@ async function dispatch(device, resources, candidates, pieceIds, outputIndices, 
   device.queue.writeBuffer(buffers.publishParams, 0, new Uint32Array([count, labelsPerState, 0, 0]));
   device.queue.writeBuffer(buffers.params, 0, new Int32Array([count, grid.wordCount, pieceIds.length, grid.width, grid.height, grid.originX, grid.originY, 0]));
   const uploadMs = performance.now() - dispatchStarted;
+  const encoder = device.createCommandEncoder();
   if (parentStateIndices.some(index => index !== RESIDENT_PARENT_SENTINEL)) {
-    const gatherEncoder = device.createCommandEncoder(), gatherPass = gatherEncoder.beginComputePass();
+    // Keep parent gathering and child expansion in one command stream. The
+    // ordered compute passes provide the GPU dependency without a host-side
+    // queue wait between every resident transition.
+    const gatherPass = encoder.beginComputePass();
     gatherPass.setPipeline(resources.gatherPipeline); gatherPass.setBindGroup(0, resources.gatherBindGroup); gatherPass.dispatchWorkgroups(Math.ceil(count * labelsPerState / 64)); gatherPass.end();
-    device.queue.submit([gatherEncoder.finish()]);
-    await device.queue.onSubmittedWorkDone();
   }
   for (let index = 0; index < parentStateIndices.length; index++) {
     if (parentStateIndices[index] === RESIDENT_PARENT_SENTINEL) {
       device.queue.writeBuffer(buffers.seedParents, index * labelsPerState * 4, candidates[index].parentLabelMasks);
     }
   }
-  const encoder = device.createCommandEncoder();
   for (let index = 0; index < parentStateIndices.length; index++) {
     if (parentStateIndices[index] === RESIDENT_PARENT_SENTINEL) encoder.copyBufferToBuffer(buffers.seedParents, index * labelsPerState * 4, buffers.resolvedParents, index * labelsPerState * 4, labelsPerState * 4);
   }
@@ -319,10 +320,9 @@ async function dispatch(device, resources, candidates, pieceIds, outputIndices, 
   }
   if (readDigests) encoder.copyBufferToBuffer(buffers.digests, 0, buffers.digestReadback, 0, digestBytes);
   const beforeSubmit = performance.now();
-  device.queue.submit([encoder.finish()]);
-  const publishEncoder = device.createCommandEncoder(), publishPass = publishEncoder.beginComputePass();
+  const publishPass = encoder.beginComputePass();
   publishPass.setPipeline(resources.publishPipeline); publishPass.setBindGroup(0, resources.publishBindGroup); publishPass.dispatchWorkgroups(Math.ceil(count * labelsPerState / 64)); publishPass.end();
-  device.queue.submit([publishEncoder.finish()]);
+  device.queue.submit([encoder.finish()]);
   const submitMs = performance.now() - beforeSubmit;
   const completion = device.queue.onSubmittedWorkDone();
   const [nextLabels, canonicalLabels, digestValues, _completion] = await Promise.all([
