@@ -45,8 +45,8 @@ assert.equal(cancelledBeforeDispatch.readback, 'deferred');
     createBuffer() {
       const index = ++createdBuffers;
       return { destroy() {}, async mapAsync() { mappedReads += 1; }, getMappedRange() {
-        if (index === 10) return Int32Array.from([1, 0, 0, 0, 0, 1, -1, 1]).buffer;
-        if (index === 11) return Uint32Array.from([1, 0, 1, 1]).buffer;
+        if (index === 9) return Int32Array.from([1, 0, 0, 0, 0, 1, -1, 1]).buffer;
+        if (index === 10) return Uint32Array.from([1, 0, 1, 1]).buffer;
         return Uint32Array.from([1, 0, 1, 1]).buffer;
       }, unmap() {} };
     },
@@ -86,7 +86,7 @@ assert.equal(cancelledBeforeDispatch.readback, 'deferred');
   assert.equal(boundaryBatch.readback, 'result-boundary');
   assert.equal(boundaryBatch.residentHandle.recordCount, 4);
   assert.ok(mappedReads > mappedBeforeBoundary, 'result-boundary parity maps the GPU validity/origin batch');
-  assert.equal(createdBuffers, 20, 'persistent target generation reuses its twelve working buffers and snapshots each resident batch');
+  assert.equal(createdBuffers, 19, 'persistent target generation reuses its eleven working buffers and snapshots each resident batch');
   if (previousBufferUsage === undefined) delete globalThis.GPUBufferUsage; else globalThis.GPUBufferUsage = previousBufferUsage;
   if (previousMapMode === undefined) delete globalThis.GPUMapMode; else globalThis.GPUMapMode = previousMapMode;
 }

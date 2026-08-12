@@ -275,7 +275,6 @@ function createPersistentGpuTargetRunner(device, grid, shaderSource) {
       validity: device.createBuffer({ size: countBytes, usage: usage.STORAGE | usage.COPY_SRC }),
       params: device.createBuffer({ size: 32, usage: usage.UNIFORM | usage.COPY_DST }),
       records: device.createBuffer({ size: recordBytes, usage: usage.STORAGE | usage.COPY_SRC }),
-      residentRecords: device.createBuffer({ size: recordBytes, usage: usage.STORAGE | usage.COPY_SRC | usage.COPY_DST }),
       originsReadback: device.createBuffer({ size: originBytes, usage: usage.MAP_READ | usage.COPY_DST }),
       validityReadback: device.createBuffer({ size: countBytes, usage: usage.MAP_READ | usage.COPY_DST }),
       recordsReadback: device.createBuffer({ size: recordBytes, usage: usage.MAP_READ | usage.COPY_DST }),
@@ -305,7 +304,7 @@ function createPersistentGpuTargetRunner(device, grid, shaderSource) {
        assertNotCancelled(isCancelled);
       const originBytes = Math.max(4, normalized.candidateCount * 2 * 4), countBytes = Math.max(4, normalized.candidateCount * 4);
       const snapshotRecordBytes = Math.max(4, normalized.candidateCount * FRONTIER_TARGET_RECORD_STRIDE * 4), snapshotValidityBytes = Math.max(4, normalized.candidateCount * 4), snapshotRecords = device.createBuffer({ size: snapshotRecordBytes, usage: usage.STORAGE | usage.COPY_SRC | usage.COPY_DST }), snapshotValidity = device.createBuffer({ size: snapshotValidityBytes, usage: usage.STORAGE | usage.COPY_SRC | usage.COPY_DST });
-       const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(resources.pipeline); pass.setBindGroup(0, resources.bindGroup); pass.dispatchWorkgroups(Math.ceil(normalized.candidateCount / 64)); pass.end(); encoder.copyBufferToBuffer(buffers.records, 0, buffers.residentRecords, 0, snapshotRecordBytes); encoder.copyBufferToBuffer(buffers.residentRecords, 0, snapshotRecords, 0, snapshotRecordBytes); encoder.copyBufferToBuffer(buffers.validity, 0, snapshotValidity, 0, snapshotValidityBytes); if (readback) { encoder.copyBufferToBuffer(buffers.origins, 0, buffers.originsReadback, 0, originBytes); encoder.copyBufferToBuffer(buffers.validity, 0, buffers.validityReadback, 0, countBytes); encoder.copyBufferToBuffer(buffers.residentRecords, 0, buffers.recordsReadback, 0, snapshotRecordBytes); }
+       const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass(); pass.setPipeline(resources.pipeline); pass.setBindGroup(0, resources.bindGroup); pass.dispatchWorkgroups(Math.ceil(normalized.candidateCount / 64)); pass.end(); encoder.copyBufferToBuffer(buffers.records, 0, snapshotRecords, 0, snapshotRecordBytes); encoder.copyBufferToBuffer(buffers.validity, 0, snapshotValidity, 0, snapshotValidityBytes); if (readback) { encoder.copyBufferToBuffer(buffers.origins, 0, buffers.originsReadback, 0, originBytes); encoder.copyBufferToBuffer(buffers.validity, 0, buffers.validityReadback, 0, countBytes); encoder.copyBufferToBuffer(buffers.records, 0, buffers.recordsReadback, 0, snapshotRecordBytes); }
        const submitStarted = performance.now(); device.queue.submit([encoder.finish()]); const submitMs = performance.now() - submitStarted;
       // Resident callers consume GPU handles on the same queue. Submission
       // order is the synchronization boundary; waiting here would serialize
