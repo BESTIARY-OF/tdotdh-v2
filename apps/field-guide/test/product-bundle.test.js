@@ -35,6 +35,8 @@ assert.match(productApp, /GPU occupancy prefilter/);
 assert.match(productApp, /GPU frontier validation/);
 assert.match(productApp, /GPU frontier generation/);
 assert.match(productApp, /CPU seed branch/);
+assert.match(productApp, /function familyWorkGrid/);
+assert.match(productApp, /familyWorkPlan: batchedFamilySearch \? familyWorkPlan : \[\]/);
 assert.match(productApp, /operation: 'product-search'/);
 const runtime = await readFile(resolve(productDirectory, "v2-runtime.js"), "utf8");
 assert.match(runtime, /new Worker\(workerUrl, \{ type: 'module' \}\)/);
@@ -46,6 +48,7 @@ assert.match(v2Worker, /candidatePrefilter/);
 assert.match(v2Worker, /frontierValidator/);
 assert.match(v2Worker, /frontierEvaluator/);
 assert.match(v2Worker, /frontierGenerator/);
+assert.match(v2Worker, /family-work-grid/);
 assert.match(v2Worker, /\.then\(result => self\.postMessage\(result\)\)/);
 
 console.log(JSON.stringify({
