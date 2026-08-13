@@ -159,10 +159,16 @@ export function createWebGpuFrontierScorer({ gpu = globalThis.navigator?.gpu, re
   return Object.freeze({
     availability,
     async score(rows) {
-      const normalized = normalizeRows(rows), cpu = cpuScoreFrontierCandidates(normalized), status = await availability();
-      if (status.status !== 'available') return unavailable(status.reason, cpu);
+      const normalized = normalizeRows(rows), status = await availability();
+      if (status.status !== 'available') return unavailable(status.reason, cpuScoreFrontierCandidates(normalized));
       try {
-        const gpuScores = await runGpu(await deviceCache.getDevice(), normalized, shaderSource, pipelineCache);
+        const device = await deviceCache.getDevice();
+        // Submit the GPU score map before running the mandatory CPU oracle. This
+        // preserves exact parity while allowing the synchronous oracle to
+        // overlap device execution instead of serializing the score boundary.
+        const gpuScoresPromise = runGpu(device, normalized, shaderSource, pipelineCache);
+        const cpu = cpuScoreFrontierCandidates(normalized);
+        const gpuScores = await gpuScoresPromise;
         const parity = gpuScores.every((value, index) => Math.abs(value - cpu.scores[index]) <= Math.max(0.0005, Math.abs(cpu.scores[index]) * 0.00001));
         if (!parity) return unavailable('oracle-parity-mismatch', cpu);
         return Object.freeze({ ...cpu, status: 'completed', backend: 'webgpu', parity: 'verified', algorithm: 'parallel-score-map', scores: Object.freeze(gpuScores) });
