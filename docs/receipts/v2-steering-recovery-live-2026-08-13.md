@@ -63,3 +63,13 @@ The final snapshot retained both family selections, `exactly 5` neighbors, and
 Coast `3×`. This confirms that the live steering path remains GPU-first after a
 multi-family neighbor change and a rank-steering change; it does not claim
 Firefox-specific verification.
+
+## Live receipt follow-up
+
+At the 09:47 heartbeat, the current 5174 product tab reported a completed pass
+of `25,376 ms` with `10 GPU stages`, `0 CPU fallbacks`, and `3 not used`, with
+the execution decision `GPU-first` and all adapters available. Both weighted
+family controls remained checked (`F-05NMZZD` and `F-0C9UBKH`), and the selected
+family continued to report weighted depth `4.0×`. This verifies the published
+runtime receipt after steering changes; Firefox-specific verification remains
+manual.
