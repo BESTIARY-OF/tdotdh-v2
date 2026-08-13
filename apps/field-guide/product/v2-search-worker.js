@@ -52,6 +52,57 @@ async function getGpuStageAvailability() {
   if (!gpuStageAvailabilityPromise) gpuStageAvailabilityPromise = Promise.all(Object.entries(gpuStageAdapters).map(async ([name, adapter]) => [name, adapter?.availability ? await adapter.availability() : { status: 'unavailable', reason: 'stage-does-not-expose-availability' }])).then(entries => Object.freeze(Object.fromEntries(entries)));
   return gpuStageAvailabilityPromise;
 }
+function createFusedFamilyStateCoordinator({ state, taskCount }) {
+  const localToGlobal = Array.from({ length: taskCount }, () => new Map());
+  const localNext = Array.from({ length: taskCount }, () => 0);
+  const stats = { barriers: 0, fusedDispatches: 0, singleTaskDispatches: 0, capacityFallbacks: 0, candidateCount: 0, maxTaskBatch: 0 };
+  const taskLayers = Array.from({ length: taskCount }, () => -1);
+  let layerOpen = false, commitCount = 0, pending = new Map();
+  const flush = async layerOrdinal => {
+    const cohort = pending.get(layerOrdinal), queued = cohort ? [...cohort.entries()] : [];
+    pending.delete(layerOrdinal);
+    if (!queued.length) return;
+    stats.barriers += 1;
+    stats.maxTaskBatch = Math.max(stats.maxTaskBatch, queued.length);
+    stats.candidateCount += queued.reduce((sum, [, request]) => sum + request.candidates.length, 0);
+    try {
+      const result = await state.transitionBatch(queued.map(([taskIndex, request]) => ({ taskId: `family-${taskIndex}`, candidates: request.candidates, parentStateOffset: 0 })), queued[0][1].options);
+      if (result.status === 'completed' && result.batch === 'single-dispatch') { if (queued.length > 1) stats.fusedDispatches += 1; else stats.singleTaskDispatches += 1; }
+      if (result.reason === 'resident-frontier-batch-capacity-exceeded') stats.capacityFallbacks += 1;
+      for (const [position, [taskIndex, request]] of queued.entries()) {
+        const taskResult = result.tasks?.[position];
+        if (!taskResult || result.status !== 'completed') { request.resolve(Object.freeze({ ...result, batch: 'fused-family-layer', taskId: taskIndex })); continue; }
+        const residentStateIndices = taskResult.residentStateIndices.map(globalIndex => { const localIndex = localNext[taskIndex]++; localToGlobal[taskIndex].set(localIndex, globalIndex); return localIndex; });
+        request.resolve(Object.freeze({ ...result, ...taskResult, batch: 'fused-family-layer', taskId: taskIndex, residentStateIndices, parentReference: result.parentReference }));
+      }
+    } catch (error) { for (const [, request] of queued) request.reject(error); }
+  };
+  const enqueue = (taskIndex, candidates, options) => new Promise((resolve, reject) => {
+    const layerOrdinal = taskLayers[taskIndex];
+    const globalCandidates = candidates.map(candidate => {
+      if (candidate.parentStateIndex == null) return candidate;
+      const globalIndex = localToGlobal[taskIndex].get(candidate.parentStateIndex);
+      return { ...candidate, parentStateIndex: globalIndex == null ? candidate.parentStateIndex : globalIndex };
+    });
+    let cohort = pending.get(layerOrdinal);
+    if (!cohort) { cohort = new Map(); pending.set(layerOrdinal, cohort); }
+    cohort.set(taskIndex, { candidates: globalCandidates, options, resolve, reject });
+    if (cohort.size >= taskCount) void flush(layerOrdinal);
+    else setTimeout(() => { if (pending.has(layerOrdinal)) void flush(layerOrdinal); }, 100);
+  });
+  const beginLayer = taskIndex => { taskLayers[taskIndex] += 1; if (!layerOpen) { const opened = state.beginLayer(); layerOpen = true; commitCount = 0; return opened; } return Object.freeze({ schema: 'tdotdh.v2.fused-family-layer.v0', status: 'layer-open', epoch: state.epoch?.() || 0 }); };
+  const commitLayer = () => { commitCount += 1; if (commitCount >= taskCount) { const committed = state.commitLayer(); layerOpen = false; commitCount = 0; return committed; } return Object.freeze({ schema: 'tdotdh.v2.fused-family-layer.v0', status: 'layer-pending-commit', committedTasks: commitCount, taskCount }); };
+  const adapter = taskIndex => Object.freeze({
+    schema: 'tdotdh.v2.fused-family-state-adapter.v0',
+    availability: () => state.availability(),
+    beginLayer: () => beginLayer(taskIndex),
+    commitLayer,
+    reset: () => state.reset(),
+    epoch: () => state.epoch?.() || 0,
+    transition: (candidates, options) => enqueue(taskIndex, candidates, options),
+  });
+  return Object.freeze({ state, adapters: Array.from({ length: taskCount }, (_, taskIndex) => adapter(taskIndex)), stats, reset: () => state.reset() });
+}
 async function runGpuProbe() {
   const gpuExecution = await probeWebGpuExecutionCapabilities({ gpu: globalThis.navigator?.gpu, requiredLimits: { maxStorageBufferBindingSize: 33554432 }, deviceCache });
   return { type: 'gpu-probe', gpuExecution, stageAvailability: await getGpuStageAvailability(), workerNavigatorGpu: typeof globalThis.navigator?.gpu !== 'undefined' };
@@ -64,7 +115,9 @@ async function runProductSearchSingle(request, context) {
     ? steering.benchmarkBackend
     : null;
   const forceCpuBenchmark = benchmarkBackend === 'cpu';
-  const taskResidentFrontierState = batchMode
+  const taskResidentFrontierState = batchMode && context.fusedFamilyState?.adapters?.[Number(steering.familyBatchTaskIndex)]
+    ? context.fusedFamilyState.adapters[Number(steering.familyBatchTaskIndex)]
+    : batchMode
     ? createWebGpuResidentFrontierState({ gpu: globalThis.navigator?.gpu, deviceCache: residentDeviceCache, resetDeviceCache: false })
     : residentFrontierState;
   if (!batchMode) taskResidentFrontierState.reset();
@@ -182,15 +235,17 @@ async function runProductSearch(request, context) {
     : [];
   if (plan.length < 2) return runProductSearchSingle(request, context);
   const startedAt = performance.now();
+  const fusedFamilyState = createFusedFamilyStateCoordinator({ state: createWebGpuResidentFrontierState({ gpu: globalThis.navigator?.gpu, deviceCache: residentDeviceCache, resetDeviceCache: false }), taskCount: plan.length });
+  fusedFamilyState.reset();
   const results = await Promise.all(plan.map((task, index) => {
     const taskRequest = {
       ...request,
       requestId: `${request.requestId}:family-${index}`,
       ticket: { ...request.ticket, familyId: task.familyId, threadId: Number(task.threadIndex) || 0 },
       cursor: { ...request.cursor, rootChoice: Number(task.threadIndex) || 0 },
-      steering: { ...request.steering, batchMode: true, familyWorkPlan: null, targetFamily: task.familyId, targetSeed: task.seed, familyWeight: Number(task.weight) || 1 },
+      steering: { ...request.steering, batchMode: true, familyBatchTaskIndex: index, familyWorkPlan: null, targetFamily: task.familyId, targetSeed: task.seed, familyWeight: Number(task.weight) || 1 },
     };
-    return runProductSearchSingle(taskRequest, context).then(result => ({
+    return runProductSearchSingle(taskRequest, { ...context, fusedFamilyState }).then(result => ({
       taskId: task.taskId || `${task.familyId}:${task.threadIndex}`,
       familyId: task.familyId,
       threadIndex: Number(task.threadIndex) || 0,
@@ -215,7 +270,7 @@ async function runProductSearch(request, context) {
     ...best,
     type: 'done',
     nodes: results.reduce((sum, result) => sum + result.nodes, 0),
-    familyBatch: { schema: 'tdotdh.v2.family-work-grid.v0', status: 'used', backend: best.gpuExecution?.deviceAvailable ? 'webgpu' : 'cpu-oracle', parallel: true, residency: 'task-scoped-gpu-resident', gpuStages: batchGpuStages, taskCount: results.length, completedTaskCount: completed.length, elapsedMs: Number(batchElapsedMs.toFixed(2)), taskElapsedMs: Number(taskElapsedMs.toFixed(2)), longestTaskMs: Number(longestTaskMs.toFixed(2)), overlapFactor: batchElapsedMs > 0 ? Number((taskElapsedMs / batchElapsedMs).toFixed(3)) : 0, familyCount: new Set(results.map(result => result.familyId)).size, weightSlots: results.reduce((sum, result) => sum + result.weight, 0) },
+    familyBatch: { schema: 'tdotdh.v2.family-work-grid.v0', status: 'used', backend: best.gpuExecution?.deviceAvailable ? 'webgpu' : 'cpu-oracle', parallel: true, fused: fusedFamilyState.stats.fusedDispatches > 0, residency: 'fused-single-dispatch-frontier', fusedDiagnostics: { ...fusedFamilyState.stats }, gpuStages: batchGpuStages, taskCount: results.length, completedTaskCount: completed.length, elapsedMs: Number(batchElapsedMs.toFixed(2)), taskElapsedMs: Number(taskElapsedMs.toFixed(2)), longestTaskMs: Number(longestTaskMs.toFixed(2)), overlapFactor: batchElapsedMs > 0 ? Number((taskElapsedMs / batchElapsedMs).toFixed(3)) : 0, familyCount: new Set(results.map(result => result.familyId)).size, weightSlots: results.reduce((sum, result) => sum + result.weight, 0) },
     familyBatchResults: results,
   };
 }
