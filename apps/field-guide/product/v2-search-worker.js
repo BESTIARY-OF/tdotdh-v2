@@ -57,6 +57,7 @@ async function runGpuProbe() {
   return { type: 'gpu-probe', gpuExecution, stageAvailability: await getGpuStageAvailability(), workerNavigatorGpu: typeof globalThis.navigator?.gpu !== 'undefined' };
 }
 async function runProductSearchSingle(request, context) {
+  const startedAt = performance.now();
   const steering = request.steering || {};
   const batchMode = steering.batchMode === true;
   const benchmarkBackend = steering.benchmarkBackend === 'cpu' || steering.benchmarkBackend === 'gpu'
@@ -164,6 +165,7 @@ async function runProductSearchSingle(request, context) {
     ...result,
     gpuExecution: { ...gpuExecution, stageAvailability },
     stageTimings,
+    elapsedMs: Number((performance.now() - startedAt).toFixed(2)),
     navigation: navigation.complete({ ...result, gpuExecution }),
     placements: Array.isArray(result?.placements) ? result.placements : [],
     hasPlacement: Array.isArray(result?.placements) && result.placements.length > 0,
@@ -196,6 +198,8 @@ async function runProductSearch(request, context) {
       nodes: Number(result?.nodes) || 0,
       placements: Array.isArray(result?.placements) ? result.placements : [],
       metrics: result?.metrics || null,
+      elapsedMs: Number(result?.elapsedMs) || 0,
+      stageTimings: result?.stageTimings || null,
       gpuExecution: result?.gpuExecution || null,
       stageReceipts: Object.fromEntries(['prefilter', 'frontier', 'frontierGeneration', 'frontierTargetGeneration', 'frontierTargetPool', 'frontierMetrics', 'fieldMetrics', 'frontierState', 'frontierTopology', 'frontierRanker', 'frontierScore', 'frontierCompactor', 'frontierDedup', 'navigationPlan'].filter(name => result?.[name]).map(name => [name, result[name]])),
     }));
@@ -204,11 +208,14 @@ async function runProductSearch(request, context) {
   const best = completed[0] || results[0];
   const isGpuReceipt = receipt => ['used', 'resident', 'completed'].includes(receipt?.status) && ['webgpu', 'compute-shader', 'resident-webgpu'].includes(receipt?.backend);
   const batchGpuStages = [...new Set(results.flatMap(result => Object.entries(result.stageReceipts || {}).filter(([, receipt]) => isGpuReceipt(receipt)).map(([name]) => name)))];
+  const batchElapsedMs = performance.now() - startedAt;
+  const taskElapsedMs = results.reduce((sum, result) => sum + result.elapsedMs, 0);
+  const longestTaskMs = Math.max(0, ...results.map(result => result.elapsedMs));
   return {
     ...best,
     type: 'done',
     nodes: results.reduce((sum, result) => sum + result.nodes, 0),
-    familyBatch: { schema: 'tdotdh.v2.family-work-grid.v0', status: 'used', backend: best.gpuExecution?.deviceAvailable ? 'webgpu' : 'cpu-oracle', parallel: true, residency: 'task-scoped-gpu-resident', gpuStages: batchGpuStages, taskCount: results.length, completedTaskCount: completed.length, elapsedMs: Number((performance.now() - startedAt).toFixed(2)), familyCount: new Set(results.map(result => result.familyId)).size, weightSlots: results.reduce((sum, result) => sum + result.weight, 0) },
+    familyBatch: { schema: 'tdotdh.v2.family-work-grid.v0', status: 'used', backend: best.gpuExecution?.deviceAvailable ? 'webgpu' : 'cpu-oracle', parallel: true, residency: 'task-scoped-gpu-resident', gpuStages: batchGpuStages, taskCount: results.length, completedTaskCount: completed.length, elapsedMs: Number(batchElapsedMs.toFixed(2)), taskElapsedMs: Number(taskElapsedMs.toFixed(2)), longestTaskMs: Number(longestTaskMs.toFixed(2)), overlapFactor: batchElapsedMs > 0 ? Number((taskElapsedMs / batchElapsedMs).toFixed(3)) : 0, familyCount: new Set(results.map(result => result.familyId)).size, weightSlots: results.reduce((sum, result) => sum + result.weight, 0) },
     familyBatchResults: results,
   };
 }

@@ -1,6 +1,6 @@
 const output = document.querySelector('#output');
 const runButton = document.querySelector('#run');
-const workerUrl = new URL('./v2-search-worker.js?v=20260813-familyresident1', import.meta.url);
+const workerUrl = new URL('./v2-search-worker.js?v=20260813-familyresident2', import.meta.url);
 
 function signature(placements) {
   if (!Array.isArray(placements) || placements.length === 0) return null;
@@ -99,6 +99,7 @@ function runWorker(pieces, backend, onProgress = () => {}, options = {}) {
         } : null,
         gpuExecution: lastResult?.gpuExecution || null,
         stageTimings: lastResult?.stageTimings || null,
+        familyBatch: lastResult?.familyBatch || null,
       });
     };
     worker.onerror = event => {
@@ -166,6 +167,7 @@ function summarize(result) {
     canonicalSignature: result.signature,
     gpuExecution: result.gpuExecution,
     stageTimings: result.stageTimings,
+    familyBatch: result.familyBatch,
     navigation: result.navigation,
     searchReceipt: result.searchReceipt,
     stageReceipts: result.stageReceipts,

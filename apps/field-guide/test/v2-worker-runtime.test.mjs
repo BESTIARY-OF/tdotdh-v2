@@ -82,6 +82,8 @@ assert.equal(batchResult.familyBatch.parallel, true);
 assert.equal(batchResult.familyBatch.taskCount, 2);
 assert.equal(batchResult.familyBatch.familyCount, 2);
 assert.equal(batchResult.familyBatch.weightSlots, 8);
+assert.equal(batchResult.familyBatch.residency, 'task-scoped-gpu-resident');
+assert.equal(typeof batchResult.familyBatch.overlapFactor, 'number');
 assert.equal(batchResult.familyBatchResults.length, 2);
 
 assert.ok(events.some(event => event.type === 'started'));
