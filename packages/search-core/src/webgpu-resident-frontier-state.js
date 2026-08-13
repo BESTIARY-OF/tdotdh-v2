@@ -390,6 +390,36 @@ export function createWebGpuResidentFrontierState({ gpu = globalThis.navigator?.
         return Object.freeze({ schema: WEBGPU_LABELED_FRONTIER_STATE_SCHEMA, status: 'completed', backend: 'webgpu', pieceIds, nextLabels, canonicalLabels, absoluteHashes, canonicalHashes, candidateCount: normalized.length, wordCount: normalizedGrid.wordCount, pieceCount: pieceIds.length, parity: verifyParity ? 'verified' : 'deferred', persistent: true, resident: true, residentEpoch: layer.pendingEpoch, residentStateIndices, bufferCapacity: capacity, batchCapacity, parentReference, readback: residentDigestRef ? 'resident-digests' : verifyParity ? 'full-labels-and-digests' : 'state-digests-only', ...(residentDigestRef ? { residentDigestRef } : {}), dispatchTimings, dispatchTimingTotals: { ...dispatchTimings } });
       } catch (error) { reset(); return unavailable(`webgpu-execution-failed:${error?.message || String(error)}`, fallbackCpu(), { parentReference }); }
     },
+    /**
+     * Submit several independent task frontiers through one resident dispatch.
+     * Each task supplies a parent-state offset into this shared arena; outputs
+     * are returned as stable slices while the CPU oracle is checked over the
+     * flattened submission. The bounded batch is intentional: callers must
+     * checkpoint and submit another layer when the shared scratch capacity is
+     * exceeded rather than silently turning this into a serial loop.
+     */
+    async transitionBatch(tasks, { verifyParity = true, readDigests = true } = {}) {
+      if (!Array.isArray(tasks) || tasks.length === 0) return Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'not-used', backend: 'webgpu', batch: 'single-dispatch', taskCount: 0, candidateCount: 0, tasks: [] });
+      const normalizedTasks = tasks.map((task, taskIndex) => {
+        if (!task || !Array.isArray(task.candidates)) throw new TypeError(`resident frontier batch task ${taskIndex} is invalid`);
+        const parentStateOffset = Number.isSafeInteger(task.parentStateOffset) && task.parentStateOffset >= 0 ? task.parentStateOffset : 0;
+        return { taskId: task.taskId || `task-${taskIndex}`, parentStateOffset, candidates: task.candidates.map(candidate => ({ ...candidate, ...(candidate.parentStateIndex == null ? {} : { parentStateIndex: candidate.parentStateIndex + parentStateOffset }) })) };
+      });
+      const flattened = normalizedTasks.flatMap(task => task.candidates), total = flattened.length;
+      if (total > batchCapacity) {
+        const cpuTasks = normalizedTasks.map(task => ({ taskId: task.taskId, candidateCount: task.candidates.length, status: 'unavailable', reason: 'resident-frontier-batch-capacity-exceeded' }));
+        return Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'unavailable', backend: 'webgpu', batch: 'single-dispatch', reason: 'resident-frontier-batch-capacity-exceeded', taskCount: normalizedTasks.length, candidateCount: total, tasks: cpuTasks, batchCapacity });
+      }
+      const result = await this.transition(flattened, { verifyParity, readDigests });
+      if (result.status !== 'completed') return Object.freeze({ ...result, batch: 'single-dispatch', taskCount: normalizedTasks.length, tasks: normalizedTasks.map(task => ({ taskId: task.taskId, candidateCount: task.candidates.length, status: result.status, reason: result.reason || null })) });
+      let offset = 0;
+      const taskResults = normalizedTasks.map(task => {
+        const start = offset, end = offset + task.candidates.length;
+        offset = end;
+        return Object.freeze({ taskId: task.taskId, candidateCount: task.candidates.length, residentStateIndices: result.residentStateIndices.slice(start, end), nextLabels: result.nextLabels.slice(start * result.pieceCount * result.wordCount, end * result.pieceCount * result.wordCount), canonicalLabels: result.canonicalLabels.slice(start * result.pieceCount * result.wordCount, end * result.pieceCount * result.wordCount), absoluteHashes: result.absoluteHashes.slice(start, end), canonicalHashes: result.canonicalHashes.slice(start, end) });
+      });
+      return Object.freeze({ ...result, batch: 'single-dispatch', taskCount: normalizedTasks.length, tasks: taskResults });
+    },
   });
 }
 

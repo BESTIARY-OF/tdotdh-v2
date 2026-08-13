@@ -30,6 +30,7 @@ const fakeAdapter = { limits: { maxStorageBufferBindingSize: 64 * 1024 * 1024, m
 }; } };
 try {
   const resident = createWebGpuResidentFrontierState({ gpu: { async requestAdapter() { return fakeAdapter; } }, capacity: 4, batchCapacity: 2 });
+  assert.equal(typeof resident.transitionBatch, 'function');
   assert.equal((await resident.availability()).status, 'available');
   resident.beginLayer();
   const first = await resident.transition([candidate]);
@@ -66,6 +67,11 @@ try {
   assert.equal(seedParentWrites.length, 1, 'resident child must not re-upload its CPU parent labels');
   assert.equal(createdBuffers, 19, 'resident pool must reuse its resident allocation');
   resident.commitLayer();
+  resident.beginLayer();
+  const oversizedBatch = await resident.transitionBatch([{ taskId: 'a', candidates: [candidate, child] }, { taskId: 'b', candidates: [candidate] }]);
+  assert.equal(oversizedBatch.status, 'unavailable');
+  assert.equal(oversizedBatch.reason, 'resident-frontier-batch-capacity-exceeded');
+  assert.equal(oversizedBatch.taskCount, 2);
   resident.reset();
 } finally {
   if (previousBufferUsage === undefined) delete globalThis.GPUBufferUsage; else globalThis.GPUBufferUsage = previousBufferUsage;
