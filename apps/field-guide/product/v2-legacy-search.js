@@ -1088,6 +1088,7 @@ async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroi
       await yieldToEventLoop();
       if (isCancelled()) return null;
       if (nodes - branchStart >= branchBudget) return null;
+      if (!neighborTargetAllowsProgress(state.bounds?.centroidNeighborCount, targetNeighborCount)) return null;
       nodes++;
       if (!state.remaining.length) {
         const metrics = fieldMetrics(state.placements, centroidId);
@@ -1122,7 +1123,7 @@ async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroi
         options = options.map(({ candidate, gpuFieldMetrics }) => {
           const placements = [...state.placements, candidate], metrics = fieldMetrics(placements, centroidId, gpuFieldMetrics);
           const hint = searchHints && positionPreferences[piece.id] ? pieceDirections(placements, piece.id, centroidId).includes(positionPreferences[piece.id]) : false;
-          return metrics.holes === 0 ? { piece, candidate, gpuFieldMetrics, metrics, hintMatches: (state.hintMatches || 0) + (hint ? 1 : 0) } : null;
+          return metrics.holes === 0 && neighborTargetAllowsProgress(metrics.centroidNeighborCount, targetNeighborCount) ? { piece, candidate, gpuFieldMetrics, metrics, hintMatches: (state.hintMatches || 0) + (hint ? 1 : 0) } : null;
         }).filter(Boolean);
         if (candidatePrefilter?.prefilter && options.length) {
           const result = await candidatePrefilter.prefilter(options.map(option => [option.candidate]));
