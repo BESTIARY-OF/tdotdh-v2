@@ -88,6 +88,23 @@ assert.equal(typeof batchResult.familyBatch.fusedDiagnostics.frontierState.barri
 assert.equal(typeof batchResult.familyBatch.overlapFactor, 'number');
 assert.equal(batchResult.familyBatchResults.length, 2);
 
+const cancelWorker = new Worker(wrapper, { eval: true });
+const cancelled = await new Promise((resolveCancelled, rejectCancelled) => {
+  const timer = setTimeout(() => rejectCancelled(new Error('family-grid worker cancellation timed out')), 15000);
+  cancelWorker.on('message', event => {
+    if (event.type === 'started') cancelWorker.postMessage({ type: 'cancel', requestId: 'worker-family-grid-cancel-test', reason: 'test-family-grid-cancel' });
+    if (event.type === 'cancelled') { clearTimeout(timer); resolveCancelled(event); }
+    if (event.type === 'failed') { clearTimeout(timer); rejectCancelled(new Error(event.error?.message || 'family-grid cancellation failed')); }
+  });
+  cancelWorker.on('error', error => { clearTimeout(timer); rejectCancelled(error); });
+  cancelWorker.postMessage({ ...batchRequest, requestId: 'worker-family-grid-cancel-test' });
+});
+await cancelWorker.terminate();
+assert.equal(cancelled.type, 'cancelled');
+assert.equal(cancelled.reason, 'test-family-grid-cancel');
+assert.equal(cancelled.searchReceipt.schema, 'tdotdh.v2.cancelled-search-receipt.v1');
+assert.equal(cancelled.searchReceipt.gpuExecution.deviceAvailable, false);
+
 assert.ok(events.some(event => event.type === 'started'));
 assert.equal(result.protocolOperation, 'product-search');
 assert.equal(result.gpuExecution.deviceAvailable, false);
