@@ -67,10 +67,12 @@ try {
   assert.equal(seedParentWrites.length, 1, 'resident child must not re-upload its CPU parent labels');
   assert.equal(createdBuffers, 19, 'resident pool must reuse its resident allocation');
   resident.commitLayer();
+  resident.reset();
   resident.beginLayer();
-  const oversizedBatch = await resident.transitionBatch([{ taskId: 'a', candidates: [candidate, child] }, { taskId: 'b', candidates: [candidate] }]);
-  assert.equal(oversizedBatch.status, 'unavailable');
-  assert.equal(oversizedBatch.reason, 'resident-frontier-batch-capacity-exceeded');
+  const oversizedBatch = await resident.transitionBatch([{ taskId: 'a', candidates: [candidate, candidate] }, { taskId: 'b', candidates: [candidate] }], { verifyParity: false, readDigests: true });
+  assert.equal(oversizedBatch.status, 'completed');
+  assert.equal(oversizedBatch.batch, 'chunked-single-dispatch');
+  assert.equal(oversizedBatch.chunkCount, 2);
   assert.equal(oversizedBatch.taskCount, 2);
   resident.reset();
 } finally {

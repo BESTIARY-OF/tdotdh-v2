@@ -407,8 +407,32 @@ export function createWebGpuResidentFrontierState({ gpu = globalThis.navigator?.
       });
       const flattened = normalizedTasks.flatMap(task => task.candidates), total = flattened.length;
       if (total > batchCapacity) {
-        const cpuTasks = normalizedTasks.map(task => ({ taskId: task.taskId, candidateCount: task.candidates.length, status: 'unavailable', reason: 'resident-frontier-batch-capacity-exceeded' }));
-        return Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'unavailable', backend: 'webgpu', batch: 'single-dispatch', reason: 'resident-frontier-batch-capacity-exceeded', taskCount: normalizedTasks.length, candidateCount: total, tasks: cpuTasks, batchCapacity });
+        const cursors = normalizedTasks.map(() => 0), merged = new Map(normalizedTasks.map(task => [task.taskId, { taskId: task.taskId, candidateCount: 0, residentStateIndices: [], nextLabels: [], canonicalLabels: [], absoluteHashes: [], canonicalHashes: [] }])), parts = [];
+        while (cursors.some((cursor, index) => cursor < normalizedTasks[index].candidates.length)) {
+          let capacityLeft = batchCapacity;
+          const chunk = [];
+          for (const [taskIndex, task] of normalizedTasks.entries()) {
+            if (!capacityLeft || cursors[taskIndex] >= task.candidates.length) continue;
+            const count = Math.min(capacityLeft, task.candidates.length - cursors[taskIndex]);
+            chunk.push({ taskId: task.taskId, parentStateOffset: task.parentStateOffset, candidates: task.candidates.slice(cursors[taskIndex], cursors[taskIndex] + count) });
+            cursors[taskIndex] += count;
+            capacityLeft -= count;
+          }
+          const part = await this.transitionBatch(chunk, { verifyParity, readDigests: true });
+          if (part.status !== 'completed') return Object.freeze({ ...part, batch: 'chunked-single-dispatch', taskCount: normalizedTasks.length, candidateCount: total, chunkCount: parts.length + 1, batchCapacity });
+          parts.push(part);
+          for (const taskResult of part.tasks || []) {
+            const target = merged.get(taskResult.taskId);
+            target.candidateCount += taskResult.candidateCount;
+            target.residentStateIndices.push(...taskResult.residentStateIndices);
+            target.nextLabels.push(...taskResult.nextLabels);
+            target.canonicalLabels.push(...taskResult.canonicalLabels);
+            target.absoluteHashes.push(...taskResult.absoluteHashes);
+            target.canonicalHashes.push(...taskResult.canonicalHashes);
+          }
+        }
+        const last = parts[parts.length - 1], dispatchTimings = parts.reduce((totals, part) => { for (const name of ['calls', 'uploadMs', 'submitMs', 'readbackMs', 'totalMs']) totals[name] += Number(part.dispatchTimings?.[name]) || 0; return totals; }, { calls: 0, uploadMs: 0, submitMs: 0, readbackMs: 0, totalMs: 0 });
+        return Object.freeze({ ...last, batch: 'chunked-single-dispatch', taskCount: normalizedTasks.length, candidateCount: total, chunkCount: parts.length, tasks: normalizedTasks.map(task => Object.freeze(merged.get(task.taskId))), nextLabels: normalizedTasks.flatMap(task => merged.get(task.taskId).nextLabels), canonicalLabels: normalizedTasks.flatMap(task => merged.get(task.taskId).canonicalLabels), absoluteHashes: normalizedTasks.flatMap(task => merged.get(task.taskId).absoluteHashes), canonicalHashes: normalizedTasks.flatMap(task => merged.get(task.taskId).canonicalHashes), residentStateIndices: normalizedTasks.flatMap(task => merged.get(task.taskId).residentStateIndices), dispatchTimings: Object.freeze(dispatchTimings), dispatchTimingTotals: Object.freeze(dispatchTimings) });
       }
       const result = await this.transition(flattened, { verifyParity, readDigests });
       if (result.status !== 'completed') return Object.freeze({ ...result, batch: 'single-dispatch', taskCount: normalizedTasks.length, tasks: normalizedTasks.map(task => ({ taskId: task.taskId, candidateCount: task.candidates.length, status: result.status, reason: result.reason || null })) });
