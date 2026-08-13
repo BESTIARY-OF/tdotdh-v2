@@ -13,6 +13,18 @@ Matched live-browser run of the same `SEDLEC-00Q_ISLAND-001` opinionated 15-piec
 
 The GPU wall-time speedup over the forced CPU oracle was **2.025×**. Both runs found an arrangement and produced the identical canonical signature. The GPU run reported `familyBatch.status=used`, `familyBatch.parallel=true`, task count 3, completed task count 3, and task-scoped GPU-resident execution. Its active stages included prefilter, frontier, target generation, metrics, field metrics, frontier state, topology, ranker, score, compactor, deduplication, and navigation planning.
 
+## Evening matched sample
+
+At the 19:47 heartbeat, the same benchmark was rerun in fresh browser tabs. The
+GPU family grid measured **7,088.5 ms** wall time; the forced CPU oracle measured
+**12,243.8 ms**, for a **1.727× GPU wall-time speedup**. Both processed 10,044
+nodes, found an arrangement, and displayed the same canonical signature. The
+GPU receipt reported three completed parallel tasks, twelve weight slots,
+fused GPU-resident execution, 11 GPU stages, zero capacity fallbacks, and an
+overlap factor of **2.997**. The CPU receipt reported the same three tasks and
+twelve weight slots with no GPU stages. This is a fresh controlled sample, not
+a fixed performance guarantee.
+
 ## Interpretation
 
 This is evidence that the supported browser path is now using concurrent GPU family work for this realistic fixture. It is not a completion claim: the result is one controlled sample, and Firefox-specific repeatability plus broader cancellation/resume and cross-browser measurement remain part of the active verification gate.
