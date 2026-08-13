@@ -63,12 +63,15 @@ async function runProductSearchSingle(request, context) {
     ? steering.benchmarkBackend
     : null;
   const forceCpuBenchmark = benchmarkBackend === 'cpu';
-  if (!batchMode) residentFrontierState.reset();
+  const taskResidentFrontierState = batchMode
+    ? createWebGpuResidentFrontierState({ gpu: globalThis.navigator?.gpu, deviceCache: residentDeviceCache, resetDeviceCache: false })
+    : residentFrontierState;
+  if (!batchMode) taskResidentFrontierState.reset();
   const gpuExecution = forceCpuBenchmark
     ? { deviceAvailable: false, reason: 'benchmark-forced-cpu', stageAvailability: {} }
     : await probeWebGpuExecutionCapabilities({ gpu: globalThis.navigator?.gpu, requiredLimits: { maxStorageBufferBindingSize: 33554432 }, deviceCache });
   const navigation = createNavigationCoordinator({ ticket: request.ticket, cursor: request.cursor });
-  const frontierNavigator = batchMode ? null : createWebGpuFrontierNavigator({ stateAdapter: residentFrontierState, ticket: request.ticket, cursor: request.cursor, isCancelled: context.isCancelled });
+  const frontierNavigator = createWebGpuFrontierNavigator({ stateAdapter: taskResidentFrontierState, ticket: request.ticket, cursor: request.cursor, isCancelled: context.isCancelled });
   let executionDecision = null;
   const stageTimings = Object.create(null);
   const timedStage = (name, adapter) => {
@@ -108,7 +111,7 @@ async function runProductSearchSingle(request, context) {
     return wrapped;
   };
   const stageAvailability = forceCpuBenchmark ? {} : await getGpuStageAvailability();
-  const stage = (name, adapter = gpuStageAdapters[name]) => forceCpuBenchmark || (batchMode && name === 'frontierState') ? null : timedStage(name, adapter);
+  const stage = (name, adapter = gpuStageAdapters[name]) => forceCpuBenchmark ? null : timedStage(name, adapter);
   const result = await search(request.pieces, steering.knownCentroidFamilies || [], {
     ...steering,
     // Keep resident candidate data on-device during production search. The final
@@ -119,7 +122,7 @@ async function runProductSearchSingle(request, context) {
     // loop enables full CPU canonical-label parity for the terminal layer;
     // callers can opt into per-depth parity for diagnostics.
     verifyGpuTransitionParity: steering.verifyGpuTransitionParity === true,
-    enableGpuResidentDigestConsumer: !batchMode && steering.enableGpuResidentDigestConsumer !== false,
+    enableGpuResidentDigestConsumer: steering.enableGpuResidentDigestConsumer !== false,
     // The CPU frontier coordinates are a small control-plane input. When GPU
     // target generation is available, recomputing the identical 64x64 target
     // pool and reading it back only adds a synchronization barrier; candidate
@@ -143,12 +146,12 @@ async function runProductSearchSingle(request, context) {
     frontierScorer: stage('frontierScore'),
     frontierMetrics: stage('frontierMetrics'),
     fieldMetrics: stage('fieldMetrics'),
-    frontierState: stage('frontierState'),
-    frontierNavigator: batchMode ? null : timedStage('frontierState', frontierNavigator),
+    frontierState: stage('frontierState', taskResidentFrontierState),
+    frontierNavigator: forceCpuBenchmark ? null : timedStage('frontierState', frontierNavigator),
     frontierTopology: stage('frontierTopology'),
     frontierRanker: stage('frontierRanker'),
     frontierCompactor: stage('frontierCompactor'),
-    residentBeamSelector: forceCpuBenchmark || batchMode ? null : timedStage('frontierScore', residentBeamSelector),
+    residentBeamSelector: forceCpuBenchmark ? null : timedStage('frontierScore', residentBeamSelector),
     frontierDeduplicator: stage('frontierDedup'),
     navigationScheduler: gpuExecution.deviceAvailable ? timedStage('navigationPlan', frontierNavigationScheduler) : createWebGpuFrontierNavigationScheduler({ gpu: null }),
     isCancelled: context.isCancelled,
@@ -194,16 +197,18 @@ async function runProductSearch(request, context) {
       placements: Array.isArray(result?.placements) ? result.placements : [],
       metrics: result?.metrics || null,
       gpuExecution: result?.gpuExecution || null,
-      stageReceipts: Object.fromEntries(['frontier', 'frontierGeneration', 'frontierMetrics', 'fieldMetrics', 'frontierTopology', 'frontierRanker', 'frontierScore', 'frontierCompactor', 'frontierDedup'].filter(name => result?.[name]).map(name => [name, result[name]])),
+      stageReceipts: Object.fromEntries(['prefilter', 'frontier', 'frontierGeneration', 'frontierTargetGeneration', 'frontierTargetPool', 'frontierMetrics', 'fieldMetrics', 'frontierState', 'frontierTopology', 'frontierRanker', 'frontierScore', 'frontierCompactor', 'frontierDedup', 'navigationPlan'].filter(name => result?.[name]).map(name => [name, result[name]])),
     }));
   }));
   const completed = results.filter(result => result.placements.length);
   const best = completed[0] || results[0];
+  const isGpuReceipt = receipt => ['used', 'resident', 'completed'].includes(receipt?.status) && ['webgpu', 'compute-shader', 'resident-webgpu'].includes(receipt?.backend);
+  const batchGpuStages = [...new Set(results.flatMap(result => Object.entries(result.stageReceipts || {}).filter(([, receipt]) => isGpuReceipt(receipt)).map(([name]) => name)))];
   return {
     ...best,
     type: 'done',
     nodes: results.reduce((sum, result) => sum + result.nodes, 0),
-    familyBatch: { schema: 'tdotdh.v2.family-work-grid.v0', status: 'used', backend: best.gpuExecution?.deviceAvailable ? 'webgpu' : 'cpu-oracle', parallel: true, taskCount: results.length, completedTaskCount: completed.length, elapsedMs: Number((performance.now() - startedAt).toFixed(2)), familyCount: new Set(results.map(result => result.familyId)).size, weightSlots: results.reduce((sum, result) => sum + result.weight, 0) },
+    familyBatch: { schema: 'tdotdh.v2.family-work-grid.v0', status: 'used', backend: best.gpuExecution?.deviceAvailable ? 'webgpu' : 'cpu-oracle', parallel: true, residency: 'task-scoped-gpu-resident', gpuStages: batchGpuStages, taskCount: results.length, completedTaskCount: completed.length, elapsedMs: Number((performance.now() - startedAt).toFixed(2)), familyCount: new Set(results.map(result => result.familyId)).size, weightSlots: results.reduce((sum, result) => sum + result.weight, 0) },
     familyBatchResults: results,
   };
 }

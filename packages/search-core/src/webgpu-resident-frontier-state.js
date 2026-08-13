@@ -341,13 +341,13 @@ async function dispatch(device, resources, candidates, pieceIds, outputIndices, 
  * across every beam layer and resumable cursor; only canonical replay arrays
  * and hashes are read back for admission.
  */
-export function createWebGpuResidentFrontierState({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, deviceCache = null, capacity = DEFAULT_RESIDENT_FRONTIER_CAPACITY, batchCapacity = DEFAULT_RESIDENT_FRONTIER_BATCH_CAPACITY, requiredLimits = { maxStorageBufferBindingSize: 33554432, maxStorageBuffersPerShaderStage: 14 }, shaderSource = SHADER } = {}) {
+export function createWebGpuResidentFrontierState({ gpu = globalThis.navigator?.gpu, grid = DEFAULT_FRONTIER_GRID, deviceCache = null, resetDeviceCache = true, capacity = DEFAULT_RESIDENT_FRONTIER_CAPACITY, batchCapacity = DEFAULT_RESIDENT_FRONTIER_BATCH_CAPACITY, requiredLimits = { maxStorageBufferBindingSize: 33554432, maxStorageBuffersPerShaderStage: 14 }, shaderSource = SHADER } = {}) {
   if (!Number.isSafeInteger(capacity) || capacity <= 0) throw new TypeError('resident frontier capacity must be a positive safe integer');
   if (!Number.isSafeInteger(batchCapacity) || batchCapacity <= 0 || batchCapacity > capacity) throw new TypeError('resident frontier batch capacity is invalid');
   const normalizedGrid = normalizeGrid(grid), limits = { ...requiredLimits }, residentDeviceCache = deviceCache || createWebGpuDeviceCache({ gpu, requiredLimits: limits });
   let resources = null, pieceIds = null, epoch = 0, residentCount = 0, layer = null, availabilityPromise = null;
   let dispatchTimingTotals = { calls: 0, uploadMs: 0, submitMs: 0, readbackMs: 0, totalMs: 0 };
-  const reset = () => { destroyResources(resources); resources = null; pieceIds = null; epoch = 0; residentCount = 0; layer = null; availabilityPromise = null; dispatchTimingTotals = { calls: 0, uploadMs: 0, submitMs: 0, readbackMs: 0, totalMs: 0 }; residentDeviceCache.reset(); };
+  const reset = () => { destroyResources(resources); resources = null; pieceIds = null; epoch = 0; residentCount = 0; layer = null; availabilityPromise = null; dispatchTimingTotals = { calls: 0, uploadMs: 0, submitMs: 0, readbackMs: 0, totalMs: 0 }; if (resetDeviceCache) residentDeviceCache.reset(); };
   const availability = () => {
     if (!availabilityPromise) availabilityPromise = probeWebGpuCapabilities({ gpu, requiredLimits: limits }).then(probe => probe.adapterAvailable && probe.requiredLimitsSatisfied
       ? Object.freeze({ schema: WEBGPU_RESIDENT_FRONTIER_STATE_SCHEMA, status: 'available', backend: 'webgpu', capacity, batchCapacity, grid: normalizedGrid })

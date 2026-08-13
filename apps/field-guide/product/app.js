@@ -1022,7 +1022,7 @@ function stopContinuousSearch(message = 'Auto-search paused') {
 function launchSearchPass() {
   if (!app.continuous) return;
   app.solving = true; const button = document.querySelector('#solveButton'); setSearchButton(); showSearchBoard(); document.querySelector('#searchStatus').textContent = `Growing candidates · pass ${app.pass + 1}`;
-    const worker = new Worker('/apps/field-guide/product/v2-search-worker.js?v=20260813-familygrid1', { type: 'module' }); app.searchWorker = worker; const startingNodes = app.totalNodes, startedAt = performance.now();
+    const worker = new Worker('/apps/field-guide/product/v2-search-worker.js?v=20260813-familyresident1', { type: 'module' }); app.searchWorker = worker; const startingNodes = app.totalNodes, startedAt = performance.now();
   const families = new Map();
   app.snapshots.forEach(snapshot => { const familyId = snapshotFamilyId(snapshot); if (!families.has(familyId)) families.set(familyId, []); families.get(familyId).push(snapshot); });
   const orderedFamilies = [...families.entries()].map(([family, snapshots]) => [family, orderedSnapshots(snapshots)]).filter(([, snapshots]) => snapshots.length).sort((a, b) => { const aMetric = familySortMetric(a[1]), bMetric = familySortMetric(b[1]); return aMetric.primary - bMetric.primary || aMetric.secondary - bMetric.secondary; });
@@ -1054,11 +1054,12 @@ function launchSearchPass() {
       navigation: result.navigation,
     };
     const isGpuReceipt = receipt => ['used', 'resident', 'completed'].includes(receipt?.status) && ['webgpu', 'compute-shader', 'resident-webgpu'].includes(receipt?.backend);
-    const gpuStages = Object.entries(stageReceipts).filter(([, receipt]) => isGpuReceipt(receipt)).map(([name]) => name);
+    const batchStageEntries = familyBatchResults.flatMap(task => Object.entries(task.stageReceipts || {}));
+    const gpuStages = [...new Set([...Object.entries(stageReceipts).filter(([, receipt]) => isGpuReceipt(receipt)).map(([name]) => name), ...batchStageEntries.filter(([, receipt]) => isGpuReceipt(receipt)).map(([name]) => name)])];
     const isNotUsedReceipt = receipt => receipt?.status === 'not-used' || receipt?.reason === 'stage-not-executed';
     const isCpuFallbackReceipt = receipt => receipt?.status === 'fallback' || (receipt?.status === 'cpu-oracle' && !isNotUsedReceipt(receipt));
-    const cpuFallbackStages = Object.entries(stageReceipts).filter(([, receipt]) => isCpuFallbackReceipt(receipt)).map(([name]) => name);
-    const notUsedStages = Object.entries(stageReceipts).filter(([, receipt]) => isNotUsedReceipt(receipt)).map(([name]) => name);
+    const cpuFallbackStages = [...new Set([...Object.entries(stageReceipts).filter(([, receipt]) => isCpuFallbackReceipt(receipt)).map(([name]) => name), ...batchStageEntries.filter(([, receipt]) => isCpuFallbackReceipt(receipt)).map(([name]) => name)])];
+    const notUsedStages = [...new Set(Object.entries(stageReceipts).filter(([, receipt]) => isNotUsedReceipt(receipt)).map(([name]) => name))];
     const stageAvailability = result.gpuExecution?.stageAvailability || {};
     const cpuFallbackReasons = Object.fromEntries(Object.entries(stageReceipts).filter(([, receipt]) => isCpuFallbackReceipt(receipt)).map(([name, receipt]) => [name, receipt?.reason || stageAvailability[name]?.reason || stageAvailability[name]?.status || receipt?.status || 'unknown']));
     const elapsedMs = Math.max(0, performance.now() - startedAt);
