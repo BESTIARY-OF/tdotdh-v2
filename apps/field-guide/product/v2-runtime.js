@@ -29,7 +29,7 @@ const cpuOracleFirst = createCpuOracleFirstAdapter({
   unavailableReason: 'compute-shader-backend-not-yet-implemented',
 });
 
-const workerUrl = new URL('./v2-search-worker.js?v=20260812-metrictiming1', import.meta.url);
+const workerUrl = new URL('./v2-search-worker.js?v=20260813-steeringfix1', import.meta.url);
 const cpuWorker = new Worker(workerUrl, { type: 'module' });
 async function probeProductWorker() {
   const worker = new Worker(workerUrl, { type: 'module' });

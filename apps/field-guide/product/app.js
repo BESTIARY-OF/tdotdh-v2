@@ -31,7 +31,7 @@ const ACTIVE_PRESET_STORAGE_KEY = 'tdotdh-bestiary-active-preset-v1';
 const PRESET_ID_PREFIX = 'SEDLEC-00Q_ISLAND-';
 const PRESET_NAME = 'The Opinionated Set';
 const PRESET_TRANSFORMS = ['fixed', 'rotate-90', 'rotate-180', 'rotate-270', 'flip-x', 'flip-y', 'flip-xy'];
-const app = { pieces: [], selectedId: 3, centroidId: 3, preset: null, presetData: null, presetStore: null, placements: null, snapshots: [], selectedFamily: null, arrangementPinned: false, arrangementDisplayLimit: 24, lastFamilySelections: new Map(), familySteering: new Map(), familySteeringPass: 0, positionPreferences: new Map(), positionLocks: new Map(), preferenceEnabled: false, preferenceMode: 'rank', familySort: 'best', arrangementSort: 'best', neighborBandFilter: null, searchHints: false, searchStrategy: 'balanced', neighborTarget: null, coastBias: 1, gravityBias: 1, inletBias: 1, sidebarMode: 'pieces', topView: 'solver', nodes: 0, totalNodes: 0, completedPasses: 0, lastPersistedNodes: 0, progressEstimate: 'banked lower bound', solving: false, continuous: false, singlePass: false, pass: 0, catalogCount: 100, searchWorker: null, searchTimer: null, searchCheckpoint: null };
+const app = { pieces: [], selectedId: 3, centroidId: 3, preset: null, presetData: null, presetStore: null, placements: null, snapshots: [], selectedFamily: null, arrangementPinned: false, arrangementDisplayLimit: 24, lastFamilySelections: new Map(), familySteering: new Map(), familySteeringPass: 0, positionPreferences: new Map(), positionLocks: new Map(), preferenceEnabled: false, preferenceMode: 'rank', familySort: 'best', arrangementSort: 'best', neighborBandFilter: null, searchHints: false, searchStrategy: 'balanced', neighborTarget: null, coastBias: 1, gravityBias: 1, inletBias: 1, sidebarMode: 'pieces', topView: 'solver', nodes: 0, totalNodes: 0, completedPasses: 0, lastPersistedNodes: 0, progressEstimate: 'banked lower bound', solving: false, continuous: false, singlePass: false, pass: 0, catalogCount: 100, searchWorker: null, searchTimer: null, searchRequestId: null, searchRevision: 0, searchCheckpoint: null };
 const SNAPSHOT_STORAGE_KEY = 'tdotdh-bestiary-snapshots-v5';
 const COLOR_STORAGE_KEY = 'tdotdh-bestiary-piece-colors-v1';
 const POSITION_PREFERENCE_STORAGE_KEY = 'tdotdh-bestiary-position-preferences-v1';
@@ -92,7 +92,7 @@ function restoreSearchSettings() {
 }
 function persistSearchSettings() {
   const value = { familySort: app.familySort, arrangementSort: app.arrangementSort, neighborBandFilter: app.neighborBandFilter, preferenceEnabled: app.preferenceEnabled, preferenceMode: app.preferenceMode, searchHints: app.searchHints, searchStrategy: app.searchStrategy, neighborTarget: app.neighborTarget, coastBias: app.coastBias, gravityBias: app.gravityBias, inletBias: app.inletBias };
-  app.presetData.searchSettings = value; persistPresetStore();
+  app.presetData.searchSettings = value; persistPresetStore(); invalidateSearchContinuation('Search steering changed');
   try { localStorage.setItem('tdotdh-bestiary-search-settings-v1', JSON.stringify(value)); } catch (error) { console.warn('The search settings could not be saved.', error); }
 }
 function orientationLabel(transform) { return ({ 'flip-x': 'X-flipped', 'flip-y': 'Y-flipped', 'flip-xy': 'X + Y flipped', 'rotate-90': '90° rotated', 'rotate-180': '180° rotated', 'rotate-270': '270° rotated' }[transform] || 'fixed'); }
@@ -394,7 +394,7 @@ function restorePositionPreferences() {
   }
 }
 function persistPositionPreferences() {
-  try { const value = Object.fromEntries([...app.positionPreferences.entries()].map(([pieceId, preference]) => [pieceId, preference.direction])); app.presetData.positionPreferences = value; persistPresetStore(); localStorage.setItem(POSITION_PREFERENCE_STORAGE_KEY, JSON.stringify(value)); } catch (error) { console.warn('The placement preferences could not be saved.', error); }
+  try { const value = Object.fromEntries([...app.positionPreferences.entries()].map(([pieceId, preference]) => [pieceId, preference.direction])); app.presetData.positionPreferences = value; persistPresetStore(); localStorage.setItem(POSITION_PREFERENCE_STORAGE_KEY, JSON.stringify(value)); invalidateSearchContinuation('Placement steering changed'); } catch (error) { console.warn('The placement preferences could not be saved.', error); }
 }
 function restorePositionLocks() {
   try {
@@ -409,7 +409,7 @@ function restorePositionLocks() {
   }
 }
 function persistPositionLocks() {
-  try { const value = Object.fromEntries(app.positionLocks.entries()); app.presetData.positionLocks = value; persistPresetStore(); localStorage.setItem(POSITION_LOCK_STORAGE_KEY, JSON.stringify(value)); } catch (error) { console.warn('The exact placement locks could not be saved.', error); }
+  try { const value = Object.fromEntries(app.positionLocks.entries()); app.presetData.positionLocks = value; persistPresetStore(); localStorage.setItem(POSITION_LOCK_STORAGE_KEY, JSON.stringify(value)); invalidateSearchContinuation('Placement lock changed'); } catch (error) { console.warn('The exact placement locks could not be saved.', error); }
 }
 function placementOrigin(placement) {
   if (!placement?.cells?.length) return null;
@@ -437,7 +437,7 @@ function restoreFamilySteering() {
   }
 }
 function persistFamilySteering() {
-  try { const value = Object.fromEntries(app.familySteering.entries()); app.presetData.familySteering = value; persistPresetStore(); localStorage.setItem(FAMILY_STEERING_STORAGE_KEY, JSON.stringify(value)); } catch (error) { console.warn('The family steering settings could not be saved.', error); }
+  try { const value = Object.fromEntries(app.familySteering.entries()); app.presetData.familySteering = value; persistPresetStore(); localStorage.setItem(FAMILY_STEERING_STORAGE_KEY, JSON.stringify(value)); invalidateSearchContinuation('Family steering changed'); } catch (error) { console.warn('The family steering settings could not be saved.', error); }
 }
 function restoreSearchProgress() {
   const bankedNodes = app.snapshots.reduce((sum, snapshot) => sum + (Number(snapshot.nodes) || 0), 0);
@@ -464,6 +464,21 @@ function restoreSearchProgress() {
 }
 function persistSearchProgress(exact = false) {
   try { const value = { totalNodes: app.totalNodes, completedPasses: app.completedPasses, checkpoint: app.searchCheckpoint || null, exact, updatedAt: Date.now() }; app.presetData.progress = value; persistPresetStore(); localStorage.setItem(SEARCH_PROGRESS_STORAGE_KEY, JSON.stringify(value)); app.lastPersistedNodes = app.totalNodes; } catch (error) { console.warn('The search progress could not be saved.', error); }
+}
+function invalidateSearchContinuation(message = 'Search steering changed') {
+  app.searchRevision += 1;
+  app.searchCheckpoint = null;
+  app.familySteeringPass = 0;
+  persistSearchProgress(true);
+  const activeWorker = app.searchWorker;
+  if (activeWorker) {
+    activeWorker.terminate();
+    app.searchWorker = null;
+    app.searchRequestId = null;
+    app.solving = false;
+    document.querySelector('#searchStatus').textContent = `${message} · restarting GPU search`;
+    if (app.continuous && !app.searchTimer) app.searchTimer = setTimeout(() => { app.searchTimer = null; launchSearchPass(); }, 80);
+  }
 }
 function familySteeringEntries(orderedFamilies = []) {
   const known = new Set(orderedFamilies.map(([family]) => family));
@@ -1021,8 +1036,9 @@ function stopContinuousSearch(message = 'Auto-search paused') {
 }
 function launchSearchPass() {
   if (!app.continuous) return;
+  app.searchTimer = null;
   app.solving = true; const button = document.querySelector('#solveButton'); setSearchButton(); showSearchBoard(); document.querySelector('#searchStatus').textContent = `Growing candidates · pass ${app.pass + 1}`;
-    const worker = new Worker('/apps/field-guide/product/v2-search-worker.js?v=20260813-fusedscore1', { type: 'module' }); app.searchWorker = worker; const startingNodes = app.totalNodes, startedAt = performance.now();
+    const worker = new Worker('/apps/field-guide/product/v2-search-worker.js?v=20260813-fusedscore1', { type: 'module' }); app.searchWorker = worker; const searchRevision = app.searchRevision, startingNodes = app.totalNodes, startedAt = performance.now();
   const families = new Map();
   app.snapshots.forEach(snapshot => { const familyId = snapshotFamilyId(snapshot); if (!families.has(familyId)) families.set(familyId, []); families.get(familyId).push(snapshot); });
   const orderedFamilies = [...families.entries()].map(([family, snapshots]) => [family, orderedSnapshots(snapshots)]).filter(([, snapshots]) => snapshots.length).sort((a, b) => { const aMetric = familySortMetric(a[1]), bMetric = familySortMetric(b[1]); return aMetric.primary - bMetric.primary || aMetric.secondary - bMetric.secondary; });
@@ -1034,6 +1050,12 @@ function launchSearchPass() {
   app.searchRequestId = requestId;
   let protocolResult = null;
   const finish = data => {
+    if (searchRevision !== app.searchRevision) {
+      worker.terminate();
+      if (app.searchWorker === worker) { app.searchWorker = null; app.searchRequestId = null; app.solving = false; }
+      if (app.continuous && !app.searchTimer) app.searchTimer = setTimeout(() => { app.searchTimer = null; launchSearchPass(); }, 80);
+      return;
+    }
     const result = data.result || data;
     const familyBatchResults = Array.isArray(result.familyBatchResults) ? result.familyBatchResults : [];
     const stageReceipts = {
@@ -1103,7 +1125,7 @@ function launchSearchPass() {
   worker.onerror = () => { worker.terminate(); app.searchWorker = null; app.searchRequestId = null; app.solving = false; if (app.continuous) { document.querySelector('#searchStatus').textContent = 'Worker restarted safely · continuing search'; app.searchTimer = setTimeout(launchSearchPass, 120); } else stopContinuousSearch('Search stopped safely'); };
   worker.postMessage({ type: 'start', protocolVersion: 1, requestId, presetFingerprint: app.preset.id, catalogRevision: `field-guide:${app.preset.id}:v2`, seed: searchSalt, mode: app.searchStrategy === 'breadth' ? 'breadth' : 'depth', operation: 'product-search', ticket, cursor: { depth: 0, nodeOffset: 0, rootChoice: Number(target?.threadIndex || 0), ...(app.searchCheckpoint ? { checkpoint: app.searchCheckpoint } : {}) }, budget: { maxNodes: 10000000, maxMilliseconds: 900000 }, pieces: app.pieces, knownSignatureHints: app.snapshots.map(snapshot => snapshot.signature || snapshotSignature(snapshot.placements)), steering: { centroidId: activeCentroidId(), knownCentroidFamilies, searchHints: app.searchHints, searchStrategy: app.searchStrategy, targetNeighborCount: app.neighborTarget, targetFamily: target?.familyId || null, targetSeed: target?.seed || null, familyWorkPlan: batchedFamilySearch ? familyWorkPlan : [], positionPreferences: Object.fromEntries(configuredPreferences().map(preference => [preference.pieceId, preference.direction])), positionLocks: Object.fromEntries(app.positionLocks.entries()), coastBias: app.coastBias, gravityBias: app.gravityBias, inletBias: app.inletBias } });
 }
-function solve() { if (app.continuous) { stopContinuousSearch(); return; } app.singlePass = new URLSearchParams(location.search).get('singlePass') === '1'; app.continuous = true; app.pass = 0; app.familySteeringPass = 0; setSearchButton(); document.querySelector('#searchStatus').textContent = 'Growing connected candidates'; showSearchBoard(); launchSearchPass(); }
+function solve() { if (app.continuous) { stopContinuousSearch(); return; } app.singlePass = new URLSearchParams(location.search).get('singlePass') === '1'; app.continuous = true; app.pass = 0; app.familySteeringPass = 0; app.searchCheckpoint = null; app.searchRevision += 1; persistSearchProgress(true); setSearchButton(); document.querySelector('#searchStatus').textContent = 'Growing connected candidates'; showSearchBoard(); launchSearchPass(); }
 function resetApp() { if (app.searchWorker) app.searchWorker.terminate(); if (app.searchTimer) clearTimeout(app.searchTimer); app.searchWorker = null; app.searchTimer = null; app.solving = false; app.continuous = false; app.searchCheckpoint = null; app.sidebarMode = 'pieces'; app.selectedFamily = null; app.arrangementPinned = false; app.placements = app.snapshots[0]?.placements || null; app.nodes = app.totalNodes; app.pass = 0; persistSearchProgress(true); document.querySelector('#solveButton').disabled = false; document.querySelector('#solveButton').innerHTML = '<span class="spark">✦</span> Find a new arrangement'; document.querySelector('#searchStatus').textContent = app.snapshots.length ? `Ready to search · ${app.snapshots.length} banked` : 'Ready to search'; document.querySelector('#arrangementLabel').innerHTML = 'Variable field <span class="divider">/</span> source-locked'; document.querySelector('#stageTitle').textContent = 'Search the open field.'; document.querySelector('#stageSubtitle').textContent = `No rectangle is prescribed. Find a dense connected packing with zero internal holes and #${String(activeCentroidId()).padStart(2, '0')} away from every coast.`; renderBoard(); renderSnapshots(); renderSidebarMode(); if (app.placements) updateArrangementSummary(app.snapshots[0].metrics); }
 
 initializePresetState(); restoreSearchSettings(); app.pieces = createPieces(); restorePositionPreferences(); restorePositionLocks(); restoreFamilySteering(); restoreSnapshots(); restoreSearchProgress(); app.placements = app.snapshots[0]?.placements || null; renderPresetIdentity(); renderPieceList(); renderBoard(); renderInspector(); renderSnapshots(); renderSidebarMode(); if (app.placements) updateArrangementSummary(app.snapshots[0].metrics);
