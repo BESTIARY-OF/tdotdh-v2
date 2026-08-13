@@ -57,7 +57,11 @@ function createFusedFamilyStateCoordinator({ state, taskCount }) {
   const localNext = Array.from({ length: taskCount }, () => 0);
   const stats = { barriers: 0, fusedDispatches: 0, singleTaskDispatches: 0, capacityFallbacks: 0, candidateCount: 0, maxTaskBatch: 0 };
   const taskLayers = Array.from({ length: taskCount }, () => -1);
-  let layerOpen = false, commitCount = 0, pending = new Map();
+  let layerOpen = false, commitCount = 0, pending = new Map(), layerStates = new Map();
+  const ready = layerOrdinal => {
+    const layer = layerStates.get(layerOrdinal);
+    return layer && layer.statuses.size === taskCount && [...layer.statuses.values()].every(status => status === 'queued' || status === 'skip');
+  };
   const flush = async layerOrdinal => {
     const cohort = pending.get(layerOrdinal), queued = cohort ? [...cohort.entries()] : [];
     pending.delete(layerOrdinal);
@@ -87,16 +91,17 @@ function createFusedFamilyStateCoordinator({ state, taskCount }) {
     let cohort = pending.get(layerOrdinal);
     if (!cohort) { cohort = new Map(); pending.set(layerOrdinal, cohort); }
     cohort.set(taskIndex, { candidates: globalCandidates, options, resolve, reject });
-    if (cohort.size >= taskCount) void flush(layerOrdinal);
-    else setTimeout(() => { if (pending.has(layerOrdinal)) void flush(layerOrdinal); }, 100);
+    layerStates.get(layerOrdinal)?.statuses.set(taskIndex, 'queued');
+    if (ready(layerOrdinal)) void flush(layerOrdinal);
+    else setTimeout(() => { if (pending.has(layerOrdinal)) void flush(layerOrdinal); }, 500);
   });
-  const beginLayer = taskIndex => { taskLayers[taskIndex] += 1; if (!layerOpen) { const opened = state.beginLayer(); layerOpen = true; commitCount = 0; return opened; } return Object.freeze({ schema: 'tdotdh.v2.fused-family-layer.v0', status: 'layer-open', epoch: state.epoch?.() || 0 }); };
-  const commitLayer = () => { commitCount += 1; if (commitCount >= taskCount) { const committed = state.commitLayer(); layerOpen = false; commitCount = 0; return committed; } return Object.freeze({ schema: 'tdotdh.v2.fused-family-layer.v0', status: 'layer-pending-commit', committedTasks: commitCount, taskCount }); };
+  const beginLayer = taskIndex => { taskLayers[taskIndex] += 1; const layerOrdinal = taskLayers[taskIndex]; if (!layerStates.has(layerOrdinal)) layerStates.set(layerOrdinal, { statuses: new Map() }); layerStates.get(layerOrdinal).statuses.set(taskIndex, 'begun'); if (!layerOpen) { const opened = state.beginLayer(); layerOpen = true; commitCount = 0; return opened; } return Object.freeze({ schema: 'tdotdh.v2.fused-family-layer.v0', status: 'layer-open', epoch: state.epoch?.() || 0 }); };
+  const commitLayer = taskIndex => { const layerOrdinal = taskLayers[taskIndex], layer = layerStates.get(layerOrdinal); if (layer?.statuses.get(taskIndex) !== 'queued') { layer?.statuses.set(taskIndex, 'skip'); if (ready(layerOrdinal)) void flush(layerOrdinal); } else layer.statuses.set(taskIndex, 'committed'); commitCount += 1; if (commitCount >= taskCount) { const committed = state.commitLayer(); layerOpen = false; commitCount = 0; return committed; } return Object.freeze({ schema: 'tdotdh.v2.fused-family-layer.v0', status: 'layer-pending-commit', committedTasks: commitCount, taskCount }); };
   const adapter = taskIndex => Object.freeze({
     schema: 'tdotdh.v2.fused-family-state-adapter.v0',
     availability: () => state.availability(),
     beginLayer: () => beginLayer(taskIndex),
-    commitLayer,
+    commitLayer: () => commitLayer(taskIndex),
     reset: () => state.reset(),
     epoch: () => state.epoch?.() || 0,
     transition: (candidates, options) => enqueue(taskIndex, candidates, options),
