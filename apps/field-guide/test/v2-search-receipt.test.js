@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { search } from '../product/v2-legacy-search.js';
+import { neighborTargetAllowsProgress, neighborTargetMatches, search } from '../product/v2-legacy-search.js';
 import { cpuGenerateFrontierCandidates } from '../../../packages/search-core/src/webgpu-frontier-generator.js';
 import { cpuTransitionLabeledFrontierStates } from '../../../packages/search-core/src/webgpu-labeled-frontier-state.js';
 import { cpuFrontierTopology } from '../../../packages/search-core/src/webgpu-frontier-topology.js';
@@ -120,6 +120,10 @@ const sharedOptions = {
   navigationTicket: { presetFingerprint: 'test-preset', familyId: 'open', pass: 0, threadId: 0 },
   navigationCursor: { depth: 0, nodeOffset: 0, rootChoice: 0 },
 };
+assert.equal(neighborTargetAllowsProgress(4, 4), true);
+assert.equal(neighborTargetAllowsProgress(5, 4), false, 'exact-neighbor search must prune partial states that already exceed the target');
+assert.equal(neighborTargetMatches(4, 4), true);
+assert.equal(neighborTargetMatches(5, 4), false, 'exact-neighbor search must reject completed states with the wrong count');
 let residentExpansionCalls = 0, residentParentReferences = 0, residentLayerOpens = 0, residentLayerCommits = 0, residentEpoch = 0;
 const residentNavigator = {
   beginLayer() { residentLayerOpens += 1; return { status: 'layer-open' }; },

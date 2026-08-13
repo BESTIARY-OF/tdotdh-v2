@@ -1093,7 +1093,7 @@ async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroi
         const metrics = fieldMetrics(state.placements, centroidId);
         const topologyMetrics = await evaluateFinalTopology(state, centroidId, frontierTopology, onTopology);
         const acceptedMetrics = { ...metrics, ...(topologyMetrics || {}), connected: topologyMetrics?.connected ?? connected(state.field) };
-        if (acceptedMetrics.area === pieces.length * AREA && acceptedMetrics.holes === 0 && !acceptedMetrics.centroidEdgeCoast && acceptedMetrics.connected && (targetNeighborCount == null || metrics.centroidNeighborCount === targetNeighborCount) && !knownSignatures.has(arrangementSignature(state.placements))) return completedResult(state.placements, metrics, nodes);
+        if (acceptedMetrics.area === pieces.length * AREA && acceptedMetrics.holes === 0 && !acceptedMetrics.centroidEdgeCoast && acceptedMetrics.connected && neighborTargetMatches(acceptedMetrics.centroidNeighborCount, targetNeighborCount) && !knownSignatures.has(arrangementSignature(state.placements))) return completedResult(state.placements, metrics, nodes);
         return null;
       }
       let targetPool = null;
@@ -1195,6 +1195,18 @@ async function searchLockedSeedBranches(pieces, branches, knownFamilies, centroi
     if (result) return result;
   }
   return { type: 'done', placements: null, metrics: null, nodes };
+}
+
+export function neighborTargetAllowsProgress(neighborCount, targetNeighborCount) {
+  if (targetNeighborCount == null) return true;
+  const count = Number(neighborCount), target = Number(targetNeighborCount);
+  return Number.isFinite(count) && Number.isFinite(target) && count <= target;
+}
+
+export function neighborTargetMatches(neighborCount, targetNeighborCount) {
+  if (targetNeighborCount == null) return true;
+  const count = Number(neighborCount), target = Number(targetNeighborCount);
+  return Number.isFinite(count) && Number.isFinite(target) && count === target;
 }
 
 async function search(pieces, knownCentroidFamilies = [], options = {}) {
@@ -1642,6 +1654,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         nodes++;
         const candidatePlacements = [...state.placements, candidate], candidateMetrics = fieldMetrics(candidatePlacements, centroidId, gpuFieldMetrics, gpuState, state.bounds, candidate), candidateFamilyTarget = candidateMetrics.centroidSeed === 'none' || targetSeedCompatible(candidateMetrics.centroidSeed, targetSeed);
         if (targetFamily && !candidateFamilyTarget) return null;
+        if (!neighborTargetAllowsProgress(candidateMetrics.centroidNeighborCount, targetNeighborCount)) return null;
         const targetProgress = targetFamily ? targetSeedProgress(candidateMetrics.centroidSeed, targetSeed) : 0, familyIsNew = !knownFamilies.has(candidateMetrics.centroidFamilyId), hint = searchHints && positionPreferences[piece.id] ? pieceDirections(candidatePlacements, piece.id, centroidId).includes(positionPreferences[piece.id]) : false, hintMatches = (state.hintMatches || 0) + (hint ? 1 : 0);
         const targetBonus = targetFamily ? -320 * targetProgress : 0;
         const hintBonus = hint ? -220 : 0;
@@ -1760,7 +1773,7 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
         frontierStateReceipt = { ...frontierStateReceipt, finalCanonicalParity: 'fallback', reason: `canonical-signature-failed:${error.message}` };
       }
     }
-    if (acceptedMetrics.area === pieceCount * AREA && acceptedMetrics.holes === 0 && !acceptedMetrics.centroidEdgeCoast && acceptedMetrics.connected && !knownSignatures.has(cpuSignature)) {
+    if (acceptedMetrics.area === pieceCount * AREA && acceptedMetrics.holes === 0 && !acceptedMetrics.centroidEdgeCoast && acceptedMetrics.connected && neighborTargetMatches(acceptedMetrics.centroidNeighborCount, targetNeighborCount) && !knownSignatures.has(cpuSignature)) {
       const result = { type: 'done', placements: state.placements, metrics: { width: metrics.width, height: metrics.height, area: metrics.area, holes: metrics.holes, centroidCoast: metrics.centroidCoast, centroidEdgeCoast: metrics.centroidEdgeCoast, centroidCornerCoast: metrics.centroidCornerCoast, enclosure: metrics.enclosure, centroidFamily: metrics.centroidFamily, centroidFamilyId: metrics.centroidFamilyId, centroidSeed: metrics.centroidSeed, centroidNeighborCount: metrics.centroidNeighborCount, perimeter: metrics.perimeter, density: metrics.density, centerOffset: metrics.centerOffset, centroidSquareOffset: metrics.centroidSquareOffset, centerSquareDistance: metrics.centerSquareDistance, radialVariance: metrics.radialVariance, gravityVariance: metrics.gravityVariance, gravityOffset: metrics.gravityOffset, gravityTension: metrics.gravityTension, inletCells: metrics.inletCells, inletEdges: metrics.inletEdges, inletRisk: metrics.inletRisk, peninsulaDepth: metrics.peninsulaDepth, nestedPeninsulaDepth: metrics.nestedPeninsulaDepth, terminalChains: metrics.terminalChains, score: metrics.score }, nodes, prefilter: prefilterReceipt, frontier: frontierReceipt, navigationPlan: navigationPlanReceipt, frontierGeneration: frontierGenerationReceipt, frontierTargetGeneration: frontierTargetGenerationReceipt, frontierTargetPool: frontierTargetPoolReceipt, frontierMetrics: frontierMetricsReceipt, fieldMetrics: fieldMetricsReceipt, frontierState: frontierStateReceipt, frontierTopology: frontierTopologyReceipt, frontierRanker: frontierRankerReceipt, frontierScore: frontierScoreReceipt, frontierCompactor: frontierCompactorReceipt, frontierDedup: frontierDedupReceipt };
       if (targetFamily && metrics.centroidFamilyId === targetFamily && !metrics.centroidCornerCoast && (targetNeighborCount == null || metrics.centroidNeighborCount === targetNeighborCount)) return result;
       if (!metrics.centroidCornerCoast) {
