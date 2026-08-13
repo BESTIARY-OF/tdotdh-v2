@@ -27,6 +27,7 @@ async function loadFixture() {
 function createProductRequest(pieces, backend, { cursor = { depth: 0, nodeOffset: 0, rootChoice: 0 }, requestId = `matched-${backend}-${Date.now()}`, familyId = `benchmark-${backend}` } = {}) {
   const diagnostic = new URL(location.href).searchParams.get('diagnostic');
   const familyGrid = new URL(location.href).searchParams.get('mode') === 'family-grid';
+  const selectedBackend = new URL(location.href).searchParams.get('backend') === 'cpu' ? 'cpu' : 'gpu';
   const diagnosticSteering = diagnostic === 'no-topology' ? { disableGpuCandidateTopology: true } : diagnostic === 'no-geometry' ? { disableGpuCandidateGeometry: true } : diagnostic === 'no-field-metrics' ? { disableGpuCandidateFieldMetrics: true } : diagnostic === 'no-target-pool' ? { disableGpuTargetPool: true } : diagnostic === 'no-target-generation' ? { disableGpuCandidateGeneration: true } : diagnostic === 'no-resident-navigation' ? { disableGpuResidentNavigation: true } : diagnostic === 'verify-resident-navigation' ? { verifyGpuResidentNavigation: true, captureGpuResidentDiagnostics: true } : diagnostic === 'resident-digest' ? { enableGpuResidentDigestConsumer: true } : diagnostic === 'verify-resident-state' ? { verifyGpuTransitionParity: true, enableGpuResidentDigestConsumer: true } : diagnostic === 'no-state-parity' ? { verifyGpuTransitionParity: false } : {};
   const familyWorkPlan = familyGrid ? [
     { taskId: 'benchmark-family-a', familyId: 'F-BENCH-A', threadIndex: 0, weight: 3, seed: 'benchmark-family-a' },
@@ -47,7 +48,7 @@ function createProductRequest(pieces, backend, { cursor = { depth: 0, nodeOffset
     budget: { maxNodes: 40000, maxMilliseconds: 900000 },
     pieces,
     constraints: {},
-    steering: { searchStrategy: 'breadth', benchmarkBackend: backend === 'cpu' ? 'cpu' : 'gpu', ...diagnosticSteering, ...(familyGrid ? { familyWorkPlan } : {}) },
+    steering: { searchStrategy: 'breadth', benchmarkBackend: selectedBackend, ...diagnosticSteering, ...(familyGrid ? { familyWorkPlan } : {}) },
     knownSignatureHints: [],
   };
 }
@@ -193,10 +194,11 @@ runButton.addEventListener('click', async () => {
     }
     output.textContent = new URL(location.href).searchParams.get('mode') === 'family-grid' ? 'Running GPU family×weight grid…' : 'Running GPU worker, then forced CPU oracle…';
     if (new URL(location.href).searchParams.get('mode') === 'family-grid') {
-      const grid = await runWorker(pieces, 'gpu', progress => {
-        output.textContent = `GPU family×weight grid · depth ${progress.depth} · ${progress.nodes.toLocaleString()} nodes · frontier ${progress.frontier.toLocaleString()}`;
-      }, { familyId: 'benchmark-family-grid', requestId: `family-grid-gpu-${Date.now()}` });
-      output.textContent = JSON.stringify({ fixture: 'SEDLEC-00Q_ISLAND-001', grid: summarize(grid), note: 'Each family/weight task owns a GPU-resident frontier state and submits concurrently; overlapFactor is summed task time divided by wall time.' }, null, 2);
+      const gridBackend = new URL(location.href).searchParams.get('backend') === 'cpu' ? 'cpu' : 'gpu';
+      const grid = await runWorker(pieces, gridBackend, progress => {
+        output.textContent = `${gridBackend.toUpperCase()} family×weight grid · depth ${progress.depth} · ${progress.nodes.toLocaleString()} nodes · frontier ${progress.frontier.toLocaleString()}`;
+      }, { familyId: 'benchmark-family-grid', requestId: `family-grid-${gridBackend}-${Date.now()}` });
+      output.textContent = JSON.stringify({ fixture: 'SEDLEC-00Q_ISLAND-001', grid: summarize(grid), note: 'The family/weight grid uses depth barriers and fused GPU-resident cohorts when available; overlapFactor is summed task time divided by wall time.' }, null, 2);
       return;
     }
     output.textContent = 'Running GPU worker, then forced CPU oracle…';
