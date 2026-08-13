@@ -1,0 +1,51 @@
+# v2 steering-change GPU recovery receipt — 2026-08-13
+
+## Scope
+
+This receipt covers the published `apps/field-guide` v2 entrypoint on local port
+`5174`. It verifies that changing rank-steering controls does not strand the
+next search pass in terminal CPU replay while a usable WebGPU device remains
+available.
+
+## Reproduction and fix
+
+Before the fix, a persisted continuation checkpoint plus a fired-but-still
+truthy auto-search timer could leave the UI at `GPU device ready · 0 GPU stages`
+after steering changes. Changing the control back did not reliably schedule a
+new pass.
+
+Commit `bd13186` now:
+
+- invalidates the search checkpoint and steering schedule when search settings,
+  family weights, placement hints, or locks change;
+- terminates the stale worker and schedules a fresh pass when auto-search is
+  active;
+- clears the timer reference at the start of every pass; and
+- clears stale continuation state when a new search is explicitly started.
+
+## Live verification
+
+In the local v2 preview, while auto-search was active, Coast was changed from
+`3×` to `4×` and then back to `3×`.
+
+- During transition: `Search steering changed · restarting GPU search`.
+- After the returned pass: `GPU device ready · 10 GPU stages · 0 CPU fallbacks`.
+- Stage availability: all adapters available.
+- The result remained a normal GPU family-grid search; it did not remain at
+  zero GPU stages.
+
+This was verified in the Codex in-app browser. Firefox verification remains a
+separate manual check; this receipt does not claim it.
+
+## Automated checks
+
+Passed:
+
+- `node --check apps/field-guide/product/app.js`
+- `node apps/field-guide/test/product-bundle.test.js`
+- `node apps/field-guide/test/v2-search-cancellation.test.js`
+- `node apps/field-guide/test/v2-worker-runtime.test.mjs`
+- `git diff --check`
+
+The CPU implementation remains the hidden correctness oracle, and this fix
+does not relax GPU parity gates or change renderer semantics.
