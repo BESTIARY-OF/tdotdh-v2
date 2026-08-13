@@ -84,7 +84,7 @@ assert.equal(batchResult.familyBatch.familyCount, 2);
 assert.equal(batchResult.familyBatch.weightSlots, 8);
 assert.equal(batchResult.familyBatch.residency, 'fused-single-dispatch-frontier');
 assert.equal(batchResult.familyBatch.fused, false);
-assert.equal(typeof batchResult.familyBatch.fusedDiagnostics.barriers, 'number');
+assert.equal(typeof batchResult.familyBatch.fusedDiagnostics.frontierState.barriers, 'number');
 assert.equal(typeof batchResult.familyBatch.overlapFactor, 'number');
 assert.equal(batchResult.familyBatchResults.length, 2);
 
