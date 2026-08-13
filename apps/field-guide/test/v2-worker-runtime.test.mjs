@@ -55,6 +55,35 @@ const result = await new Promise((resolveResult, reject) => {
 });
 await worker.terminate();
 
+const batchRequest = {
+  ...request,
+  requestId: 'worker-family-grid-test',
+  steering: {
+    ...request.steering,
+    familyWorkPlan: [
+      { taskId: 'F-A:0', familyId: 'F-A', seed: '#01[0,0>1,0]', weight: 3, threadIndex: 0 },
+      { taskId: 'F-B:0', familyId: 'F-B', seed: '#02[0,0>-1,0]', weight: 5, threadIndex: 0 },
+    ],
+  },
+};
+const batchWorker = new Worker(wrapper, { eval: true });
+const batchResult = await new Promise((resolveBatch, rejectBatch) => {
+  const timer = setTimeout(() => rejectBatch(new Error('family-grid worker runtime test timed out')), 15000);
+  batchWorker.on('message', event => {
+    if (event.type === 'result') { clearTimeout(timer); resolveBatch(event); }
+    if (event.type === 'failed') { clearTimeout(timer); rejectBatch(new Error(event.error?.message || 'family-grid worker failed')); }
+  });
+  batchWorker.on('error', error => { clearTimeout(timer); rejectBatch(error); });
+  batchWorker.postMessage(batchRequest);
+});
+await batchWorker.terminate();
+assert.equal(batchResult.familyBatch.schema, 'tdotdh.v2.family-work-grid.v0');
+assert.equal(batchResult.familyBatch.parallel, true);
+assert.equal(batchResult.familyBatch.taskCount, 2);
+assert.equal(batchResult.familyBatch.familyCount, 2);
+assert.equal(batchResult.familyBatch.weightSlots, 8);
+assert.equal(batchResult.familyBatchResults.length, 2);
+
 assert.ok(events.some(event => event.type === 'started'));
 assert.equal(result.protocolOperation, 'product-search');
 assert.equal(result.gpuExecution.deviceAvailable, false);
