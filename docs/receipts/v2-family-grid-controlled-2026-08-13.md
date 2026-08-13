@@ -17,6 +17,10 @@ The GPU wall-time speedup over the forced CPU oracle was **2.025×**. Both runs 
 
 This is evidence that the supported browser path is now using concurrent GPU family work for this realistic fixture. It is not a completion claim: the result is one controlled sample, and Firefox-specific repeatability plus broader cancellation/resume and cross-browser measurement remain part of the active verification gate.
 
+## Heartbeat rerun
+
+The benchmark pages were rerun during the 2026-08-13 08:17 heartbeat. The fresh matched pair measured **11,613.6 ms GPU** versus **19,941.1 ms forced CPU**, or **1.718× GPU wall-time speedup**, with the same 10,044 nodes and the same canonical signature. The GPU run reported three completed parallel tasks, 12 GPU stages, fused GPU-resident frontier execution, and an overlap factor of 2.970; the CPU run reported three completed tasks, zero GPU stages, and an overlap factor of 2.980.
+
 ## Verification source
 
 Live benchmark page:
