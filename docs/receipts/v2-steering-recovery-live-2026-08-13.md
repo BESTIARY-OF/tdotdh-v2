@@ -49,3 +49,17 @@ Passed:
 
 The CPU implementation remains the hidden correctness oracle, and this fix
 does not relax GPU parity gates or change renderer semantics.
+
+## Multi-family and weight-steering follow-up
+
+During the 08:47 heartbeat, the live 5174 page had two weighted families
+selected (`F-05NMZZD` and `F-0C9UBKH`, both checked). Neighbors steering was
+changed to `exactly 5`, Coast was changed from `3×` to `4×` and restored to
+`3×`, and the page completed the restarted passes with:
+
+`V2 product · GPU device ready · 10 GPU stages · 0 CPU fallbacks · 3 not used`
+
+The final snapshot retained both family selections, `exactly 5` neighbors, and
+Coast `3×`. This confirms that the live steering path remains GPU-first after a
+multi-family neighbor change and a rank-steering change; it does not claim
+Firefox-specific verification.
