@@ -31,4 +31,14 @@ const residentResult = await search(pieces, [], {
 assert.equal(residentResult.placements, null);
 assert.equal(residentResult.frontierCompactor.status, 'cancelled');
 assert.ok(residentResult.cursor?.checkpoint?.beam?.length > 0);
+
+const resumedResult = await search(pieces, [], {
+  searchStrategy: 'depth',
+  reportProgress: () => {},
+  resumeCheckpoint: residentResult.cursor.checkpoint,
+});
+assert.equal(resumedResult.type, 'done');
+assert.ok(resumedResult.cursor.depth >= residentResult.cursor.depth);
+assert.ok(resumedResult.cursor.nodeOffset >= residentResult.cursor.nodeOffset);
+assert.ok(resumedResult.cursor.checkpoint?.beam?.length > 0);
 console.log('v2 product search cancellation test passed');
