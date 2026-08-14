@@ -1313,6 +1313,16 @@ async function search(pieces, knownCentroidFamilies = [], options = {}) {
   }
   async function deduplicateRankedOptionsMany(jobs) {
     if (!jobs.length) return jobs;
+    const activeJobs = jobs.filter(job => job.entries.length > 0);
+    if (activeJobs.length !== jobs.length) {
+      // The resident deduplicator requires every group to be non-empty. A
+      // topology or exact-neighbor filter can legitimately drain one beam
+      // job, so compact those jobs out of the GPU call and restore them in
+      // their original positions afterward.
+      const activeResults = await deduplicateRankedOptionsMany(activeJobs);
+      let activeIndex = 0;
+      return jobs.map(job => job.entries.length ? activeResults[activeIndex++] : job);
+    }
     if (!frontierDeduplicator?.deduplicateMany || frontierDeduplicatorStatus?.status !== 'available') {
       const entries = [];
       for (const job of jobs) entries.push({ ...job, entries: await deduplicateRankedOptions(job.entries, job.state) });
