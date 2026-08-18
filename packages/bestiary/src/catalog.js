@@ -99,7 +99,10 @@ export function enumeratePolyominoes(area, { limit = 100, offset = 0, maxWidth =
       if (seen.has(canonical)) return;
       seen.add(canonical);
       if (seen.size <= startAt) return;
-      shapes.push({ ordinal: startAt + shapes.length + 1, cells: normalized, canonical, guid: polyominoGuid(canonical), metrics: analyzePolyomino(normalized) });
+      const metrics = analyzePolyomino(normalized);
+      const ordinal = startAt + shapes.length + 1;
+      const familyKey = `area-${metrics.area}`;
+      shapes.push({ ordinal, cells: normalized, canonical, guid: polyominoGuid(canonical), metrics, familyKey, legacyAlias: `${familyKey}#${String(ordinal).padStart(3, '0')}` });
       return;
     }
     for (const candidate of growthCandidates(cells, maxWidth, maxHeight)) {
@@ -179,10 +182,14 @@ export function enumerateMobPlacements(cells, { yang = 0, yin = 0, strategy = 'y
 
 export function createCatalogRecord(shape, { area = shape.metrics?.area || shape.cells.length, profile = {}, source = 'generated' } = {}) {
   const metrics = shape.metrics || analyzePolyomino(shape.cells);
+  const familyKey = shape.familyKey || `area-${metrics.area}`;
+  const ordinal = Number(shape.ordinal || 0);
   return {
     id: String(shape.id || `P-${area}-${shape.ordinal}`),
     guid: shape.guid || polyominoGuid(shape.canonical || shape.cells),
-    ordinal: Number(shape.ordinal || 0),
+    ordinal,
+    familyKey,
+    legacyAlias: shape.legacyAlias || `${familyKey}#${String(ordinal).padStart(3, '0')}`,
     area: Number(area),
     cells: normalizeCells(shape.cells),
     canonical: shape.canonical || canonicalPolyomino(shape.cells),

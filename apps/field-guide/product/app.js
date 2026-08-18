@@ -34,7 +34,7 @@ const PRESET_ID_PREFIX = 'SEDLEC-00Q_ISLAND-';
 const PRESET_NAME = 'The Opinionated Set';
 const DEFAULT_BESTIARY_PROFILE = Object.freeze({ id: 'merlin0-original', name: 'Merlin0 · Original 100', source: 'merlin0', parentId: null, area: 9, limit: 100, yang: 9, yin: 0, strategy: 'yang-first' });
 const PRESET_TRANSFORMS = ['fixed', 'rotate-90', 'rotate-180', 'rotate-270', 'flip-x', 'flip-y', 'flip-xy'];
-const app = { pieces: [], selectedId: 3, centroidId: 3, bestiaryCentroidId: null, preset: null, presetData: null, presetStore: null, catalogRecords: new Map(), bestiaryShapes: [], bestiarySelected: null, bestiaryDraft: [], bestiaryProfile: { ...DEFAULT_BESTIARY_PROFILE }, bestiarySort: 'extent', bestiaryNeighborhood: null, placements: null, snapshots: [], selectedFamily: null, arrangementPinned: false, arrangementDisplayLimit: 24, lastFamilySelections: new Map(), familySteering: new Map(), familySteeringPass: 0, positionPreferences: new Map(), positionLocks: new Map(), preferenceEnabled: false, preferenceMode: 'rank', familySort: 'best', arrangementSort: 'best', neighborBandFilter: null, searchHints: false, searchStrategy: 'balanced', neighborTarget: null, coastBias: 1, gravityBias: 1, inletBias: 1, sidebarMode: 'pieces', topView: 'solver', nodes: 0, totalNodes: 0, completedPasses: 0, lastPersistedNodes: 0, progressEstimate: 'banked lower bound', solving: false, continuous: false, singlePass: false, pass: 0, catalogCount: 100, searchWorker: null, searchTimer: null, searchRequestId: null, searchRevision: 0, searchCheckpoint: null };
+const app = { pieces: [], selectedId: 3, centroidId: 3, bestiaryCentroidId: null, preset: null, presetData: null, presetStore: null, catalogRecords: new Map(), bestiaryShapes: [], bestiaryCatalogArea: null, bestiarySelected: null, bestiaryDraft: [], bestiaryProfile: { ...DEFAULT_BESTIARY_PROFILE }, bestiarySort: 'extent', bestiaryNeighborhood: null, placements: null, snapshots: [], selectedFamily: null, arrangementPinned: false, arrangementDisplayLimit: 24, lastFamilySelections: new Map(), familySteering: new Map(), familySteeringPass: 0, positionPreferences: new Map(), positionLocks: new Map(), preferenceEnabled: false, preferenceMode: 'rank', familySort: 'best', arrangementSort: 'best', neighborBandFilter: null, searchHints: false, searchStrategy: 'balanced', neighborTarget: null, coastBias: 1, gravityBias: 1, inletBias: 1, sidebarMode: 'pieces', topView: 'solver', nodes: 0, totalNodes: 0, completedPasses: 0, lastPersistedNodes: 0, progressEstimate: 'banked lower bound', solving: false, continuous: false, singlePass: false, pass: 0, catalogCount: 100, searchWorker: null, searchTimer: null, searchRequestId: null, searchRevision: 0, searchCheckpoint: null };
 const SNAPSHOT_STORAGE_KEY = 'tdotdh-bestiary-snapshots-v5';
 const COLOR_STORAGE_KEY = 'tdotdh-bestiary-piece-colors-v1';
 const POSITION_PREFERENCE_STORAGE_KEY = 'tdotdh-bestiary-position-preferences-v1';
@@ -94,6 +94,7 @@ function hydrateBestiaryCatalog() {
   } else {
     app.bestiaryShapes = api.enumeratePolyominoes(app.bestiaryProfile.area, { limit: app.bestiaryProfile.limit });
   }
+  app.bestiaryCatalogArea = app.bestiaryProfile.area;
   app.bestiarySelected = app.bestiaryShapes[0] || null;
   app.bestiarySelectedTransform = 'fixed';
   persistCatalogRecords();
@@ -107,6 +108,13 @@ function catalogPieceId(shape) {
   const api = bestiaryApi();
   if (app.bestiaryProfile.id === DEFAULT_BESTIARY_PROFILE.id && Number(shape.area || shape.metrics?.area) === AREA && Number(shape.ordinal) >= 1 && Number(shape.ordinal) <= 100 && api) return Number(shape.ordinal);
   return Number(shape.area || shape.metrics?.area || AREA) * 1000 + Number(shape.ordinal || 1);
+}
+function bestiaryFamilyLabel(area) { return `Area ${String(Number(area) || 0).padStart(2, '0')} family`; }
+function loadBestiaryFamilyStart(area, limit = app.bestiaryProfile.limit) {
+  const api = bestiaryApi(); if (!api) return;
+  app.bestiaryCatalogArea = Number(area);
+  app.bestiaryShapes = api.enumeratePolyominoes(app.bestiaryCatalogArea, { limit, offset: 0 });
+  app.bestiaryNeighborhood = null; app.bestiarySort = 'extent'; app.bestiarySelected = app.bestiaryShapes[0] || null; app.bestiarySelectedTransform = 'fixed';
 }
 function initializePresetState() {
   const stored = readJsonStorage(PRESET_STORAGE_KEY, null), storeHasSnapshots = Boolean(stored?.presets && Object.values(stored.presets).some(record => Array.isArray(record?.snapshots) && record.snapshots.length)), legacySnapshots = storeHasSnapshots ? [] : readJsonStorage(SNAPSHOT_STORAGE_KEY, []), legacyProgress = readJsonStorage(SEARCH_PROGRESS_STORAGE_KEY, null), legacyPreferences = readJsonStorage(POSITION_PREFERENCE_STORAGE_KEY, {}), legacyLocks = readJsonStorage(POSITION_LOCK_STORAGE_KEY, {}), legacySteering = readJsonStorage(FAMILY_STEERING_STORAGE_KEY, {});
@@ -991,7 +999,9 @@ function copyBestiaryProfile(values) {
 function ensureBestiaryProfileCopy() {
   const values = bestiaryProfileFromControls();
   if (bestiaryProfileValuesEqual(values, app.bestiaryProfile)) return false;
+  const areaChanged = Number(values.area) !== Number(app.bestiaryProfile.area);
   app.bestiaryProfile = copyBestiaryProfile(values); persistBestiaryProfile(); renderBestiaryView(); toast(`Copied ${app.bestiaryProfile.parentId} into ${app.bestiaryProfile.name}`);
+  if (areaChanged) { loadBestiaryFamilyStart(values.area, values.limit); renderBestiaryView(); toast(`${bestiaryFamilyLabel(values.area)} loaded at #001`); }
   return true;
 }
 function bestiaryGrid(cells, className = 'bestiary-grid') {
@@ -1029,7 +1039,7 @@ function renderBestiaryAtlasStatus() {
   if (!status) return;
   const ordinals = app.bestiaryShapes.map(shape => shape.ordinal), first = ordinals.length ? Math.min(...ordinals) : 0, last = ordinals.length ? Math.max(...ordinals) : 0;
   const selectedLabel = app.bestiaryNeighborhood ? ` · seed #${String(app.bestiaryNeighborhood.ordinal).padStart(3, '0')} neighborhood` : '';
-  status.textContent = ordinals.length ? `Loaded ${ordinals.length} entries · catalog cursor ${first}–${last} · ${app.bestiarySort} sort${selectedLabel}` : 'No catalog entries loaded';
+  status.textContent = ordinals.length ? `${bestiaryFamilyLabel(app.bestiaryCatalogArea)} · loaded ${ordinals.length} entries · cursor ${first}–${last} · ${app.bestiarySort} sort${selectedLabel}` : 'No catalog entries loaded';
   if (next) next.textContent = `Next batch · ${app.bestiaryProfile.limit}`;
   if (neighborhood) neighborhood.disabled = !app.bestiarySelected;
 }
@@ -1050,7 +1060,7 @@ function renderBestiaryShapeList() {
     shapes.forEach(shape => {
       const button = document.createElement('button'); button.type = 'button'; button.className = `bestiary-shape-button ${app.bestiarySelected?.canonical === shape.canonical ? 'selected' : ''}`; button.setAttribute('aria-label', `Area ${shape.metrics.area} shape ${shape.ordinal}, ${bestiaryMorphology(shape)} morphology`);
       const preview = document.createElement('div'); preview.className = 'bestiary-mini-shape'; preview.appendChild(bestiaryGrid(shape.cells, 'bestiary-mini-grid'));
-      button.appendChild(preview); button.insertAdjacentHTML('beforeend', `<strong>#${String(shape.ordinal).padStart(3, '0')}</strong><small>${shape.metrics.width}×${shape.metrics.height} · ${bestiaryMorphology(shape)} · ${shape.guid.slice(0, 12)}…</small>`);
+      button.appendChild(preview); button.insertAdjacentHTML('beforeend', `<strong>${bestiaryFamilyLabel(shape.metrics.area)} · #${String(shape.ordinal).padStart(3, '0')}</strong><small>${shape.metrics.width}×${shape.metrics.height} · ${bestiaryMorphology(shape)} · ${shape.guid.slice(0, 12)}…</small>`);
       button.addEventListener('click', () => { app.bestiarySelected = shape; app.bestiarySelectedTransform = 'fixed'; renderBestiaryView(); }); grid.appendChild(button);
     });
     section.appendChild(grid); root.appendChild(section);
@@ -1063,8 +1073,8 @@ function renderBestiarySelection() {
   preview.innerHTML = '';
   const shape = app.bestiarySelected;
   if (!shape) { title.textContent = 'Choose a shape'; chip.textContent = 'NOT SELECTED'; chip.classList.add('empty-chip'); meta.textContent = 'Generate a catalog, then select an entry to inspect its geometry and mob profile.'; mob.innerHTML = ''; orientation.value = 'fixed'; add.disabled = true; return; }
-  title.textContent = `Area ${shape.metrics.area} · shape #${String(shape.ordinal).padStart(3, '0')}`; chip.textContent = 'CATALOG ENTRY'; chip.classList.remove('empty-chip'); preview.appendChild(bestiaryGrid(shape.cells));
-  meta.innerHTML = `<strong>${shape.metrics.area} cells</strong> · ${shape.metrics.width} × ${shape.metrics.height} bounds · ${shape.metrics.perimeter} coastline edges · ${(shape.metrics.density * 100).toFixed(0)}% density<br><span>${bestiaryMorphology(shape)} morphology · GUID ${shape.guid}</span><br><span>canonical ${shape.canonical}</span>`;
+  title.textContent = `${bestiaryFamilyLabel(shape.metrics.area)} · shape #${String(shape.ordinal).padStart(3, '0')}`; chip.textContent = 'CATALOG ENTRY'; chip.classList.remove('empty-chip'); preview.appendChild(bestiaryGrid(shape.cells));
+  meta.innerHTML = `<strong>${shape.metrics.area} cells</strong> · ${shape.metrics.width} × ${shape.metrics.height} bounds · ${shape.metrics.perimeter} coastline edges · ${(shape.metrics.density * 100).toFixed(0)}% density<br><span>${shape.legacyAlias || `area-${shape.metrics.area}#${String(shape.ordinal).padStart(3, '0')}`} · ${bestiaryMorphology(shape)} morphology · GUID ${shape.guid}</span><br><span>canonical ${shape.canonical}</span>`;
   const profile = app.bestiaryProfile, api = bestiaryApi();
   const placements = api?.enumerateMobPlacements ? api.enumerateMobPlacements(shape.cells, { yang: profile.yang, yin: profile.yin, strategy: profile.strategy, limit: 256 }) : { placements: [], truncated: false, sequence: [] };
   const areaTotal = profile.yang + profile.yin * 0.5;
@@ -1081,7 +1091,7 @@ function renderBestiaryDraft() {
   if (!app.bestiaryDraft.length) root.innerHTML = '<div class="bestiary-draft-empty">Stage up to 15 catalog entries here.<br>Each entry becomes one numbered solver piece.</div>';
   const options = app.bestiaryDraft.map(item => `<option value="${item.id}">#${String(item.id).padStart(3, '0')}</option>`).join('');
   app.bestiaryDraft.forEach((item, index) => {
-    const row = document.createElement('div'); row.className = 'bestiary-draft-row'; row.innerHTML = `<strong>#${String(item.id).padStart(3, '0')}</strong><span>shape ${String(item.record.ordinal).padStart(3, '0')} · ${item.record.metrics.area} area · ${item.record.guid.slice(0, 10)}…</span><select aria-label="Orientation for piece ${item.id}" data-draft-transform="${item.id}">${PRESET_TRANSFORMS.map(transform => `<option value="${transform}" ${transform === item.transform ? 'selected' : ''}>${orientationLabel(transform)}</option>`).join('')}</select><button class="bestiary-draft-remove" type="button" aria-label="Remove piece ${item.id}" data-draft-remove="${item.id}">×</button>`; root.appendChild(row);
+    const row = document.createElement('div'); row.className = 'bestiary-draft-row'; row.innerHTML = `<strong>#${String(item.id).padStart(3, '0')}</strong><span>${bestiaryFamilyLabel(item.record.metrics.area)} · #${String(item.record.ordinal).padStart(3, '0')} · ${item.record.guid.slice(0, 10)}…</span><select aria-label="Orientation for piece ${item.id}" data-draft-transform="${item.id}">${PRESET_TRANSFORMS.map(transform => `<option value="${transform}" ${transform === item.transform ? 'selected' : ''}>${orientationLabel(transform)}</option>`).join('')}</select><button class="bestiary-draft-remove" type="button" aria-label="Remove piece ${item.id}" data-draft-remove="${item.id}">×</button>`; root.appendChild(row);
   });
   centroid.disabled = !app.bestiaryDraft.length; centroid.innerHTML = options; if (app.bestiaryDraft.length) { if (!app.bestiaryDraft.some(item => item.id === app.bestiaryCentroidId)) app.bestiaryCentroidId = app.bestiaryDraft[0].id; centroid.value = String(app.bestiaryCentroidId); }
    activate.disabled = app.bestiaryDraft.length !== 15 || app.bestiaryDraft.some(item => Number(item.record.metrics?.area) !== AREA);
@@ -1097,11 +1107,13 @@ function renderBestiaryView() {
 function generateBestiaryCatalog() {
   const api = bestiaryApi(); if (!api) { toast('The bestiary algorithms are still loading'); return; }
   const values = bestiaryProfileFromControls(); ensureBestiaryProfileCopy();
-  app.bestiaryShapes = api.enumeratePolyominoes(values.area, { limit: values.limit, offset: 0 }); app.bestiaryNeighborhood = null; app.bestiarySort = 'extent'; app.bestiarySelected = app.bestiaryShapes[0] || null; app.bestiarySelectedTransform = 'fixed'; renderBestiaryView(); if (bestiaryProfileValuesEqual(values, app.bestiaryProfile)) toast(`Reset catalog cursor to ${app.bestiaryShapes.length} canonical shapes`);
+  loadBestiaryFamilyStart(values.area, values.limit); renderBestiaryView(); if (bestiaryProfileValuesEqual(values, app.bestiaryProfile)) toast(`Reset ${bestiaryFamilyLabel(values.area)} cursor to ${app.bestiaryShapes.length} canonical shapes`);
 }
 function loadNextBestiaryBatch() {
   const api = bestiaryApi(); if (!api) return;
-  const profile = app.bestiaryProfile, offset = app.bestiaryShapes.reduce((max, shape) => Math.max(max, Number(shape.ordinal) || 0), 0), next = api.enumeratePolyominoes(profile.area, { limit: profile.limit, offset });
+  const profile = app.bestiaryProfile;
+  if (Number(app.bestiaryCatalogArea) !== Number(profile.area)) loadBestiaryFamilyStart(profile.area, profile.limit);
+  const offset = app.bestiaryShapes.reduce((max, shape) => Math.max(max, Number(shape.ordinal) || 0), 0), next = api.enumeratePolyominoes(profile.area, { limit: profile.limit, offset });
   if (!next.length) { toast(`No more area-${profile.area} shapes after cursor ${offset}`); return; }
   app.bestiaryShapes.push(...next); if (!app.bestiarySelected) app.bestiarySelected = next[0]; renderBestiaryView(); toast(`Loaded catalog batch ${next[0].ordinal}–${next.at(-1).ordinal}`);
 }

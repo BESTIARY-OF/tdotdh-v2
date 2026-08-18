@@ -11,6 +11,9 @@ const originalCatalog = enumeratePolyominoes(9, { limit: 100 });
 assert.equal(originalCatalog.length, 100);
 assert.equal(originalCatalog[0].ordinal, 1);
 assert.equal(originalCatalog.at(-1).ordinal, 100);
+assert.equal(enumeratePolyominoes(8, { limit: 1 })[0].ordinal, 1);
+assert.equal(originalCatalog[0].familyKey, 'area-9');
+assert.equal(originalCatalog[0].legacyAlias, 'area-9#001');
 assert.equal(originalCatalog[0].guid, polyominoGuid(originalCatalog[0].canonical));
 assert.equal(polyominoGuid([{ x: 1, y: 0 }, { x: 0, y: 0 }]), polyominoGuid([{ x: 0, y: 0 }, { x: 0, y: 1 }]));
 const continuation = enumeratePolyominoes(9, { limit: 1, offset: 100 });
@@ -34,5 +37,7 @@ assert.equal(yinPlacements.placements[0].reduce((total, placement) => total + pl
 const record = createCatalogRecord(shapes[1], { profile: { yang: 4, yin: 0, placementCount: 1 } });
 assert.equal(record.id, 'P-4-2');
 assert.equal(record.guid, polyominoGuid(record.canonical));
+assert.equal(record.familyKey, 'area-4');
+assert.equal(record.legacyAlias, 'area-4#002');
 assert.equal(record.profile.placementCount, 1);
 console.log('bestiary catalog tests passed');
