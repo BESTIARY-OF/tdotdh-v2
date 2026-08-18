@@ -34,10 +34,6 @@ export function canonicalPolyomino(cells = []) {
     .join(';')).sort()[0] || '';
 }
 
-function compareCells(a, b) {
-  return a.y - b.y || a.x - b.x;
-}
-
 function growthCandidates(cells, maxWidth, maxHeight) {
   const occupied = new Set(cells.map(cellKey));
   const bounds = {
@@ -46,7 +42,7 @@ function growthCandidates(cells, maxWidth, maxHeight) {
     minY: Math.min(...cells.map(cell => cell.y)),
     maxY: Math.max(...cells.map(cell => cell.y)),
   };
-  const candidates = new Map();
+  const candidates = [];
   for (const cell of cells) {
     for (const [dx, dy] of DIRECTIONS) {
       const candidate = { x: cell.x + dx, y: cell.y + dy };
@@ -56,10 +52,10 @@ function growthCandidates(cells, maxWidth, maxHeight) {
       const nextMinY = Math.min(bounds.minY, candidate.y);
       const nextMaxY = Math.max(bounds.maxY, candidate.y);
       if (nextMaxX - nextMinX + 1 > maxWidth || nextMaxY - nextMinY + 1 > maxHeight) continue;
-      candidates.set(cellKey(candidate), candidate);
+      candidates.push(candidate);
     }
   }
-  return [...candidates.values()].sort(compareCells);
+  return candidates;
 }
 
 export function analyzePolyomino(cells = []) {
@@ -94,7 +90,7 @@ export function enumeratePolyominoes(area, { limit = 100, maxWidth = 20, maxHeig
       return;
     }
     for (const candidate of growthCandidates(cells, maxWidth, maxHeight)) {
-      visit(normalizeCells([...cells, candidate]));
+      visit([...cells, candidate]);
       if (shapes.length >= limit) return;
     }
   };

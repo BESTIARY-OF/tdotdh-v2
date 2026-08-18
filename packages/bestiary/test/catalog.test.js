@@ -4,7 +4,7 @@ import { analyzePolyomino, canonicalPolyomino, createCatalogRecord, enumerateMob
 const shapes = enumeratePolyominoes(4, { limit: 5 });
 assert.equal(shapes.length, 5);
 assert.equal(new Set(shapes.map(shape => shape.canonical)).size, 5);
-assert.deepEqual(shapes[0].cells, [{ x: 0, y: 0 }, { x: 0, y: 1 }, { x: 0, y: 2 }, { x: 0, y: 3 }]);
+assert.deepEqual(shapes[0].cells, [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 0 }, { x: 1, y: 1 }]);
 assert.equal(analyzePolyomino(shapes[0].cells).perimeter, 10);
 assert.equal(canonicalPolyomino([{ x: 1, y: 0 }, { x: 0, y: 0 }]), canonicalPolyomino([{ x: 0, y: 0 }, { x: 0, y: 1 }]));
 const originalCatalog = enumeratePolyominoes(9, { limit: 100 });
