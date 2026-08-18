@@ -33,6 +33,9 @@ const yinPlacements = enumerateMobPlacements(square, { yang: 0, yin: 8, limit: 1
 assert.equal(yinPlacements.placements.length, 10);
 assert.equal(yinPlacements.truncated, true);
 assert.equal(yinPlacements.placements[0].reduce((total, placement) => total + placement.area, 0), 4);
+const impossibleProfile = enumerateMobPlacements(square, { yang: 3, yin: 0, limit: 10 });
+assert.deepEqual(impossibleProfile.placements, []);
+assert.equal(impossibleProfile.truncated, false);
 
 const record = createCatalogRecord(shapes[1], { profile: { yang: 4, yin: 0, placementCount: 1 } });
 assert.equal(record.id, 'P-4-2');

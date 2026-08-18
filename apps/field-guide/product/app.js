@@ -34,7 +34,8 @@ const PRESET_ID_PREFIX = 'SEDLEC-00Q_ISLAND-';
 const PRESET_NAME = 'The Opinionated Set';
 const DEFAULT_BESTIARY_PROFILE = Object.freeze({ id: 'merlin0-original', name: 'Merlin0 · Original 100', source: 'merlin0', parentId: null, area: 9, limit: 100, yang: 9, yin: 0, strategy: 'yang-first' });
 const PRESET_TRANSFORMS = ['fixed', 'rotate-90', 'rotate-180', 'rotate-270', 'flip-x', 'flip-y', 'flip-xy'];
-const app = { pieces: [], selectedId: 3, centroidId: 3, bestiaryCentroidId: null, preset: null, presetData: null, presetStore: null, catalogRecords: new Map(), bestiaryShapes: [], bestiaryCatalogArea: null, bestiarySelected: null, bestiaryDraft: [], bestiaryProfile: { ...DEFAULT_BESTIARY_PROFILE }, bestiarySort: 'extent', bestiaryNeighborhood: null, placements: null, snapshots: [], selectedFamily: null, arrangementPinned: false, arrangementDisplayLimit: 24, lastFamilySelections: new Map(), familySteering: new Map(), familySteeringPass: 0, positionPreferences: new Map(), positionLocks: new Map(), preferenceEnabled: false, preferenceMode: 'rank', familySort: 'best', arrangementSort: 'best', neighborBandFilter: null, searchHints: false, searchStrategy: 'balanced', neighborTarget: null, coastBias: 1, gravityBias: 1, inletBias: 1, sidebarMode: 'pieces', topView: 'solver', nodes: 0, totalNodes: 0, completedPasses: 0, lastPersistedNodes: 0, progressEstimate: 'banked lower bound', solving: false, continuous: false, singlePass: false, pass: 0, catalogCount: 100, searchWorker: null, searchTimer: null, searchRequestId: null, searchRevision: 0, searchCheckpoint: null };
+const app = { pieces: [], selectedId: 3, centroidId: 3, bestiaryCentroidId: null, preset: null, presetData: null, presetStore: null, catalogRecords: new Map(), bestiaryShapes: [], bestiaryCatalogArea: null, bestiarySelected: null, bestiaryDraft: [], bestiaryProfile: { ...DEFAULT_BESTIARY_PROFILE }, bestiarySort: 'extent', bestiaryNeighborhood: null, bestiaryAtlasPage: 1, placements: null, snapshots: [], selectedFamily: null, arrangementPinned: false, arrangementDisplayLimit: 24, lastFamilySelections: new Map(), familySteering: new Map(), familySteeringPass: 0, positionPreferences: new Map(), positionLocks: new Map(), preferenceEnabled: false, preferenceMode: 'rank', familySort: 'best', arrangementSort: 'best', neighborBandFilter: null, searchHints: false, searchStrategy: 'balanced', neighborTarget: null, coastBias: 1, gravityBias: 1, inletBias: 1, sidebarMode: 'pieces', topView: 'solver', nodes: 0, totalNodes: 0, completedPasses: 0, lastPersistedNodes: 0, progressEstimate: 'banked lower bound', solving: false, continuous: false, singlePass: false, pass: 0, catalogCount: 100, searchWorker: null, searchTimer: null, searchRequestId: null, searchRevision: 0, searchCheckpoint: null };
+const BESTIARY_ATLAS_PAGE_SIZE = 8;
 const SNAPSHOT_STORAGE_KEY = 'tdotdh-bestiary-snapshots-v5';
 const COLOR_STORAGE_KEY = 'tdotdh-bestiary-piece-colors-v1';
 const POSITION_PREFERENCE_STORAGE_KEY = 'tdotdh-bestiary-position-preferences-v1';
@@ -114,7 +115,7 @@ function loadBestiaryFamilyStart(area, limit = app.bestiaryProfile.limit) {
   const api = bestiaryApi(); if (!api) return;
   app.bestiaryCatalogArea = Number(area);
   app.bestiaryShapes = api.enumeratePolyominoes(app.bestiaryCatalogArea, { limit, offset: 0 });
-  app.bestiaryNeighborhood = null; app.bestiarySort = 'extent'; app.bestiarySelected = app.bestiaryShapes[0] || null; app.bestiarySelectedTransform = 'fixed';
+  app.bestiaryNeighborhood = null; app.bestiarySort = 'extent'; app.bestiaryAtlasPage = 1; app.bestiarySelected = app.bestiaryShapes[0] || null; app.bestiarySelectedTransform = 'fixed';
 }
 function initializePresetState() {
   const stored = readJsonStorage(PRESET_STORAGE_KEY, null), storeHasSnapshots = Boolean(stored?.presets && Object.values(stored.presets).some(record => Array.isArray(record?.snapshots) && record.snapshots.length)), legacySnapshots = storeHasSnapshots ? [] : readJsonStorage(SNAPSHOT_STORAGE_KEY, []), legacyProgress = readJsonStorage(SEARCH_PROGRESS_STORAGE_KEY, null), legacyPreferences = readJsonStorage(POSITION_PREFERENCE_STORAGE_KEY, {}), legacyLocks = readJsonStorage(POSITION_LOCK_STORAGE_KEY, {}), legacySteering = readJsonStorage(FAMILY_STEERING_STORAGE_KEY, {});
@@ -1011,7 +1012,15 @@ function bestiaryGrid(cells, className = 'bestiary-grid') {
   const height = normalized.length ? Math.max(...normalized.map(cell => cell.y)) + 1 : 1;
   const occupied = new Set(normalized.map(cell => key(cell.x, cell.y)));
   const grid = document.createElement('div'); grid.className = className; grid.style.setProperty('--shape-width', width); grid.style.setProperty('--shape-height', height);
-  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) { const cell = document.createElement('i'); if (!occupied.has(key(x, y))) cell.className = 'empty'; grid.appendChild(cell); }
+  // Empty cells are represented by the grid background. Keeping only the
+  // occupied cells is important here: a 100-shape catalog otherwise creates
+  // thousands of unnecessary DOM nodes before the Bestiary is even visible.
+  for (const cell of normalized) {
+    const element = document.createElement('i');
+    element.style.gridColumn = String(cell.x + 1);
+    element.style.gridRow = String(cell.y + 1);
+    grid.appendChild(element);
+  }
   return grid;
 }
 function bestiaryMorphology(shape) {
@@ -1035,20 +1044,24 @@ function bestiarySortShapes(shapes) {
   return [...shapes].sort((left, right) => { const a = score(left), b = score(right); for (let index = 0; index < a.length; index++) if (a[index] !== b[index]) return a[index] - b[index]; return left.ordinal - right.ordinal; });
 }
 function renderBestiaryAtlasStatus() {
-  const status = document.querySelector('#bestiaryAtlasStatus'), next = document.querySelector('#bestiaryNextBatchButton'), neighborhood = document.querySelector('#bestiaryNeighborhoodButton');
+  const status = document.querySelector('#bestiaryAtlasStatus'), next = document.querySelector('#bestiaryNextBatchButton'), neighborhood = document.querySelector('#bestiaryNeighborhoodButton'), more = document.querySelector('#bestiaryShowMoreButton');
   if (!status) return;
   const ordinals = app.bestiaryShapes.map(shape => shape.ordinal), first = ordinals.length ? Math.min(...ordinals) : 0, last = ordinals.length ? Math.max(...ordinals) : 0;
   const selectedLabel = app.bestiaryNeighborhood ? ` · seed #${String(app.bestiaryNeighborhood.ordinal).padStart(3, '0')} neighborhood` : '';
-  status.textContent = ordinals.length ? `${bestiaryFamilyLabel(app.bestiaryCatalogArea)} · loaded ${ordinals.length} entries · cursor ${first}–${last} · ${app.bestiarySort} sort${selectedLabel}` : 'No catalog entries loaded';
+  const rendered = Math.min(ordinals.length, app.bestiaryAtlasPage * BESTIARY_ATLAS_PAGE_SIZE);
+  status.textContent = ordinals.length ? `${bestiaryFamilyLabel(app.bestiaryCatalogArea)} · loaded ${ordinals.length} entries · showing ${rendered} · cursor ${first}–${last} · ${app.bestiarySort} sort${selectedLabel}` : 'No catalog entries loaded';
   if (next) next.textContent = `Next batch · ${app.bestiaryProfile.limit}`;
   if (neighborhood) neighborhood.disabled = !app.bestiarySelected;
+  if (more) { more.hidden = rendered >= ordinals.length; more.textContent = `Show more · ${Math.min(BESTIARY_ATLAS_PAGE_SIZE, ordinals.length - rendered)}`; }
 }
 function renderBestiaryShapeList() {
   const root = document.querySelector('#bestiaryAtlas'); if (!root) return;
   root.innerHTML = '';
   if (!app.bestiaryShapes.length) { root.innerHTML = '<div class="bestiary-draft-empty">No shapes loaded yet.<br>The default profile starts with Merlin0 entries 001–100.</div>'; renderBestiaryAtlasStatus(); return; }
+  const sortedShapes = bestiarySortShapes(app.bestiaryShapes);
+  const visibleShapes = sortedShapes.slice(0, app.bestiaryAtlasPage * BESTIARY_ATLAS_PAGE_SIZE);
   const groups = new Map();
-  for (const shape of bestiarySortShapes(app.bestiaryShapes)) {
+  for (const shape of visibleShapes) {
     const groupKey = `${shape.metrics.width}×${shape.metrics.height}`;
     if (!groups.has(groupKey)) groups.set(groupKey, []);
     groups.get(groupKey).push(shape);
@@ -1076,8 +1089,13 @@ function renderBestiarySelection() {
   title.textContent = `${bestiaryFamilyLabel(shape.metrics.area)} · shape #${String(shape.ordinal).padStart(3, '0')}`; chip.textContent = 'CATALOG ENTRY'; chip.classList.remove('empty-chip'); preview.appendChild(bestiaryGrid(shape.cells));
   meta.innerHTML = `<strong>${shape.metrics.area} cells</strong> · ${shape.metrics.width} × ${shape.metrics.height} bounds · ${shape.metrics.perimeter} coastline edges · ${(shape.metrics.density * 100).toFixed(0)}% density<br><span>${shape.legacyAlias || `area-${shape.metrics.area}#${String(shape.ordinal).padStart(3, '0')}`} · ${bestiaryMorphology(shape)} morphology · GUID ${shape.guid}</span><br><span>canonical ${shape.canonical}</span>`;
   const profile = app.bestiaryProfile, api = bestiaryApi();
-  const placements = api?.enumerateMobPlacements ? api.enumerateMobPlacements(shape.cells, { yang: profile.yang, yin: profile.yin, strategy: profile.strategy, limit: 256 }) : { placements: [], truncated: false, sequence: [] };
   const areaTotal = profile.yang + profile.yin * 0.5;
+  // Do not ask the placement enumerator to fill a shape when the profile's
+  // mob area cannot possibly match it. Besides being unproductive, that
+  // mismatch can otherwise create a very large partial permutation search.
+  const placements = api?.enumerateMobPlacements && Math.abs(areaTotal - shape.metrics.area) < 1e-9
+    ? api.enumerateMobPlacements(shape.cells, { yang: profile.yang, yin: profile.yin, strategy: profile.strategy, limit: 256 })
+    : { placements: [], truncated: false, sequence: [] };
   mob.innerHTML = `<div><strong>Profile</strong> · ${profile.yang} yang × 1 + ${profile.yin} yin × 0.5 = ${areaTotal} occupied area</div><div><strong>Order</strong> · ${placements.sequence.join(' → ') || 'none'}</div><div><strong>Placements</strong> · ${placements.placements.length}${placements.truncated ? '+' : ''} valid arrangements${areaTotal === shape.metrics.area ? '' : ' · profile area does not fill this shape'}</div>`;
   orientation.value = app.bestiarySelectedTransform || 'fixed';
   const already = app.bestiaryDraft.some(item => item.record.canonical === shape.canonical);
@@ -1119,7 +1137,7 @@ function loadNextBestiaryBatch() {
 }
 function useBestiaryNeighborhood() {
   if (!app.bestiarySelected) return;
-  app.bestiaryNeighborhood = app.bestiarySelected; app.bestiarySort = 'neighborhood';
+  app.bestiaryNeighborhood = app.bestiarySelected; app.bestiarySort = 'neighborhood'; app.bestiaryAtlasPage = 1;
   const sort = document.querySelector('#bestiarySort'); if (sort) sort.value = app.bestiarySort;
   renderBestiaryView(); toast(`Seeded the catalog view around shape #${String(app.bestiarySelected.ordinal).padStart(3, '0')}`);
 }
@@ -1147,9 +1165,10 @@ function wireBestiary() {
   for (const id of ['bestiaryArea', 'bestiaryLimit', 'bestiaryYang', 'bestiaryYin', 'bestiaryStrategy']) document.querySelector(`#${id}`)?.addEventListener('change', ensureBestiaryProfileCopy);
   document.querySelector('#bestiaryOrientation')?.addEventListener('change', event => { app.bestiarySelectedTransform = event.target.value; renderBestiarySelection(); });
   document.querySelector('#bestiaryAddButton')?.addEventListener('click', addBestiarySelection);
-  document.querySelector('#bestiarySort')?.addEventListener('change', event => { app.bestiarySort = event.target.value; renderBestiaryView(); });
+  document.querySelector('#bestiarySort')?.addEventListener('change', event => { app.bestiarySort = event.target.value; app.bestiaryAtlasPage = 1; renderBestiaryView(); });
   document.querySelector('#bestiaryNeighborhoodButton')?.addEventListener('click', useBestiaryNeighborhood);
   document.querySelector('#bestiaryNextBatchButton')?.addEventListener('click', loadNextBestiaryBatch);
+  document.querySelector('#bestiaryShowMoreButton')?.addEventListener('click', () => { app.bestiaryAtlasPage += 1; renderBestiaryView(); });
   document.querySelector('#bestiaryActivateButton')?.addEventListener('click', activateBestiaryDraft);
   document.querySelector('#bestiaryClearButton')?.addEventListener('click', () => { app.bestiaryDraft = []; app.bestiaryCentroidId = null; renderBestiaryView(); });
 }
@@ -1386,7 +1405,9 @@ function bootProduct() {
   document.querySelector('#atlasNav').addEventListener('click', () => setTopView('atlas'));
   document.querySelector('#bestiaryNav').addEventListener('click', () => setTopView('bestiary'));
   document.querySelector('#methodNav').addEventListener('click', () => setTopView('method'));
-  wireBestiary(); syncBestiaryControls(); renderBestiaryView();
+  wireBestiary(); syncBestiaryControls();
+  const bestiaryNavCount = document.querySelector('#bestiaryNavCount');
+  if (bestiaryNavCount) bestiaryNavCount.textContent = String(app.bestiaryShapes.length || 100).padStart(2, '0');
   document.addEventListener('keydown', event => { if (event.key === 'Escape') hideAtlasHoverCard(); });
   window.addEventListener('resize', fitBoardToViewport);
   if (window.ResizeObserver) new ResizeObserver(fitBoardToViewport).observe(document.querySelector('.board-frame'));

@@ -146,11 +146,18 @@ export function enumerateMobPlacements(cells, { yang = 0, yin = 0, strategy = 'y
   const sequence = mobPlacementSequence({ yang: Math.max(0, Math.floor(Number(yang) || 0)), yin: Math.max(0, Math.floor(Number(yin) || 0)), strategy });
   const placements = [];
   let truncated = false;
+  const requestedArea = sequence.reduce((total, type) => total + (type === 'yang' ? 1 : 0.5), 0);
+  const targetArea = shapeCells.length;
+  if (!shapeCells.length || !sequence.length || Math.abs(requestedArea - targetArea) > 1e-9) {
+    return { placements, truncated, sequence, shapeArea: targetArea };
+  }
   const visit = (index, current) => {
     if (placements.length >= limit) { truncated = true; return; }
+    const remainingArea = sequence.slice(index).reduce((total, type) => total + (type === 'yang' ? 1 : 0.5), 0);
+    const currentArea = current.reduce((total, placement) => total + placement.area, 0);
+    if (Math.abs((currentArea + remainingArea) - targetArea) > 1e-9) return;
     if (index >= sequence.length) {
-      const totalArea = current.reduce((total, placement) => total + (placement.mobType === 'yang' ? 1 : 0.5), 0);
-      if (Math.abs(totalArea - shapeCells.length) < 1e-9) placements.push(current.map(placement => ({ ...placement, cell: { ...placement.cell } })));
+      if (Math.abs(currentArea - targetArea) < 1e-9) placements.push(current.map(placement => ({ ...placement, cell: { ...placement.cell } })));
       return;
     }
     const mobType = sequence[index];
@@ -175,7 +182,7 @@ export function enumerateMobPlacements(cells, { yang = 0, yin = 0, strategy = 'y
       if (placements.length >= limit) return;
     }
   };
-  if (shapeCells.length && sequence.length && sequence.reduce((total, type) => total + (type === 'yang' ? 1 : 0.5), 0) <= shapeCells.length) visit(0, []);
+  visit(0, []);
   if (placements.length >= limit) truncated = true;
   return { placements, truncated, sequence, shapeArea: shapeCells.length };
 }

@@ -358,6 +358,7 @@ button { border: 0; font: inherit; cursor: pointer; }
 .bestiary-atlas-toolbar .primary-button { grid-column: 1 / -1; }
 .bestiary-atlas-status { min-height: 20px; color: #8b9994; font: 8px/1.5 var(--mono); }
 .bestiary-atlas { display: grid; gap: 10px; max-height: 490px; overflow: auto; padding: 2px 2px 2px 0; }
+.bestiary-show-more { width: 100%; margin-top: 7px; }
 .bestiary-atlas-group { display: grid; gap: 5px; }
 .bestiary-atlas-group-heading { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; color: #8b9994; font: 8px var(--mono); text-transform: uppercase; }
 .bestiary-atlas-group-heading strong { color: var(--ink); font: 600 11px var(--display); letter-spacing: -.02em; text-transform: none; }
