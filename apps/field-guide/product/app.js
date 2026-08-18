@@ -85,7 +85,7 @@ function hydrateBestiaryCatalog() {
   const api = bestiaryApi(); if (!api) return;
   restoreBestiaryProfile();
   const originalShapes = api.enumeratePolyominoes(DEFAULT_BESTIARY_PROFILE.area, { limit: DEFAULT_BESTIARY_PROFILE.limit });
-  for (const shape of originalShapes) if (!app.catalogRecords.has(String(shape.ordinal))) app.catalogRecords.set(String(shape.ordinal), sourceCatalogRecord(api, shape));
+  for (const shape of originalShapes) app.catalogRecords.set(String(shape.ordinal), sourceCatalogRecord(api, shape));
   if (app.bestiaryProfile.id === DEFAULT_BESTIARY_PROFILE.id) {
     app.bestiaryShapes = originalShapes;
   } else {
