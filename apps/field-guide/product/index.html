@@ -23,6 +23,7 @@
         <nav class="top-nav" aria-label="Primary navigation">
           <button class="nav-item active" id="solverNav" type="button">Solver <span class="nav-count">01</span></button>
           <button class="nav-item" id="atlasNav" type="button">Atlas <span class="nav-count" id="atlasNavCount">00</span></button>
+          <button class="nav-item" id="bestiaryNav" type="button">Bestiary <span class="nav-count" id="bestiaryNavCount">00</span></button>
           <button class="nav-item" id="methodNav" type="button">Method</button>
         </nav>
         <div class="top-actions">
@@ -127,6 +128,41 @@
           <div class="atlas-family-grid" id="atlasFamilyGrid"></div>
         </section>
 
+        <section class="nav-view bestiary-view" id="bestiaryView" hidden aria-label="TDOTDH shape and mob bestiary">
+          <div class="nav-view-header">
+            <div><p class="eyebrow accent">Merlin0 lineage · v2 catalog</p><h2>Shape catalog → opinionated set.</h2><p class="nav-view-subtitle">Enumerate free polyominoes, inspect 1-area yang and 0.5-area yin mob placements, then stage the exact oriented pieces that the accelerated solver will receive.</p></div>
+            <div class="atlas-summary" id="bestiarySummary"></div>
+          </div>
+          <div class="bestiary-layout">
+            <section class="bestiary-panel bestiary-controls-panel">
+              <div class="section-heading"><div><p class="eyebrow">Profile</p><h3>Generate a catalog</h3></div></div>
+              <form id="bestiaryProfileForm" class="bestiary-profile-form">
+                <label>Shape area <input id="bestiaryArea" type="number" min="1" max="13" value="9" /></label>
+                <label>Catalog limit <input id="bestiaryLimit" type="number" min="1" max="5000" value="100" /></label>
+                <label>Yang mobs · 1 area <input id="bestiaryYang" type="number" min="0" max="26" value="9" /></label>
+                <label>Yin mobs · 0.5 area <input id="bestiaryYin" type="number" min="0" max="52" value="0" /></label>
+                <label>Placement order <select id="bestiaryStrategy"><option value="yang-first">yang first</option><option value="yin-first">yin first</option><option value="turn-taking">turn-taking</option></select></label>
+                <button class="primary-button" id="bestiaryGenerateButton" type="submit">Enumerate shapes</button>
+              </form>
+               <div class="bestiary-profile-note" id="bestiaryProfileNote">The default profile mirrors the 9-area, 100-shape source catalog. Placement enumeration is bounded for responsive inspection. Catalogs may inspect other areas; solver activation requires fifteen 9-area nonominoes.</div>
+              <div class="bestiary-shape-list" id="bestiaryShapeList" aria-label="Generated polyomino shapes"></div>
+            </section>
+            <section class="bestiary-panel bestiary-inspector-panel">
+              <div class="section-heading"><div><p class="eyebrow">Selected catalog entry</p><h3 id="bestiarySelectedTitle">Choose a shape</h3></div><span class="selected-chip" id="bestiarySelectedChip">NOT SELECTED</span></div>
+              <div class="bestiary-shape-preview" id="bestiaryShapePreview"></div>
+              <div class="bestiary-shape-meta" id="bestiaryShapeMeta">Generate a catalog, then select an entry to inspect its geometry and mob profile.</div>
+              <div class="bestiary-mob-summary" id="bestiaryMobSummary"></div>
+              <div class="bestiary-orientation-row"><label>Solver orientation <select id="bestiaryOrientation"><option value="fixed">fixed</option><option value="rotate-90">90° rotated</option><option value="rotate-180">180° rotated</option><option value="rotate-270">270° rotated</option><option value="flip-x">X-flipped</option><option value="flip-y">Y-flipped</option><option value="flip-xy">X + Y flipped</option></select></label><button class="ghost-button" id="bestiaryAddButton" type="button" disabled>Add to opinionated set</button></div>
+            </section>
+            <section class="bestiary-panel bestiary-draft-panel">
+              <div class="section-heading"><div><p class="eyebrow">Solver handoff</p><h3>Opinionated set <span id="bestiaryDraftCount">00 / 15</span></h3></div></div>
+              <div class="bestiary-draft-list" id="bestiaryDraftList"></div>
+              <div class="bestiary-draft-actions"><label>Centroid <select id="bestiaryCentroid" disabled></select></label><button class="primary-button" id="bestiaryActivateButton" type="button" disabled>Activate for solver</button><button class="ghost-button" id="bestiaryClearButton" type="button">Clear draft</button></div>
+              <p class="method-bound-note">Activation creates a new persisted preset. Piece numbers are stable catalog IDs; orientations are carried into the solver payload, while the GPU search and CPU oracle continue to share the same canonical acceptance boundary.</p>
+            </section>
+          </div>
+        </section>
+
         <section class="nav-view method-view" id="methodView" hidden aria-label="Search method">
           <div class="nav-view-header"><div><p class="eyebrow accent">Search method</p><h2>How the field grows.</h2><p class="nav-view-subtitle">The solver searches a high-dimensional tree, then exposes a few honest projections so the process can be inspected without pretending it is a flat map.</p></div></div>
           <div class="method-grid">
@@ -164,6 +200,7 @@
       <dialog id="helpDialog"><button class="dialog-close" id="closeDialog" type="button">×</button><p class="eyebrow accent">About the field guide</p><h2>Pack 15 nonominoes into one clean field.</h2><p>This solver uses the original 9-area TDOTDH representatives and a variable-size connected field. It only captures arrangements that pass the no-hole and off-coast centroid checks.</p></dialog>
     </div>
     <script type="module" src="/apps/field-guide/product/v2-runtime.js?v=20260813-steeringfix1"></script>
+    <script type="module" src="/apps/field-guide/product/bestiary-runtime.js?v=20260817-bestiary1"></script>
     <script src="/apps/field-guide/product/app.js?v=20260813-steeringfix2"></script>
   </body>
 </html>

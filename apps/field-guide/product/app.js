@@ -28,10 +28,11 @@ const SOURCE_SHAPES = {
 
 const PRESET_STORAGE_KEY = 'tdotdh-bestiary-presets-v1';
 const ACTIVE_PRESET_STORAGE_KEY = 'tdotdh-bestiary-active-preset-v1';
+const CATALOG_STORAGE_KEY = 'tdotdh-bestiary-catalog-v1';
 const PRESET_ID_PREFIX = 'SEDLEC-00Q_ISLAND-';
 const PRESET_NAME = 'The Opinionated Set';
 const PRESET_TRANSFORMS = ['fixed', 'rotate-90', 'rotate-180', 'rotate-270', 'flip-x', 'flip-y', 'flip-xy'];
-const app = { pieces: [], selectedId: 3, centroidId: 3, preset: null, presetData: null, presetStore: null, placements: null, snapshots: [], selectedFamily: null, arrangementPinned: false, arrangementDisplayLimit: 24, lastFamilySelections: new Map(), familySteering: new Map(), familySteeringPass: 0, positionPreferences: new Map(), positionLocks: new Map(), preferenceEnabled: false, preferenceMode: 'rank', familySort: 'best', arrangementSort: 'best', neighborBandFilter: null, searchHints: false, searchStrategy: 'balanced', neighborTarget: null, coastBias: 1, gravityBias: 1, inletBias: 1, sidebarMode: 'pieces', topView: 'solver', nodes: 0, totalNodes: 0, completedPasses: 0, lastPersistedNodes: 0, progressEstimate: 'banked lower bound', solving: false, continuous: false, singlePass: false, pass: 0, catalogCount: 100, searchWorker: null, searchTimer: null, searchRequestId: null, searchRevision: 0, searchCheckpoint: null };
+const app = { pieces: [], selectedId: 3, centroidId: 3, bestiaryCentroidId: null, preset: null, presetData: null, presetStore: null, catalogRecords: new Map(), bestiaryShapes: [], bestiarySelected: null, bestiaryDraft: [], bestiaryProfile: { area: 9, limit: 100, yang: 9, yin: 0, strategy: 'yang-first' }, placements: null, snapshots: [], selectedFamily: null, arrangementPinned: false, arrangementDisplayLimit: 24, lastFamilySelections: new Map(), familySteering: new Map(), familySteeringPass: 0, positionPreferences: new Map(), positionLocks: new Map(), preferenceEnabled: false, preferenceMode: 'rank', familySort: 'best', arrangementSort: 'best', neighborBandFilter: null, searchHints: false, searchStrategy: 'balanced', neighborTarget: null, coastBias: 1, gravityBias: 1, inletBias: 1, sidebarMode: 'pieces', topView: 'solver', nodes: 0, totalNodes: 0, completedPasses: 0, lastPersistedNodes: 0, progressEstimate: 'banked lower bound', solving: false, continuous: false, singlePass: false, pass: 0, catalogCount: 100, searchWorker: null, searchTimer: null, searchRequestId: null, searchRevision: 0, searchCheckpoint: null };
 const SNAPSHOT_STORAGE_KEY = 'tdotdh-bestiary-snapshots-v5';
 const COLOR_STORAGE_KEY = 'tdotdh-bestiary-piece-colors-v1';
 const POSITION_PREFERENCE_STORAGE_KEY = 'tdotdh-bestiary-position-preferences-v1';
@@ -55,6 +56,24 @@ function readJsonStorage(storageKey, fallback) {
     console.warn(`Stored data for ${storageKey} could not be read.`, error);
     return fallback;
   }
+}
+function bestiaryApi() { return window.__TDOTDH_BESTIARY__ || null; }
+function sourceShape(id) { const record = app.catalogRecords.get(String(id)); return record?.cells || SOURCE_SHAPES[id]; }
+function restoreCatalogRecords() {
+  const stored = readJsonStorage(CATALOG_STORAGE_KEY, []);
+  if (!Array.isArray(stored)) return;
+  for (const record of stored) if (record?.id != null && Array.isArray(record.cells) && record.cells.length) app.catalogRecords.set(String(record.id), record);
+}
+function persistCatalogRecords() {
+  try { localStorage.setItem(CATALOG_STORAGE_KEY, JSON.stringify([...app.catalogRecords.values()])); } catch (error) { console.warn('The generated catalog could not be saved.', error); }
+}
+function catalogPieceId(shape) {
+  const api = bestiaryApi();
+  if (Number(shape.area || shape.metrics?.area) === AREA && Number(shape.ordinal) >= 1 && Number(shape.ordinal) <= 100 && api) {
+    const source = SOURCE_SHAPES[Number(shape.ordinal)];
+    if (source && api.canonicalPolyomino(source) === (shape.canonical || api.canonicalPolyomino(shape.cells))) return Number(shape.ordinal);
+  }
+  return Number(shape.area || shape.metrics?.area || AREA) * 1000 + Number(shape.ordinal || 1);
 }
 function initializePresetState() {
   const stored = readJsonStorage(PRESET_STORAGE_KEY, null), storeHasSnapshots = Boolean(stored?.presets && Object.values(stored.presets).some(record => Array.isArray(record?.snapshots) && record.snapshots.length)), legacySnapshots = storeHasSnapshots ? [] : readJsonStorage(SNAPSHOT_STORAGE_KEY, []), legacyProgress = readJsonStorage(SEARCH_PROGRESS_STORAGE_KEY, null), legacyPreferences = readJsonStorage(POSITION_PREFERENCE_STORAGE_KEY, {}), legacyLocks = readJsonStorage(POSITION_LOCK_STORAGE_KEY, {}), legacySteering = readJsonStorage(FAMILY_STEERING_STORAGE_KEY, {});
@@ -101,7 +120,7 @@ function nextPresetId() { const index = Math.max(1, Number(app.presetStore?.next
 function forkPreset(patch) {
   const next = { ...app.preset, ...patch, pieces: (patch.pieces || app.preset.pieces).map(piece => ({ permutation: Number(piece.permutation), transform: PRESET_TRANSFORMS.includes(piece.transform) ? piece.transform : 'fixed' })) };
   const pieceIds = next.pieces.map(piece => piece.permutation);
-  if (pieceIds.some(id => !SOURCE_SHAPES[id]) || new Set(pieceIds).size !== pieceIds.length) { toast('Preset pieces must be unique TDOTDH permutations.'); return false; }
+  if (pieceIds.some(id => !sourceShape(id)) || new Set(pieceIds).size !== pieceIds.length) { toast('Preset pieces must be unique TDOTDH permutations.'); return false; }
   if (!next.pieces.some(piece => piece.permutation === Number(next.centroidId))) { toast('The centroid must be one of the preset pieces.'); return false; }
   if (modifiedPieceCount(next) > (next.maxModifiedPieces || 3)) { toast(`This preset allows at most ${next.maxModifiedPieces || 3} modified pieces.`); return false; }
   stopContinuousSearch('Search paused before preset fork');
@@ -508,7 +527,9 @@ function createPieces() {
   const savedColors = savedPieceColors();
   return (app.preset?.pieces || PIECE_IDS.map(id => ({ permutation: id, transform: LOCKS[id] || 'fixed' }))).map((definition, index) => {
     const id = Number(definition.permutation);
-    let cells = normalize(SOURCE_SHAPES[id].map(([x, y]) => ({ x, y })));
+    const shape = sourceShape(id);
+    if (!shape) return null;
+    let cells = normalize(shape.map(cell => ({ x: Array.isArray(cell) ? cell[0] : cell.x, y: Array.isArray(cell) ? cell[1] : cell.y })));
     // The source representative is stored exactly as emitted. The visible
     // orientation is normalized for the inspector; locked transforms are
     // applied only when generating a placement.
@@ -923,6 +944,96 @@ function renderAtlasView() {
     });
   });
 }
+function bestiaryProfileFromControls() {
+  const number = id => Math.max(0, Math.floor(Number(document.querySelector(`#${id}`)?.value) || 0));
+  return { area: Math.max(1, Math.min(13, number('bestiaryArea') || 9)), limit: Math.max(1, Math.min(5000, number('bestiaryLimit') || 100)), yang: number('bestiaryYang'), yin: number('bestiaryYin'), strategy: document.querySelector('#bestiaryStrategy')?.value || 'yang-first' };
+}
+function bestiaryGrid(cells, className = 'bestiary-grid') {
+  const api = bestiaryApi();
+  const normalized = api?.normalizeCells ? api.normalizeCells(cells) : normalize(cells);
+  const width = normalized.length ? Math.max(...normalized.map(cell => cell.x)) + 1 : 1;
+  const height = normalized.length ? Math.max(...normalized.map(cell => cell.y)) + 1 : 1;
+  const occupied = new Set(normalized.map(cell => key(cell.x, cell.y)));
+  const grid = document.createElement('div'); grid.className = className; grid.style.setProperty('--shape-width', width); grid.style.setProperty('--shape-height', height);
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) { const cell = document.createElement('i'); if (!occupied.has(key(x, y))) cell.className = 'empty'; grid.appendChild(cell); }
+  return grid;
+}
+function renderBestiaryShapeList() {
+  const root = document.querySelector('#bestiaryShapeList'); if (!root) return;
+  root.innerHTML = '';
+  if (!app.bestiaryShapes.length) { root.innerHTML = '<div class="bestiary-draft-empty">No shapes generated yet.<br>Choose a profile and enumerate the catalog.</div>'; return; }
+  app.bestiaryShapes.forEach(shape => {
+    const button = document.createElement('button'); button.type = 'button'; button.className = `bestiary-shape-button ${app.bestiarySelected?.canonical === shape.canonical ? 'selected' : ''}`; button.setAttribute('aria-label', `Area ${shape.metrics.area} shape ${shape.ordinal}`);
+    const preview = document.createElement('div'); preview.className = 'bestiary-mini-shape'; preview.appendChild(bestiaryGrid(shape.cells, 'bestiary-mini-grid'));
+    button.appendChild(preview); button.insertAdjacentHTML('beforeend', `<strong>#${String(shape.ordinal).padStart(3, '0')}</strong><small>${shape.metrics.width}×${shape.metrics.height} · ${shape.metrics.perimeter} coast</small>`);
+    button.addEventListener('click', () => { app.bestiarySelected = shape; app.bestiarySelectedTransform = 'fixed'; renderBestiaryView(); }); root.appendChild(button);
+  });
+}
+function renderBestiarySelection() {
+  const title = document.querySelector('#bestiarySelectedTitle'), chip = document.querySelector('#bestiarySelectedChip'), preview = document.querySelector('#bestiaryShapePreview'), meta = document.querySelector('#bestiaryShapeMeta'), mob = document.querySelector('#bestiaryMobSummary'), orientation = document.querySelector('#bestiaryOrientation'), add = document.querySelector('#bestiaryAddButton');
+  if (!title || !chip || !preview || !meta || !mob || !orientation || !add) return;
+  preview.innerHTML = '';
+  const shape = app.bestiarySelected;
+  if (!shape) { title.textContent = 'Choose a shape'; chip.textContent = 'NOT SELECTED'; chip.classList.add('empty-chip'); meta.textContent = 'Generate a catalog, then select an entry to inspect its geometry and mob profile.'; mob.innerHTML = ''; orientation.value = 'fixed'; add.disabled = true; return; }
+  title.textContent = `Area ${shape.metrics.area} · shape #${String(shape.ordinal).padStart(3, '0')}`; chip.textContent = 'CATALOG ENTRY'; chip.classList.remove('empty-chip'); preview.appendChild(bestiaryGrid(shape.cells));
+  meta.innerHTML = `<strong>${shape.metrics.area} cells</strong> · ${shape.metrics.width} × ${shape.metrics.height} bounds · ${shape.metrics.perimeter} coastline edges · ${(shape.metrics.density * 100).toFixed(0)}% density<br><span>canonical ${shape.canonical}</span>`;
+  const profile = app.bestiaryProfile, api = bestiaryApi();
+  const placements = api?.enumerateMobPlacements ? api.enumerateMobPlacements(shape.cells, { yang: profile.yang, yin: profile.yin, strategy: profile.strategy, limit: 256 }) : { placements: [], truncated: false, sequence: [] };
+  const areaTotal = profile.yang + profile.yin * 0.5;
+  mob.innerHTML = `<div><strong>Profile</strong> · ${profile.yang} yang × 1 + ${profile.yin} yin × 0.5 = ${areaTotal} occupied area</div><div><strong>Order</strong> · ${placements.sequence.join(' → ') || 'none'}</div><div><strong>Placements</strong> · ${placements.placements.length}${placements.truncated ? '+' : ''} valid arrangements${areaTotal === shape.metrics.area ? '' : ' · profile area does not fill this shape'}</div>`;
+  orientation.value = app.bestiarySelectedTransform || 'fixed';
+  const already = app.bestiaryDraft.some(item => item.record.canonical === shape.canonical);
+  add.disabled = already || app.bestiaryDraft.length >= 15 || Math.abs(areaTotal - shape.metrics.area) > 1e-9;
+}
+function renderBestiaryDraft() {
+  const root = document.querySelector('#bestiaryDraftList'), count = document.querySelector('#bestiaryDraftCount'), centroid = document.querySelector('#bestiaryCentroid'), activate = document.querySelector('#bestiaryActivateButton'), navCount = document.querySelector('#bestiaryNavCount');
+  if (!root || !count || !centroid || !activate) return;
+  count.textContent = `${String(app.bestiaryDraft.length).padStart(2, '0')} / 15`; if (navCount) navCount.textContent = String(app.bestiaryShapes.length || 100).padStart(2, '0');
+  root.innerHTML = '';
+  if (!app.bestiaryDraft.length) root.innerHTML = '<div class="bestiary-draft-empty">Stage up to 15 catalog entries here.<br>Each entry becomes one numbered solver piece.</div>';
+  const options = app.bestiaryDraft.map(item => `<option value="${item.id}">#${String(item.id).padStart(3, '0')}</option>`).join('');
+  app.bestiaryDraft.forEach((item, index) => {
+    const row = document.createElement('div'); row.className = 'bestiary-draft-row'; row.innerHTML = `<strong>#${String(item.id).padStart(3, '0')}</strong><span>shape ${String(item.record.ordinal).padStart(3, '0')} · ${item.record.metrics.area} area</span><select aria-label="Orientation for piece ${item.id}" data-draft-transform="${item.id}">${PRESET_TRANSFORMS.map(transform => `<option value="${transform}" ${transform === item.transform ? 'selected' : ''}>${orientationLabel(transform)}</option>`).join('')}</select><button class="bestiary-draft-remove" type="button" aria-label="Remove piece ${item.id}" data-draft-remove="${item.id}">×</button>`; root.appendChild(row);
+  });
+  centroid.disabled = !app.bestiaryDraft.length; centroid.innerHTML = options; if (app.bestiaryDraft.length) { if (!app.bestiaryDraft.some(item => item.id === app.bestiaryCentroidId)) app.bestiaryCentroidId = app.bestiaryDraft[0].id; centroid.value = String(app.bestiaryCentroidId); }
+   activate.disabled = app.bestiaryDraft.length !== 15 || app.bestiaryDraft.some(item => Number(item.record.metrics?.area) !== AREA);
+  root.querySelectorAll('[data-draft-transform]').forEach(select => select.addEventListener('change', event => { const item = app.bestiaryDraft.find(entry => String(entry.id) === event.target.dataset.draftTransform); if (item) item.transform = event.target.value; renderBestiarySelection(); }));
+  root.querySelectorAll('[data-draft-remove]').forEach(button => button.addEventListener('click', event => { app.bestiaryDraft = app.bestiaryDraft.filter(item => String(item.id) !== event.target.dataset.draftRemove); renderBestiaryView(); }));
+  centroid.onchange = event => { app.bestiaryCentroidId = Number(event.target.value); };
+}
+function renderBestiaryView() {
+  const summary = document.querySelector('#bestiarySummary'); if (summary) summary.innerHTML = `<strong>${app.bestiaryShapes.length || 0}</strong><span>catalog shapes</span><strong>${app.bestiaryDraft.length}</strong><span>staged pieces</span>`;
+  const note = document.querySelector('#bestiaryProfileNote'); if (note) { const profile = app.bestiaryProfile; note.textContent = `Area ${profile.area} · ${profile.limit} catalog entries · ${profile.yang} yang + ${profile.yin} yin · ${profile.strategy}. Select a shape to inspect bounded mob placements. Solver activation requires fifteen ${AREA}-area nonominoes.`; }
+  renderBestiaryShapeList(); renderBestiarySelection(); renderBestiaryDraft();
+}
+function generateBestiaryCatalog() {
+  const api = bestiaryApi(); if (!api) { toast('The bestiary algorithms are still loading'); return; }
+  app.bestiaryProfile = bestiaryProfileFromControls(); app.bestiaryShapes = api.enumeratePolyominoes(app.bestiaryProfile.area, { limit: app.bestiaryProfile.limit }); app.bestiarySelected = app.bestiaryShapes[0] || null; app.bestiarySelectedTransform = 'fixed'; renderBestiaryView(); toast(`${app.bestiaryShapes.length} canonical shapes enumerated`);
+}
+function addBestiarySelection() {
+  const shape = app.bestiarySelected, api = bestiaryApi(); if (!shape || !api) return;
+  const profile = app.bestiaryProfile, placements = api.enumerateMobPlacements(shape.cells, { yang: profile.yang, yin: profile.yin, strategy: profile.strategy, limit: 256 }), id = catalogPieceId(shape), record = api.createCatalogRecord(shape, { area: profile.area, profile: { yang: profile.yang, yin: profile.yin, strategy: profile.strategy, placementCount: placements.placements.length, placementTruncated: placements.truncated } });
+  record.id = String(id); app.catalogRecords.set(String(id), record); persistCatalogRecords(); app.bestiaryDraft.push({ id, record, transform: app.bestiarySelectedTransform || 'fixed' }); app.bestiaryCentroidId ||= id; renderBestiaryView(); toast(`#${String(id).padStart(3, '0')} staged for the opinionated set`);
+}
+ function activateBestiaryDraft() {
+   if (app.bestiaryDraft.length !== 15) { toast('Stage exactly 15 pieces before activation'); return; }
+   if (app.bestiaryDraft.some(item => Number(item.record.metrics?.area) !== AREA)) {
+     toast(`Solver profiles require fifteen ${AREA}-area nonominoes; other areas remain catalog-only`);
+     return;
+   }
+  const centroidId = Number(app.bestiaryCentroidId || app.bestiaryDraft[0].id), pieces = app.bestiaryDraft.map(item => ({ permutation: Number(item.id), transform: PRESET_TRANSFORMS.includes(item.transform) ? item.transform : 'fixed' }));
+  if (!pieces.some(piece => piece.permutation === centroidId)) { toast('Choose a staged piece as the centroid'); return; }
+  const activated = forkPreset({ name: 'Opinionated Set · catalog profile', catalog: `TDOTDH-BESTIARY-${app.bestiaryProfile.area}`, centroidId, maxModifiedPieces: 15, pieces, catalogEntries: app.bestiaryDraft.map(item => ({ id: item.id, canonical: item.record.canonical, profile: item.record.profile })) });
+  if (activated) { setTopView('solver'); toast('Catalog profile activated for accelerated search'); }
+}
+function wireBestiary() {
+  const form = document.querySelector('#bestiaryProfileForm'); if (!form) return;
+  form.addEventListener('submit', event => { event.preventDefault(); generateBestiaryCatalog(); });
+  document.querySelector('#bestiaryOrientation')?.addEventListener('change', event => { app.bestiarySelectedTransform = event.target.value; renderBestiarySelection(); });
+  document.querySelector('#bestiaryAddButton')?.addEventListener('click', addBestiarySelection);
+  document.querySelector('#bestiaryActivateButton')?.addEventListener('click', activateBestiaryDraft);
+  document.querySelector('#bestiaryClearButton')?.addEventListener('click', () => { app.bestiaryDraft = []; app.bestiaryCentroidId = null; renderBestiaryView(); });
+}
 function renderPresetEditor() {
   const centroidSelect = document.querySelector('#presetCentroid'), root = document.querySelector('#presetPieceEditor'), title = document.querySelector('#presetEditorTitle'), id = document.querySelector('#presetEditorId'), modified = document.querySelector('#presetModifiedCount');
   if (!centroidSelect || !root || !app.preset) return;
@@ -948,11 +1059,12 @@ function updateSearchTelemetry() {
 function setTopView(view) {
   hideAtlasHoverCard();
   app.topView = view;
-  const workspace = document.querySelector('.workspace'), solver = document.querySelector('#solverStage'), atlas = document.querySelector('#atlasView'), method = document.querySelector('#methodView');
-  workspace.classList.toggle('nav-atlas', view === 'atlas'); workspace.classList.toggle('nav-method', view === 'method');
-  solver.hidden = view !== 'solver'; atlas.hidden = view !== 'atlas'; method.hidden = view !== 'method';
-  document.querySelector('#solverNav').classList.toggle('active', view === 'solver'); document.querySelector('#atlasNav').classList.toggle('active', view === 'atlas'); document.querySelector('#methodNav').classList.toggle('active', view === 'method');
+  const workspace = document.querySelector('.workspace'), solver = document.querySelector('#solverStage'), atlas = document.querySelector('#atlasView'), bestiary = document.querySelector('#bestiaryView'), method = document.querySelector('#methodView');
+  workspace.classList.toggle('nav-atlas', view === 'atlas'); workspace.classList.toggle('nav-bestiary', view === 'bestiary'); workspace.classList.toggle('nav-method', view === 'method');
+  solver.hidden = view !== 'solver'; atlas.hidden = view !== 'atlas'; bestiary.hidden = view !== 'bestiary'; method.hidden = view !== 'method';
+  document.querySelector('#solverNav').classList.toggle('active', view === 'solver'); document.querySelector('#atlasNav').classList.toggle('active', view === 'atlas'); document.querySelector('#bestiaryNav').classList.toggle('active', view === 'bestiary'); document.querySelector('#methodNav').classList.toggle('active', view === 'method');
   if (view === 'atlas') renderAtlasView();
+  if (view === 'bestiary') renderBestiaryView();
   if (view === 'method') renderMethodView();
 }
 function renderSidebarMode() {
@@ -1128,29 +1240,36 @@ function launchSearchPass() {
 function solve() { if (app.continuous) { stopContinuousSearch(); return; } app.singlePass = new URLSearchParams(location.search).get('singlePass') === '1'; app.continuous = true; app.pass = 0; app.familySteeringPass = 0; app.searchCheckpoint = null; app.searchRevision += 1; persistSearchProgress(true); setSearchButton(); document.querySelector('#searchStatus').textContent = 'Growing connected candidates'; showSearchBoard(); launchSearchPass(); }
 function resetApp() { if (app.searchWorker) app.searchWorker.terminate(); if (app.searchTimer) clearTimeout(app.searchTimer); app.searchWorker = null; app.searchTimer = null; app.solving = false; app.continuous = false; app.searchCheckpoint = null; app.sidebarMode = 'pieces'; app.selectedFamily = null; app.arrangementPinned = false; app.placements = app.snapshots[0]?.placements || null; app.nodes = app.totalNodes; app.pass = 0; persistSearchProgress(true); document.querySelector('#solveButton').disabled = false; document.querySelector('#solveButton').innerHTML = '<span class="spark">✦</span> Find a new arrangement'; document.querySelector('#searchStatus').textContent = app.snapshots.length ? `Ready to search · ${app.snapshots.length} banked` : 'Ready to search'; document.querySelector('#arrangementLabel').innerHTML = 'Variable field <span class="divider">/</span> source-locked'; document.querySelector('#stageTitle').textContent = 'Search the open field.'; document.querySelector('#stageSubtitle').textContent = `No rectangle is prescribed. Find a dense connected packing with zero internal holes and #${String(activeCentroidId()).padStart(2, '0')} away from every coast.`; renderBoard(); renderSnapshots(); renderSidebarMode(); if (app.placements) updateArrangementSummary(app.snapshots[0].metrics); }
 
-initializePresetState(); restoreSearchSettings(); app.pieces = createPieces(); restorePositionPreferences(); restorePositionLocks(); restoreFamilySteering(); restoreSnapshots(); restoreSearchProgress(); app.placements = app.snapshots[0]?.placements || null; renderPresetIdentity(); renderPieceList(); renderBoard(); renderInspector(); renderSnapshots(); renderSidebarMode(); if (app.placements) updateArrangementSummary(app.snapshots[0].metrics);
-window.addEventListener('tdotdh:v2-runtime-ready', () => { if (app.placements) renderBoard(); });
-document.querySelector('#solveButton').addEventListener('click', solve);
-document.querySelector('#resetButton').addEventListener('click', resetApp);
-document.querySelector('#helpButton').addEventListener('click', () => document.querySelector('#helpDialog').showModal()); document.querySelector('#closeDialog').addEventListener('click', () => document.querySelector('#helpDialog').close());
-document.querySelector('#piecesTab').addEventListener('click', () => { app.sidebarMode = 'pieces'; app.selectedFamily = null; app.arrangementPinned = false; renderSidebarMode(); });
-document.querySelector('#familiesTab').addEventListener('click', () => { app.sidebarMode = 'families'; renderSidebarMode(); renderSnapshots(); });
-document.querySelector('#familySort').addEventListener('change', event => { app.familySort = event.target.value; persistSearchSettings(); renderSnapshots(); });
-document.querySelector('#arrangementSort').addEventListener('change', event => { app.arrangementSort = event.target.value; persistSearchSettings(); renderSnapshots(); });
-document.querySelector('#familyBandFilter').addEventListener('change', event => { app.neighborBandFilter = event.target.value ? Number(event.target.value) : null; persistSearchSettings(); renderSnapshots(); });
-document.querySelector('#preferenceMode').addEventListener('change', event => { app.preferenceMode = event.target.value; persistSearchSettings(); renderSnapshots(); });
-document.querySelector('#preferenceToggle').addEventListener('click', () => {
-  if (!configuredPreferences().length) { toast('Choose a direction for at least one piece first'); return; }
-  app.preferenceEnabled = !app.preferenceEnabled; persistSearchSettings();
-  renderSnapshots();
-});
-document.querySelector('#searchHints').addEventListener('change', event => { app.searchHints = event.target.checked; persistSearchSettings(); renderSnapshots(); });
-document.querySelector('#searchStrategy').addEventListener('change', event => { app.searchStrategy = event.target.value; persistSearchSettings(); renderSnapshots(); });
-document.querySelector('#neighborTarget').addEventListener('change', event => { app.neighborTarget = event.target.value ? Number(event.target.value) : null; persistSearchSettings(); renderSnapshots(); });
-for (const name of ['coastBias', 'gravityBias', 'inletBias']) document.querySelector(`#${name}`).addEventListener('change', event => { app[name] = Math.min(5, Math.max(0, Number(event.target.value) || 0)); persistSearchSettings(); renderSnapshots(); });
-document.querySelector('#solverNav').addEventListener('click', () => setTopView('solver'));
-document.querySelector('#atlasNav').addEventListener('click', () => setTopView('atlas'));
-document.querySelector('#methodNav').addEventListener('click', () => setTopView('method'));
-document.addEventListener('keydown', event => { if (event.key === 'Escape') hideAtlasHoverCard(); });
-window.addEventListener('resize', fitBoardToViewport);
-if (window.ResizeObserver) new ResizeObserver(fitBoardToViewport).observe(document.querySelector('.board-frame'));
+function bootProduct() {
+  if (window.__TDOTDH_PRODUCT_BOOTED__) return;
+  window.__TDOTDH_PRODUCT_BOOTED__ = true;
+  restoreCatalogRecords(); initializePresetState(); restoreSearchSettings(); app.pieces = createPieces().filter(Boolean); restorePositionPreferences(); restorePositionLocks(); restoreFamilySteering(); restoreSnapshots(); restoreSearchProgress(); app.placements = app.snapshots[0]?.placements || null; renderPresetIdentity(); renderPieceList(); renderBoard(); renderInspector(); renderSnapshots(); renderSidebarMode(); if (app.placements) updateArrangementSummary(app.snapshots[0].metrics);
+  window.addEventListener('tdotdh:v2-runtime-ready', () => { if (app.placements) renderBoard(); });
+  document.querySelector('#solveButton').addEventListener('click', solve);
+  document.querySelector('#resetButton').addEventListener('click', resetApp);
+  document.querySelector('#helpButton').addEventListener('click', () => document.querySelector('#helpDialog').showModal()); document.querySelector('#closeDialog').addEventListener('click', () => document.querySelector('#helpDialog').close());
+  document.querySelector('#piecesTab').addEventListener('click', () => { app.sidebarMode = 'pieces'; app.selectedFamily = null; app.arrangementPinned = false; renderSidebarMode(); });
+  document.querySelector('#familiesTab').addEventListener('click', () => { app.sidebarMode = 'families'; renderSidebarMode(); renderSnapshots(); });
+  document.querySelector('#familySort').addEventListener('change', event => { app.familySort = event.target.value; persistSearchSettings(); renderSnapshots(); });
+  document.querySelector('#arrangementSort').addEventListener('change', event => { app.arrangementSort = event.target.value; persistSearchSettings(); renderSnapshots(); });
+  document.querySelector('#familyBandFilter').addEventListener('change', event => { app.neighborBandFilter = event.target.value ? Number(event.target.value) : null; persistSearchSettings(); renderSnapshots(); });
+  document.querySelector('#preferenceMode').addEventListener('change', event => { app.preferenceMode = event.target.value; persistSearchSettings(); renderSnapshots(); });
+  document.querySelector('#preferenceToggle').addEventListener('click', () => {
+    if (!configuredPreferences().length) { toast('Choose a direction for at least one piece first'); return; }
+    app.preferenceEnabled = !app.preferenceEnabled; persistSearchSettings();
+    renderSnapshots();
+  });
+  document.querySelector('#searchHints').addEventListener('change', event => { app.searchHints = event.target.checked; persistSearchSettings(); renderSnapshots(); });
+  document.querySelector('#searchStrategy').addEventListener('change', event => { app.searchStrategy = event.target.value; persistSearchSettings(); renderSnapshots(); });
+  document.querySelector('#neighborTarget').addEventListener('change', event => { app.neighborTarget = event.target.value ? Number(event.target.value) : null; persistSearchSettings(); renderSnapshots(); });
+  for (const name of ['coastBias', 'gravityBias', 'inletBias']) document.querySelector(`#${name}`).addEventListener('change', event => { app[name] = Math.min(5, Math.max(0, Number(event.target.value) || 0)); persistSearchSettings(); renderSnapshots(); });
+  document.querySelector('#solverNav').addEventListener('click', () => setTopView('solver'));
+  document.querySelector('#atlasNav').addEventListener('click', () => setTopView('atlas'));
+  document.querySelector('#bestiaryNav').addEventListener('click', () => setTopView('bestiary'));
+  document.querySelector('#methodNav').addEventListener('click', () => setTopView('method'));
+  wireBestiary(); renderBestiaryView();
+  document.addEventListener('keydown', event => { if (event.key === 'Escape') hideAtlasHoverCard(); });
+  window.addEventListener('resize', fitBoardToViewport);
+  if (window.ResizeObserver) new ResizeObserver(fitBoardToViewport).observe(document.querySelector('.board-frame'));
+}
+if (bestiaryApi()) bootProduct(); else window.addEventListener('tdotdh:bestiary-ready', bootProduct, { once: true });
