@@ -7,6 +7,10 @@ assert.equal(new Set(shapes.map(shape => shape.canonical)).size, 5);
 assert.deepEqual(shapes[0].cells, [{ x: 0, y: 0 }, { x: 0, y: 1 }, { x: 0, y: 2 }, { x: 0, y: 3 }]);
 assert.equal(analyzePolyomino(shapes[0].cells).perimeter, 10);
 assert.equal(canonicalPolyomino([{ x: 1, y: 0 }, { x: 0, y: 0 }]), canonicalPolyomino([{ x: 0, y: 0 }, { x: 0, y: 1 }]));
+const originalCatalog = enumeratePolyominoes(9, { limit: 100 });
+assert.equal(originalCatalog.length, 100);
+assert.equal(originalCatalog[0].ordinal, 1);
+assert.equal(originalCatalog.at(-1).ordinal, 100);
 
 assert.deepEqual(mobPlacementSequence({ yang: 2, yin: 2, strategy: 'yang-first' }), ['yang', 'yang', 'yin', 'yin']);
 assert.deepEqual(mobPlacementSequence({ yang: 2, yin: 2, strategy: 'yin-first' }), ['yin', 'yin', 'yang', 'yang']);

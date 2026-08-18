@@ -29,10 +29,12 @@ const SOURCE_SHAPES = {
 const PRESET_STORAGE_KEY = 'tdotdh-bestiary-presets-v1';
 const ACTIVE_PRESET_STORAGE_KEY = 'tdotdh-bestiary-active-preset-v1';
 const CATALOG_STORAGE_KEY = 'tdotdh-bestiary-catalog-v1';
+const BESTIARY_PROFILE_STORAGE_KEY = 'tdotdh-bestiary-profiles-v1';
 const PRESET_ID_PREFIX = 'SEDLEC-00Q_ISLAND-';
 const PRESET_NAME = 'The Opinionated Set';
+const DEFAULT_BESTIARY_PROFILE = Object.freeze({ id: 'merlin0-original', name: 'Merlin0 · Original 100', source: 'merlin0', parentId: null, area: 9, limit: 100, yang: 9, yin: 0, strategy: 'yang-first' });
 const PRESET_TRANSFORMS = ['fixed', 'rotate-90', 'rotate-180', 'rotate-270', 'flip-x', 'flip-y', 'flip-xy'];
-const app = { pieces: [], selectedId: 3, centroidId: 3, bestiaryCentroidId: null, preset: null, presetData: null, presetStore: null, catalogRecords: new Map(), bestiaryShapes: [], bestiarySelected: null, bestiaryDraft: [], bestiaryProfile: { area: 9, limit: 100, yang: 9, yin: 0, strategy: 'yang-first' }, placements: null, snapshots: [], selectedFamily: null, arrangementPinned: false, arrangementDisplayLimit: 24, lastFamilySelections: new Map(), familySteering: new Map(), familySteeringPass: 0, positionPreferences: new Map(), positionLocks: new Map(), preferenceEnabled: false, preferenceMode: 'rank', familySort: 'best', arrangementSort: 'best', neighborBandFilter: null, searchHints: false, searchStrategy: 'balanced', neighborTarget: null, coastBias: 1, gravityBias: 1, inletBias: 1, sidebarMode: 'pieces', topView: 'solver', nodes: 0, totalNodes: 0, completedPasses: 0, lastPersistedNodes: 0, progressEstimate: 'banked lower bound', solving: false, continuous: false, singlePass: false, pass: 0, catalogCount: 100, searchWorker: null, searchTimer: null, searchRequestId: null, searchRevision: 0, searchCheckpoint: null };
+const app = { pieces: [], selectedId: 3, centroidId: 3, bestiaryCentroidId: null, preset: null, presetData: null, presetStore: null, catalogRecords: new Map(), bestiaryShapes: [], bestiarySelected: null, bestiaryDraft: [], bestiaryProfile: { ...DEFAULT_BESTIARY_PROFILE }, placements: null, snapshots: [], selectedFamily: null, arrangementPinned: false, arrangementDisplayLimit: 24, lastFamilySelections: new Map(), familySteering: new Map(), familySteeringPass: 0, positionPreferences: new Map(), positionLocks: new Map(), preferenceEnabled: false, preferenceMode: 'rank', familySort: 'best', arrangementSort: 'best', neighborBandFilter: null, searchHints: false, searchStrategy: 'balanced', neighborTarget: null, coastBias: 1, gravityBias: 1, inletBias: 1, sidebarMode: 'pieces', topView: 'solver', nodes: 0, totalNodes: 0, completedPasses: 0, lastPersistedNodes: 0, progressEstimate: 'banked lower bound', solving: false, continuous: false, singlePass: false, pass: 0, catalogCount: 100, searchWorker: null, searchTimer: null, searchRequestId: null, searchRevision: 0, searchCheckpoint: null };
 const SNAPSHOT_STORAGE_KEY = 'tdotdh-bestiary-snapshots-v5';
 const COLOR_STORAGE_KEY = 'tdotdh-bestiary-piece-colors-v1';
 const POSITION_PREFERENCE_STORAGE_KEY = 'tdotdh-bestiary-position-preferences-v1';
@@ -58,7 +60,7 @@ function readJsonStorage(storageKey, fallback) {
   }
 }
 function bestiaryApi() { return window.__TDOTDH_BESTIARY__ || null; }
-function sourceShape(id) { const record = app.catalogRecords.get(String(id)); return record?.cells || SOURCE_SHAPES[id]; }
+function sourceShape(id) { const record = app.catalogRecords.get(String(id)); return SOURCE_SHAPES[id] || record?.cells; }
 function restoreCatalogRecords() {
   const stored = readJsonStorage(CATALOG_STORAGE_KEY, []);
   if (!Array.isArray(stored)) return;
@@ -67,12 +69,40 @@ function restoreCatalogRecords() {
 function persistCatalogRecords() {
   try { localStorage.setItem(CATALOG_STORAGE_KEY, JSON.stringify([...app.catalogRecords.values()])); } catch (error) { console.warn('The generated catalog could not be saved.', error); }
 }
+function persistBestiaryProfile() {
+  try { localStorage.setItem(BESTIARY_PROFILE_STORAGE_KEY, JSON.stringify(app.bestiaryProfile)); } catch (error) { console.warn('The active Bestiary profile could not be saved.', error); }
+}
+function restoreBestiaryProfile() {
+  const stored = readJsonStorage(BESTIARY_PROFILE_STORAGE_KEY, null);
+  if (stored && typeof stored === 'object' && Number(stored.area) >= 1 && Number(stored.limit) >= 1) app.bestiaryProfile = { ...DEFAULT_BESTIARY_PROFILE, ...stored };
+}
+function sourceCatalogRecord(api, shape) {
+  const record = api.createCatalogRecord(shape, { area: DEFAULT_BESTIARY_PROFILE.area, source: DEFAULT_BESTIARY_PROFILE.source, profile: DEFAULT_BESTIARY_PROFILE });
+  record.id = String(shape.ordinal); record.source = DEFAULT_BESTIARY_PROFILE.source;
+  return record;
+}
+function hydrateBestiaryCatalog() {
+  const api = bestiaryApi(); if (!api) return;
+  restoreBestiaryProfile();
+  const originalShapes = api.enumeratePolyominoes(DEFAULT_BESTIARY_PROFILE.area, { limit: DEFAULT_BESTIARY_PROFILE.limit });
+  for (const shape of originalShapes) if (!app.catalogRecords.has(String(shape.ordinal))) app.catalogRecords.set(String(shape.ordinal), sourceCatalogRecord(api, shape));
+  if (app.bestiaryProfile.id === DEFAULT_BESTIARY_PROFILE.id) {
+    app.bestiaryShapes = originalShapes;
+  } else {
+    app.bestiaryShapes = api.enumeratePolyominoes(app.bestiaryProfile.area, { limit: app.bestiaryProfile.limit });
+  }
+  app.bestiarySelected = app.bestiaryShapes[0] || null;
+  app.bestiarySelectedTransform = 'fixed';
+  persistCatalogRecords();
+}
+function syncBestiaryControls() {
+  for (const [id, value] of [['bestiaryArea', app.bestiaryProfile.area], ['bestiaryLimit', app.bestiaryProfile.limit], ['bestiaryYang', app.bestiaryProfile.yang], ['bestiaryYin', app.bestiaryProfile.yin], ['bestiaryStrategy', app.bestiaryProfile.strategy]]) {
+    const control = document.querySelector(`#${id}`); if (control) control.value = String(value);
+  }
+}
 function catalogPieceId(shape) {
   const api = bestiaryApi();
-  if (Number(shape.area || shape.metrics?.area) === AREA && Number(shape.ordinal) >= 1 && Number(shape.ordinal) <= 100 && api) {
-    const source = SOURCE_SHAPES[Number(shape.ordinal)];
-    if (source && api.canonicalPolyomino(source) === (shape.canonical || api.canonicalPolyomino(shape.cells))) return Number(shape.ordinal);
-  }
+  if (Number(shape.area || shape.metrics?.area) === AREA && Number(shape.ordinal) >= 1 && Number(shape.ordinal) <= 100 && api) return Number(shape.ordinal);
   return Number(shape.area || shape.metrics?.area || AREA) * 1000 + Number(shape.ordinal || 1);
 }
 function initializePresetState() {
@@ -948,6 +978,19 @@ function bestiaryProfileFromControls() {
   const number = id => Math.max(0, Math.floor(Number(document.querySelector(`#${id}`)?.value) || 0));
   return { area: Math.max(1, Math.min(13, number('bestiaryArea') || 9)), limit: Math.max(1, Math.min(5000, number('bestiaryLimit') || 100)), yang: number('bestiaryYang'), yin: number('bestiaryYin'), strategy: document.querySelector('#bestiaryStrategy')?.value || 'yang-first' };
 }
+function bestiaryProfileValuesEqual(left, right) {
+  return ['area', 'limit', 'yang', 'yin', 'strategy'].every(key => Number(left[key]) === Number(right[key]) || left[key] === right[key]);
+}
+function copyBestiaryProfile(values) {
+  const parent = app.bestiaryProfile;
+  return { ...values, id: `${parent.id}-copy-${Date.now()}`, name: `${parent.name} · copy`, source: 'derived', parentId: parent.id };
+}
+function ensureBestiaryProfileCopy() {
+  const values = bestiaryProfileFromControls();
+  if (bestiaryProfileValuesEqual(values, app.bestiaryProfile)) return false;
+  app.bestiaryProfile = copyBestiaryProfile(values); persistBestiaryProfile(); renderBestiaryView(); toast(`Copied ${app.bestiaryProfile.parentId} into ${app.bestiaryProfile.name}`);
+  return true;
+}
 function bestiaryGrid(cells, className = 'bestiary-grid') {
   const api = bestiaryApi();
   const normalized = api?.normalizeCells ? api.normalizeCells(cells) : normalize(cells);
@@ -1003,12 +1046,13 @@ function renderBestiaryDraft() {
 }
 function renderBestiaryView() {
   const summary = document.querySelector('#bestiarySummary'); if (summary) summary.innerHTML = `<strong>${app.bestiaryShapes.length || 0}</strong><span>catalog shapes</span><strong>${app.bestiaryDraft.length}</strong><span>staged pieces</span>`;
-  const note = document.querySelector('#bestiaryProfileNote'); if (note) { const profile = app.bestiaryProfile; note.textContent = `Area ${profile.area} · ${profile.limit} catalog entries · ${profile.yang} yang + ${profile.yin} yin · ${profile.strategy}. Select a shape to inspect bounded mob placements. Solver activation requires fifteen ${AREA}-area nonominoes.`; }
+  const note = document.querySelector('#bestiaryProfileNote'); if (note) { const profile = app.bestiaryProfile; note.textContent = `${profile.name} · Area ${profile.area} · ${profile.limit} catalog entries · ${profile.yang} yang + ${profile.yin} yin · ${profile.strategy}. Select a shape to inspect bounded mob placements. Solver activation requires fifteen ${AREA}-area nonominoes.`; }
   renderBestiaryShapeList(); renderBestiarySelection(); renderBestiaryDraft();
 }
 function generateBestiaryCatalog() {
   const api = bestiaryApi(); if (!api) { toast('The bestiary algorithms are still loading'); return; }
-  app.bestiaryProfile = bestiaryProfileFromControls(); app.bestiaryShapes = api.enumeratePolyominoes(app.bestiaryProfile.area, { limit: app.bestiaryProfile.limit }); app.bestiarySelected = app.bestiaryShapes[0] || null; app.bestiarySelectedTransform = 'fixed'; renderBestiaryView(); toast(`${app.bestiaryShapes.length} canonical shapes enumerated`);
+  const values = bestiaryProfileFromControls(); ensureBestiaryProfileCopy();
+  app.bestiaryShapes = api.enumeratePolyominoes(values.area, { limit: values.limit }); app.bestiarySelected = app.bestiaryShapes[0] || null; app.bestiarySelectedTransform = 'fixed'; renderBestiaryView(); if (bestiaryProfileValuesEqual(values, app.bestiaryProfile)) toast(`${app.bestiaryShapes.length} canonical shapes enumerated`);
 }
 function addBestiarySelection() {
   const shape = app.bestiarySelected, api = bestiaryApi(); if (!shape || !api) return;
@@ -1029,6 +1073,7 @@ function addBestiarySelection() {
 function wireBestiary() {
   const form = document.querySelector('#bestiaryProfileForm'); if (!form) return;
   form.addEventListener('submit', event => { event.preventDefault(); generateBestiaryCatalog(); });
+  for (const id of ['bestiaryArea', 'bestiaryLimit', 'bestiaryYang', 'bestiaryYin', 'bestiaryStrategy']) document.querySelector(`#${id}`)?.addEventListener('change', ensureBestiaryProfileCopy);
   document.querySelector('#bestiaryOrientation')?.addEventListener('change', event => { app.bestiarySelectedTransform = event.target.value; renderBestiarySelection(); });
   document.querySelector('#bestiaryAddButton')?.addEventListener('click', addBestiarySelection);
   document.querySelector('#bestiaryActivateButton')?.addEventListener('click', activateBestiaryDraft);
@@ -1243,7 +1288,7 @@ function resetApp() { if (app.searchWorker) app.searchWorker.terminate(); if (ap
 function bootProduct() {
   if (window.__TDOTDH_PRODUCT_BOOTED__) return;
   window.__TDOTDH_PRODUCT_BOOTED__ = true;
-  restoreCatalogRecords(); initializePresetState(); restoreSearchSettings(); app.pieces = createPieces().filter(Boolean); restorePositionPreferences(); restorePositionLocks(); restoreFamilySteering(); restoreSnapshots(); restoreSearchProgress(); app.placements = app.snapshots[0]?.placements || null; renderPresetIdentity(); renderPieceList(); renderBoard(); renderInspector(); renderSnapshots(); renderSidebarMode(); if (app.placements) updateArrangementSummary(app.snapshots[0].metrics);
+  restoreCatalogRecords(); hydrateBestiaryCatalog(); initializePresetState(); restoreSearchSettings(); app.pieces = createPieces().filter(Boolean); restorePositionPreferences(); restorePositionLocks(); restoreFamilySteering(); restoreSnapshots(); restoreSearchProgress(); app.placements = app.snapshots[0]?.placements || null; renderPresetIdentity(); renderPieceList(); renderBoard(); renderInspector(); renderSnapshots(); renderSidebarMode(); if (app.placements) updateArrangementSummary(app.snapshots[0].metrics);
   window.addEventListener('tdotdh:v2-runtime-ready', () => { if (app.placements) renderBoard(); });
   document.querySelector('#solveButton').addEventListener('click', solve);
   document.querySelector('#resetButton').addEventListener('click', resetApp);
@@ -1267,7 +1312,7 @@ function bootProduct() {
   document.querySelector('#atlasNav').addEventListener('click', () => setTopView('atlas'));
   document.querySelector('#bestiaryNav').addEventListener('click', () => setTopView('bestiary'));
   document.querySelector('#methodNav').addEventListener('click', () => setTopView('method'));
-  wireBestiary(); renderBestiaryView();
+  wireBestiary(); syncBestiaryControls(); renderBestiaryView();
   document.addEventListener('keydown', event => { if (event.key === 'Escape') hideAtlasHoverCard(); });
   window.addEventListener('resize', fitBoardToViewport);
   if (window.ResizeObserver) new ResizeObserver(fitBoardToViewport).observe(document.querySelector('.board-frame'));
