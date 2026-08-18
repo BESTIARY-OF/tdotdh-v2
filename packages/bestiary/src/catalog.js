@@ -34,6 +34,17 @@ export function canonicalPolyomino(cells = []) {
     .join(';')).sort()[0] || '';
 }
 
+/**
+ * A stable, collision-free identity for a canonical shape. The encoded
+ * signature is intentionally invertible: identity does not depend on the
+ * algoset, batch, machine, or discovery order.
+ */
+export function polyominoGuid(cellsOrCanonical = []) {
+  const canonical = typeof cellsOrCanonical === 'string' ? cellsOrCanonical : canonicalPolyomino(cellsOrCanonical);
+  const encoded = Array.from(canonical, character => character.charCodeAt(0).toString(16).padStart(2, '0')).join('');
+  return `S-${encoded || 'EMPTY'}`;
+}
+
 function growthCandidates(cells, maxWidth, maxHeight) {
   const occupied = new Set(cells.map(cellKey));
   const bounds = {
@@ -75,8 +86,9 @@ export function analyzePolyomino(cells = []) {
  * limit intentionally matches the historical browser's 100-shape catalog,
  * while callers can request a smaller preview or a larger offline catalog.
  */
-export function enumeratePolyominoes(area, { limit = 100, maxWidth = 20, maxHeight = 20 } = {}) {
+export function enumeratePolyominoes(area, { limit = 100, offset = 0, maxWidth = 20, maxHeight = 20 } = {}) {
   const targetArea = Math.max(1, Math.floor(Number(area) || 1));
+  const startAt = Math.max(0, Math.floor(Number(offset) || 0));
   const shapes = [];
   const seen = new Set();
   const visit = cells => {
@@ -86,7 +98,8 @@ export function enumeratePolyominoes(area, { limit = 100, maxWidth = 20, maxHeig
       const canonical = canonicalPolyomino(normalized);
       if (seen.has(canonical)) return;
       seen.add(canonical);
-      shapes.push({ ordinal: shapes.length + 1, cells: normalized, canonical, metrics: analyzePolyomino(normalized) });
+      if (seen.size <= startAt) return;
+      shapes.push({ ordinal: startAt + shapes.length + 1, cells: normalized, canonical, guid: polyominoGuid(canonical), metrics: analyzePolyomino(normalized) });
       return;
     }
     for (const candidate of growthCandidates(cells, maxWidth, maxHeight)) {
@@ -168,6 +181,7 @@ export function createCatalogRecord(shape, { area = shape.metrics?.area || shape
   const metrics = shape.metrics || analyzePolyomino(shape.cells);
   return {
     id: String(shape.id || `P-${area}-${shape.ordinal}`),
+    guid: shape.guid || polyominoGuid(shape.canonical || shape.cells),
     ordinal: Number(shape.ordinal || 0),
     area: Number(area),
     cells: normalizeCells(shape.cells),

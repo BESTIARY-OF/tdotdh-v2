@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { analyzePolyomino, canonicalPolyomino, createCatalogRecord, enumerateMobPlacements, enumeratePolyominoes, mobPlacementSequence } from '../src/catalog.js';
+import { analyzePolyomino, canonicalPolyomino, createCatalogRecord, enumerateMobPlacements, enumeratePolyominoes, mobPlacementSequence, polyominoGuid } from '../src/catalog.js';
 
 const shapes = enumeratePolyominoes(4, { limit: 5 });
 assert.equal(shapes.length, 5);
@@ -11,6 +11,11 @@ const originalCatalog = enumeratePolyominoes(9, { limit: 100 });
 assert.equal(originalCatalog.length, 100);
 assert.equal(originalCatalog[0].ordinal, 1);
 assert.equal(originalCatalog.at(-1).ordinal, 100);
+assert.equal(originalCatalog[0].guid, polyominoGuid(originalCatalog[0].canonical));
+assert.equal(polyominoGuid([{ x: 1, y: 0 }, { x: 0, y: 0 }]), polyominoGuid([{ x: 0, y: 0 }, { x: 0, y: 1 }]));
+const continuation = enumeratePolyominoes(9, { limit: 1, offset: 100 });
+assert.equal(continuation[0].ordinal, 101);
+assert.notEqual(continuation[0].guid, originalCatalog.at(-1).guid);
 
 assert.deepEqual(mobPlacementSequence({ yang: 2, yin: 2, strategy: 'yang-first' }), ['yang', 'yang', 'yin', 'yin']);
 assert.deepEqual(mobPlacementSequence({ yang: 2, yin: 2, strategy: 'yin-first' }), ['yin', 'yin', 'yang', 'yang']);
@@ -28,5 +33,6 @@ assert.equal(yinPlacements.placements[0].reduce((total, placement) => total + pl
 
 const record = createCatalogRecord(shapes[1], { profile: { yang: 4, yin: 0, placementCount: 1 } });
 assert.equal(record.id, 'P-4-2');
+assert.equal(record.guid, polyominoGuid(record.canonical));
 assert.equal(record.profile.placementCount, 1);
 console.log('bestiary catalog tests passed');

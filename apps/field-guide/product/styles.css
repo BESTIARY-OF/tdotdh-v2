@@ -351,7 +351,17 @@ button { border: 0; font: inherit; cursor: pointer; }
 .bestiary-profile-form input, .bestiary-profile-form select, .bestiary-orientation-row select, .bestiary-draft-actions select { width: 100%; min-width: 0; padding: 7px 6px; border: 1px solid var(--line); border-radius: 4px; color: #56645f; background: #fff; font: 10px var(--mono); }
 .bestiary-profile-form .primary-button { margin-top: 4px; }
 .bestiary-profile-note { margin: 12px 0; padding: 9px; border-radius: 5px; color: #8b9994; background: #f1f6f2; font: 8px/1.5 var(--mono); }
-.bestiary-shape-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 6px; max-height: 490px; overflow: auto; padding-right: 2px; }
+.bestiary-atlas-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; margin: 10px 0 6px; align-items: end; }
+.bestiary-atlas-toolbar label { display: grid; gap: 4px; color: #7d8b86; font: 8px var(--mono); text-transform: uppercase; }
+.bestiary-atlas-toolbar select { width: 100%; min-width: 0; padding: 7px 6px; border: 1px solid var(--line); border-radius: 4px; color: #56645f; background: #fff; font: 10px var(--mono); }
+.bestiary-atlas-toolbar .primary-button, .bestiary-atlas-toolbar .ghost-button { height: 32px; white-space: nowrap; }
+.bestiary-atlas-toolbar .primary-button { grid-column: 1 / -1; }
+.bestiary-atlas-status { min-height: 20px; color: #8b9994; font: 8px/1.5 var(--mono); }
+.bestiary-atlas { display: grid; gap: 10px; max-height: 490px; overflow: auto; padding: 2px 2px 2px 0; }
+.bestiary-atlas-group { display: grid; gap: 5px; }
+.bestiary-atlas-group-heading { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; color: #8b9994; font: 8px var(--mono); text-transform: uppercase; }
+.bestiary-atlas-group-heading strong { color: var(--ink); font: 600 11px var(--display); letter-spacing: -.02em; text-transform: none; }
+.bestiary-atlas-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 6px; }
 .bestiary-shape-button { min-width: 0; padding: 7px; display: grid; gap: 5px; border: 1px solid var(--line); border-radius: 5px; color: #7d8b86; background: rgba(255,255,255,.75); text-align: left; }
 .bestiary-shape-button:hover, .bestiary-shape-button.selected { border-color: rgba(226,99,69,.6); background: #fff8f5; }
 .bestiary-shape-button strong { color: var(--accent-dark); font: 500 9px var(--mono); }

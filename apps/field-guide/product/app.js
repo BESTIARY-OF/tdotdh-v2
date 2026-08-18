@@ -34,7 +34,7 @@ const PRESET_ID_PREFIX = 'SEDLEC-00Q_ISLAND-';
 const PRESET_NAME = 'The Opinionated Set';
 const DEFAULT_BESTIARY_PROFILE = Object.freeze({ id: 'merlin0-original', name: 'Merlin0 · Original 100', source: 'merlin0', parentId: null, area: 9, limit: 100, yang: 9, yin: 0, strategy: 'yang-first' });
 const PRESET_TRANSFORMS = ['fixed', 'rotate-90', 'rotate-180', 'rotate-270', 'flip-x', 'flip-y', 'flip-xy'];
-const app = { pieces: [], selectedId: 3, centroidId: 3, bestiaryCentroidId: null, preset: null, presetData: null, presetStore: null, catalogRecords: new Map(), bestiaryShapes: [], bestiarySelected: null, bestiaryDraft: [], bestiaryProfile: { ...DEFAULT_BESTIARY_PROFILE }, placements: null, snapshots: [], selectedFamily: null, arrangementPinned: false, arrangementDisplayLimit: 24, lastFamilySelections: new Map(), familySteering: new Map(), familySteeringPass: 0, positionPreferences: new Map(), positionLocks: new Map(), preferenceEnabled: false, preferenceMode: 'rank', familySort: 'best', arrangementSort: 'best', neighborBandFilter: null, searchHints: false, searchStrategy: 'balanced', neighborTarget: null, coastBias: 1, gravityBias: 1, inletBias: 1, sidebarMode: 'pieces', topView: 'solver', nodes: 0, totalNodes: 0, completedPasses: 0, lastPersistedNodes: 0, progressEstimate: 'banked lower bound', solving: false, continuous: false, singlePass: false, pass: 0, catalogCount: 100, searchWorker: null, searchTimer: null, searchRequestId: null, searchRevision: 0, searchCheckpoint: null };
+const app = { pieces: [], selectedId: 3, centroidId: 3, bestiaryCentroidId: null, preset: null, presetData: null, presetStore: null, catalogRecords: new Map(), bestiaryShapes: [], bestiarySelected: null, bestiaryDraft: [], bestiaryProfile: { ...DEFAULT_BESTIARY_PROFILE }, bestiarySort: 'extent', bestiaryNeighborhood: null, placements: null, snapshots: [], selectedFamily: null, arrangementPinned: false, arrangementDisplayLimit: 24, lastFamilySelections: new Map(), familySteering: new Map(), familySteeringPass: 0, positionPreferences: new Map(), positionLocks: new Map(), preferenceEnabled: false, preferenceMode: 'rank', familySort: 'best', arrangementSort: 'best', neighborBandFilter: null, searchHints: false, searchStrategy: 'balanced', neighborTarget: null, coastBias: 1, gravityBias: 1, inletBias: 1, sidebarMode: 'pieces', topView: 'solver', nodes: 0, totalNodes: 0, completedPasses: 0, lastPersistedNodes: 0, progressEstimate: 'banked lower bound', solving: false, continuous: false, singlePass: false, pass: 0, catalogCount: 100, searchWorker: null, searchTimer: null, searchRequestId: null, searchRevision: 0, searchCheckpoint: null };
 const SNAPSHOT_STORAGE_KEY = 'tdotdh-bestiary-snapshots-v5';
 const COLOR_STORAGE_KEY = 'tdotdh-bestiary-piece-colors-v1';
 const POSITION_PREFERENCE_STORAGE_KEY = 'tdotdh-bestiary-position-preferences-v1';
@@ -43,7 +43,7 @@ const FAMILY_STEERING_STORAGE_KEY = 'tdotdh-bestiary-family-steering-v1';
 const SEARCH_PROGRESS_STORAGE_KEY = 'tdotdh-bestiary-search-progress-v1';
 
 function defaultPresetDefinition() {
-  return { id: 'SEDLEC-00Q_ISLAND-001', name: PRESET_NAME, catalog: 'TDOTDH-100', centroidId: 3, maxModifiedPieces: 3, pieces: PIECE_IDS.map(id => ({ permutation: id, transform: LOCKS[id] || 'fixed' })) };
+  return { id: 'SEDLEC-00Q_ISLAND-001', name: PRESET_NAME, catalog: 'TDOTDH-100', centroidId: 3, maxModifiedPieces: 3, pieces: PIECE_IDS.map(id => ({ permutation: id, shapeGuid: app.catalogRecords.get(String(id))?.guid || null, transform: LOCKS[id] || 'fixed' })) };
 }
 function activePieceIds() { return app.preset?.pieces?.map(piece => Number(piece.permutation)) || PIECE_IDS; }
 function activeCentroidId() { return Number(app.centroidId || app.preset?.centroidId || 3); }
@@ -64,10 +64,13 @@ function sourceShape(id) { const record = app.catalogRecords.get(String(id)); re
 function restoreCatalogRecords() {
   const stored = readJsonStorage(CATALOG_STORAGE_KEY, []);
   if (!Array.isArray(stored)) return;
-  for (const record of stored) if (record?.id != null && Array.isArray(record.cells) && record.cells.length) app.catalogRecords.set(String(record.id), record);
+  for (const record of stored) if (record?.id != null && Array.isArray(record.cells) && record.cells.length) {
+    app.catalogRecords.set(String(record.id), record);
+    if (record.guid) app.catalogRecords.set(String(record.guid), record);
+  }
 }
 function persistCatalogRecords() {
-  try { localStorage.setItem(CATALOG_STORAGE_KEY, JSON.stringify([...app.catalogRecords.values()])); } catch (error) { console.warn('The generated catalog could not be saved.', error); }
+  try { const unique = new Map(); for (const record of app.catalogRecords.values()) unique.set(record.guid || record.id, record); localStorage.setItem(CATALOG_STORAGE_KEY, JSON.stringify([...unique.values()])); } catch (error) { console.warn('The generated catalog could not be saved.', error); }
 }
 function persistBestiaryProfile() {
   try { localStorage.setItem(BESTIARY_PROFILE_STORAGE_KEY, JSON.stringify(app.bestiaryProfile)); } catch (error) { console.warn('The active Bestiary profile could not be saved.', error); }
@@ -78,14 +81,14 @@ function restoreBestiaryProfile() {
 }
 function sourceCatalogRecord(api, shape) {
   const record = api.createCatalogRecord(shape, { area: DEFAULT_BESTIARY_PROFILE.area, source: DEFAULT_BESTIARY_PROFILE.source, profile: DEFAULT_BESTIARY_PROFILE });
-  record.id = String(shape.ordinal); record.source = DEFAULT_BESTIARY_PROFILE.source;
+  record.id = String(shape.ordinal); record.source = DEFAULT_BESTIARY_PROFILE.source; record.legacyNumber = shape.ordinal; record.legacyProfile = DEFAULT_BESTIARY_PROFILE.id;
   return record;
 }
 function hydrateBestiaryCatalog() {
   const api = bestiaryApi(); if (!api) return;
   restoreBestiaryProfile();
   const originalShapes = api.enumeratePolyominoes(DEFAULT_BESTIARY_PROFILE.area, { limit: DEFAULT_BESTIARY_PROFILE.limit });
-  for (const shape of originalShapes) app.catalogRecords.set(String(shape.ordinal), sourceCatalogRecord(api, shape));
+  for (const shape of originalShapes) { const record = sourceCatalogRecord(api, shape); app.catalogRecords.set(String(shape.ordinal), record); app.catalogRecords.set(record.guid, record); }
   if (app.bestiaryProfile.id === DEFAULT_BESTIARY_PROFILE.id) {
     app.bestiaryShapes = originalShapes;
   } else {
@@ -102,7 +105,7 @@ function syncBestiaryControls() {
 }
 function catalogPieceId(shape) {
   const api = bestiaryApi();
-  if (Number(shape.area || shape.metrics?.area) === AREA && Number(shape.ordinal) >= 1 && Number(shape.ordinal) <= 100 && api) return Number(shape.ordinal);
+  if (app.bestiaryProfile.id === DEFAULT_BESTIARY_PROFILE.id && Number(shape.area || shape.metrics?.area) === AREA && Number(shape.ordinal) >= 1 && Number(shape.ordinal) <= 100 && api) return Number(shape.ordinal);
   return Number(shape.area || shape.metrics?.area || AREA) * 1000 + Number(shape.ordinal || 1);
 }
 function initializePresetState() {
@@ -148,7 +151,7 @@ function orientationLabel(transform) { return ({ 'flip-x': 'X-flipped', 'flip-y'
 function modifiedPieceCount(definition = app.preset) { return definition.pieces.filter(piece => piece.transform !== 'fixed').length; }
 function nextPresetId() { const index = Math.max(1, Number(app.presetStore?.nextIndex) || 1); if (app.presetStore) app.presetStore.nextIndex = index + 1; return `${PRESET_ID_PREFIX}${String(index).padStart(3, '0')}`; }
 function forkPreset(patch) {
-  const next = { ...app.preset, ...patch, pieces: (patch.pieces || app.preset.pieces).map(piece => ({ permutation: Number(piece.permutation), transform: PRESET_TRANSFORMS.includes(piece.transform) ? piece.transform : 'fixed' })) };
+  const next = { ...app.preset, ...patch, pieces: (patch.pieces || app.preset.pieces).map(piece => ({ permutation: Number(piece.permutation), shapeGuid: piece.shapeGuid || piece.guid || null, transform: PRESET_TRANSFORMS.includes(piece.transform) ? piece.transform : 'fixed' })) };
   const pieceIds = next.pieces.map(piece => piece.permutation);
   if (pieceIds.some(id => !sourceShape(id)) || new Set(pieceIds).size !== pieceIds.length) { toast('Preset pieces must be unique TDOTDH permutations.'); return false; }
   if (!next.pieces.some(piece => piece.permutation === Number(next.centroidId))) { toast('The centroid must be one of the preset pieces.'); return false; }
@@ -563,7 +566,7 @@ function createPieces() {
     // The source representative is stored exactly as emitted. The visible
     // orientation is normalized for the inspector; locked transforms are
     // applied only when generating a placement.
-    return { id, color: /^#[0-9a-f]{6}$/i.test(savedColors[id]) ? savedColors[id] : COLORS[index], cells, orientation: definition.transform || 'fixed' };
+    return { id, shapeGuid: definition.shapeGuid || app.catalogRecords.get(String(id))?.guid || null, color: /^#[0-9a-f]{6}$/i.test(savedColors[id]) ? savedColors[id] : COLORS[index], cells, orientation: definition.transform || 'fixed' };
   });
 }
 
@@ -1001,16 +1004,58 @@ function bestiaryGrid(cells, className = 'bestiary-grid') {
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) { const cell = document.createElement('i'); if (!occupied.has(key(x, y))) cell.className = 'empty'; grid.appendChild(cell); }
   return grid;
 }
+function bestiaryMorphology(shape) {
+  const { width, height, density } = shape.metrics;
+  if (height > width * 1.25) return 'tall';
+  if (width > height * 1.25) return 'wide';
+  if (density >= 0.62) return 'clumpy';
+  return 'mixed';
+}
+function bestiarySortShapes(shapes) {
+  const pivot = app.bestiaryNeighborhood?.metrics;
+  const score = shape => {
+    const m = shape.metrics;
+    if (app.bestiarySort === 'wide') return [-m.width, m.height, -m.density, m.perimeter];
+    if (app.bestiarySort === 'tall') return [-m.height, m.width, -m.density, m.perimeter];
+    if (app.bestiarySort === 'clumpy') return [-m.density, m.perimeter, Math.max(m.width, m.height), m.width];
+    if (app.bestiarySort === 'coast') return [m.perimeter, -m.density, Math.max(m.width, m.height), m.width];
+    if (app.bestiarySort === 'neighborhood' && pivot) return [Math.abs(m.width - pivot.width) + Math.abs(m.height - pivot.height) + Math.abs(m.perimeter - pivot.perimeter) * .25, -m.density, m.ordinal];
+    return [-Math.max(m.width, m.height), -Math.min(m.width, m.height), -m.density, m.perimeter];
+  };
+  return [...shapes].sort((left, right) => { const a = score(left), b = score(right); for (let index = 0; index < a.length; index++) if (a[index] !== b[index]) return a[index] - b[index]; return left.ordinal - right.ordinal; });
+}
+function renderBestiaryAtlasStatus() {
+  const status = document.querySelector('#bestiaryAtlasStatus'), next = document.querySelector('#bestiaryNextBatchButton'), neighborhood = document.querySelector('#bestiaryNeighborhoodButton');
+  if (!status) return;
+  const ordinals = app.bestiaryShapes.map(shape => shape.ordinal), first = ordinals.length ? Math.min(...ordinals) : 0, last = ordinals.length ? Math.max(...ordinals) : 0;
+  const selectedLabel = app.bestiaryNeighborhood ? ` · seed #${String(app.bestiaryNeighborhood.ordinal).padStart(3, '0')} neighborhood` : '';
+  status.textContent = ordinals.length ? `Loaded ${ordinals.length} entries · catalog cursor ${first}–${last} · ${app.bestiarySort} sort${selectedLabel}` : 'No catalog entries loaded';
+  if (next) next.textContent = `Next batch · ${app.bestiaryProfile.limit}`;
+  if (neighborhood) neighborhood.disabled = !app.bestiarySelected;
+}
 function renderBestiaryShapeList() {
-  const root = document.querySelector('#bestiaryShapeList'); if (!root) return;
+  const root = document.querySelector('#bestiaryAtlas'); if (!root) return;
   root.innerHTML = '';
-  if (!app.bestiaryShapes.length) { root.innerHTML = '<div class="bestiary-draft-empty">No shapes generated yet.<br>Choose a profile and enumerate the catalog.</div>'; return; }
-  app.bestiaryShapes.forEach(shape => {
-    const button = document.createElement('button'); button.type = 'button'; button.className = `bestiary-shape-button ${app.bestiarySelected?.canonical === shape.canonical ? 'selected' : ''}`; button.setAttribute('aria-label', `Area ${shape.metrics.area} shape ${shape.ordinal}`);
-    const preview = document.createElement('div'); preview.className = 'bestiary-mini-shape'; preview.appendChild(bestiaryGrid(shape.cells, 'bestiary-mini-grid'));
-    button.appendChild(preview); button.insertAdjacentHTML('beforeend', `<strong>#${String(shape.ordinal).padStart(3, '0')}</strong><small>${shape.metrics.width}×${shape.metrics.height} · ${shape.metrics.perimeter} coast</small>`);
-    button.addEventListener('click', () => { app.bestiarySelected = shape; app.bestiarySelectedTransform = 'fixed'; renderBestiaryView(); }); root.appendChild(button);
-  });
+  if (!app.bestiaryShapes.length) { root.innerHTML = '<div class="bestiary-draft-empty">No shapes loaded yet.<br>The default profile starts with Merlin0 entries 001–100.</div>'; renderBestiaryAtlasStatus(); return; }
+  const groups = new Map();
+  for (const shape of bestiarySortShapes(app.bestiaryShapes)) {
+    const groupKey = `${shape.metrics.width}×${shape.metrics.height}`;
+    if (!groups.has(groupKey)) groups.set(groupKey, []);
+    groups.get(groupKey).push(shape);
+  }
+  for (const [bounds, shapes] of groups) {
+    const section = document.createElement('section'); section.className = 'bestiary-atlas-group';
+    section.innerHTML = `<div class="bestiary-atlas-group-heading"><strong>${bounds}</strong><span>${bestiaryMorphology(shapes[0])} · ${shapes.length} shape${shapes.length === 1 ? '' : 's'}</span></div>`;
+    const grid = document.createElement('div'); grid.className = 'bestiary-atlas-grid';
+    shapes.forEach(shape => {
+      const button = document.createElement('button'); button.type = 'button'; button.className = `bestiary-shape-button ${app.bestiarySelected?.canonical === shape.canonical ? 'selected' : ''}`; button.setAttribute('aria-label', `Area ${shape.metrics.area} shape ${shape.ordinal}, ${bestiaryMorphology(shape)} morphology`);
+      const preview = document.createElement('div'); preview.className = 'bestiary-mini-shape'; preview.appendChild(bestiaryGrid(shape.cells, 'bestiary-mini-grid'));
+      button.appendChild(preview); button.insertAdjacentHTML('beforeend', `<strong>#${String(shape.ordinal).padStart(3, '0')}</strong><small>${shape.metrics.width}×${shape.metrics.height} · ${bestiaryMorphology(shape)} · ${shape.guid.slice(0, 12)}…</small>`);
+      button.addEventListener('click', () => { app.bestiarySelected = shape; app.bestiarySelectedTransform = 'fixed'; renderBestiaryView(); }); grid.appendChild(button);
+    });
+    section.appendChild(grid); root.appendChild(section);
+  }
+  renderBestiaryAtlasStatus();
 }
 function renderBestiarySelection() {
   const title = document.querySelector('#bestiarySelectedTitle'), chip = document.querySelector('#bestiarySelectedChip'), preview = document.querySelector('#bestiaryShapePreview'), meta = document.querySelector('#bestiaryShapeMeta'), mob = document.querySelector('#bestiaryMobSummary'), orientation = document.querySelector('#bestiaryOrientation'), add = document.querySelector('#bestiaryAddButton');
@@ -1019,7 +1064,7 @@ function renderBestiarySelection() {
   const shape = app.bestiarySelected;
   if (!shape) { title.textContent = 'Choose a shape'; chip.textContent = 'NOT SELECTED'; chip.classList.add('empty-chip'); meta.textContent = 'Generate a catalog, then select an entry to inspect its geometry and mob profile.'; mob.innerHTML = ''; orientation.value = 'fixed'; add.disabled = true; return; }
   title.textContent = `Area ${shape.metrics.area} · shape #${String(shape.ordinal).padStart(3, '0')}`; chip.textContent = 'CATALOG ENTRY'; chip.classList.remove('empty-chip'); preview.appendChild(bestiaryGrid(shape.cells));
-  meta.innerHTML = `<strong>${shape.metrics.area} cells</strong> · ${shape.metrics.width} × ${shape.metrics.height} bounds · ${shape.metrics.perimeter} coastline edges · ${(shape.metrics.density * 100).toFixed(0)}% density<br><span>canonical ${shape.canonical}</span>`;
+  meta.innerHTML = `<strong>${shape.metrics.area} cells</strong> · ${shape.metrics.width} × ${shape.metrics.height} bounds · ${shape.metrics.perimeter} coastline edges · ${(shape.metrics.density * 100).toFixed(0)}% density<br><span>${bestiaryMorphology(shape)} morphology · GUID ${shape.guid}</span><br><span>canonical ${shape.canonical}</span>`;
   const profile = app.bestiaryProfile, api = bestiaryApi();
   const placements = api?.enumerateMobPlacements ? api.enumerateMobPlacements(shape.cells, { yang: profile.yang, yin: profile.yin, strategy: profile.strategy, limit: 256 }) : { placements: [], truncated: false, sequence: [] };
   const areaTotal = profile.yang + profile.yin * 0.5;
@@ -1036,7 +1081,7 @@ function renderBestiaryDraft() {
   if (!app.bestiaryDraft.length) root.innerHTML = '<div class="bestiary-draft-empty">Stage up to 15 catalog entries here.<br>Each entry becomes one numbered solver piece.</div>';
   const options = app.bestiaryDraft.map(item => `<option value="${item.id}">#${String(item.id).padStart(3, '0')}</option>`).join('');
   app.bestiaryDraft.forEach((item, index) => {
-    const row = document.createElement('div'); row.className = 'bestiary-draft-row'; row.innerHTML = `<strong>#${String(item.id).padStart(3, '0')}</strong><span>shape ${String(item.record.ordinal).padStart(3, '0')} · ${item.record.metrics.area} area</span><select aria-label="Orientation for piece ${item.id}" data-draft-transform="${item.id}">${PRESET_TRANSFORMS.map(transform => `<option value="${transform}" ${transform === item.transform ? 'selected' : ''}>${orientationLabel(transform)}</option>`).join('')}</select><button class="bestiary-draft-remove" type="button" aria-label="Remove piece ${item.id}" data-draft-remove="${item.id}">×</button>`; root.appendChild(row);
+    const row = document.createElement('div'); row.className = 'bestiary-draft-row'; row.innerHTML = `<strong>#${String(item.id).padStart(3, '0')}</strong><span>shape ${String(item.record.ordinal).padStart(3, '0')} · ${item.record.metrics.area} area · ${item.record.guid.slice(0, 10)}…</span><select aria-label="Orientation for piece ${item.id}" data-draft-transform="${item.id}">${PRESET_TRANSFORMS.map(transform => `<option value="${transform}" ${transform === item.transform ? 'selected' : ''}>${orientationLabel(transform)}</option>`).join('')}</select><button class="bestiary-draft-remove" type="button" aria-label="Remove piece ${item.id}" data-draft-remove="${item.id}">×</button>`; root.appendChild(row);
   });
   centroid.disabled = !app.bestiaryDraft.length; centroid.innerHTML = options; if (app.bestiaryDraft.length) { if (!app.bestiaryDraft.some(item => item.id === app.bestiaryCentroidId)) app.bestiaryCentroidId = app.bestiaryDraft[0].id; centroid.value = String(app.bestiaryCentroidId); }
    activate.disabled = app.bestiaryDraft.length !== 15 || app.bestiaryDraft.some(item => Number(item.record.metrics?.area) !== AREA);
@@ -1052,12 +1097,26 @@ function renderBestiaryView() {
 function generateBestiaryCatalog() {
   const api = bestiaryApi(); if (!api) { toast('The bestiary algorithms are still loading'); return; }
   const values = bestiaryProfileFromControls(); ensureBestiaryProfileCopy();
-  app.bestiaryShapes = api.enumeratePolyominoes(values.area, { limit: values.limit }); app.bestiarySelected = app.bestiaryShapes[0] || null; app.bestiarySelectedTransform = 'fixed'; renderBestiaryView(); if (bestiaryProfileValuesEqual(values, app.bestiaryProfile)) toast(`${app.bestiaryShapes.length} canonical shapes enumerated`);
+  app.bestiaryShapes = api.enumeratePolyominoes(values.area, { limit: values.limit, offset: 0 }); app.bestiaryNeighborhood = null; app.bestiarySort = 'extent'; app.bestiarySelected = app.bestiaryShapes[0] || null; app.bestiarySelectedTransform = 'fixed'; renderBestiaryView(); if (bestiaryProfileValuesEqual(values, app.bestiaryProfile)) toast(`Reset catalog cursor to ${app.bestiaryShapes.length} canonical shapes`);
+}
+function loadNextBestiaryBatch() {
+  const api = bestiaryApi(); if (!api) return;
+  const profile = app.bestiaryProfile, offset = app.bestiaryShapes.reduce((max, shape) => Math.max(max, Number(shape.ordinal) || 0), 0), next = api.enumeratePolyominoes(profile.area, { limit: profile.limit, offset });
+  if (!next.length) { toast(`No more area-${profile.area} shapes after cursor ${offset}`); return; }
+  app.bestiaryShapes.push(...next); if (!app.bestiarySelected) app.bestiarySelected = next[0]; renderBestiaryView(); toast(`Loaded catalog batch ${next[0].ordinal}–${next.at(-1).ordinal}`);
+}
+function useBestiaryNeighborhood() {
+  if (!app.bestiarySelected) return;
+  app.bestiaryNeighborhood = app.bestiarySelected; app.bestiarySort = 'neighborhood';
+  const sort = document.querySelector('#bestiarySort'); if (sort) sort.value = app.bestiarySort;
+  renderBestiaryView(); toast(`Seeded the catalog view around shape #${String(app.bestiarySelected.ordinal).padStart(3, '0')}`);
 }
 function addBestiarySelection() {
   const shape = app.bestiarySelected, api = bestiaryApi(); if (!shape || !api) return;
   const profile = app.bestiaryProfile, placements = api.enumerateMobPlacements(shape.cells, { yang: profile.yang, yin: profile.yin, strategy: profile.strategy, limit: 256 }), id = catalogPieceId(shape), record = api.createCatalogRecord(shape, { area: profile.area, profile: { yang: profile.yang, yin: profile.yin, strategy: profile.strategy, placementCount: placements.placements.length, placementTruncated: placements.truncated } });
-  record.id = String(id); app.catalogRecords.set(String(id), record); persistCatalogRecords(); app.bestiaryDraft.push({ id, record, transform: app.bestiarySelectedTransform || 'fixed' }); app.bestiaryCentroidId ||= id; renderBestiaryView(); toast(`#${String(id).padStart(3, '0')} staged for the opinionated set`);
+  record.id = String(id); record.legacyNumber = app.bestiaryProfile.id === DEFAULT_BESTIARY_PROFILE.id ? id : null; record.legacyProfile = record.legacyNumber ? DEFAULT_BESTIARY_PROFILE.id : null;
+  while (app.catalogRecords.has(String(id)) && app.catalogRecords.get(String(id))?.guid !== record.guid) id += 1;
+  record.id = String(id); app.catalogRecords.set(String(id), record); app.catalogRecords.set(record.guid, record); persistCatalogRecords(); app.bestiaryDraft.push({ id, shapeGuid: record.guid, record, transform: app.bestiarySelectedTransform || 'fixed' }); app.bestiaryCentroidId ||= id; renderBestiaryView(); toast(`Shape ${record.guid} (#${String(id).padStart(3, '0')}) staged for the opinionated set`);
 }
  function activateBestiaryDraft() {
    if (app.bestiaryDraft.length !== 15) { toast('Stage exactly 15 pieces before activation'); return; }
@@ -1065,9 +1124,9 @@ function addBestiarySelection() {
      toast(`Solver profiles require fifteen ${AREA}-area nonominoes; other areas remain catalog-only`);
      return;
    }
-  const centroidId = Number(app.bestiaryCentroidId || app.bestiaryDraft[0].id), pieces = app.bestiaryDraft.map(item => ({ permutation: Number(item.id), transform: PRESET_TRANSFORMS.includes(item.transform) ? item.transform : 'fixed' }));
+  const centroidId = Number(app.bestiaryCentroidId || app.bestiaryDraft[0].id), pieces = app.bestiaryDraft.map(item => ({ permutation: Number(item.id), shapeGuid: item.shapeGuid || item.record.guid, transform: PRESET_TRANSFORMS.includes(item.transform) ? item.transform : 'fixed' }));
   if (!pieces.some(piece => piece.permutation === centroidId)) { toast('Choose a staged piece as the centroid'); return; }
-  const activated = forkPreset({ name: 'Opinionated Set · catalog profile', catalog: `TDOTDH-BESTIARY-${app.bestiaryProfile.area}`, centroidId, maxModifiedPieces: 15, pieces, catalogEntries: app.bestiaryDraft.map(item => ({ id: item.id, canonical: item.record.canonical, profile: item.record.profile })) });
+  const activated = forkPreset({ name: 'Opinionated Set · catalog profile', catalog: `TDOTDH-BESTIARY-${app.bestiaryProfile.area}`, centroidId, maxModifiedPieces: 15, pieces, catalogEntries: app.bestiaryDraft.map(item => ({ id: item.id, guid: item.record.guid, legacyNumber: item.record.legacyNumber || null, canonical: item.record.canonical, profile: item.record.profile })) });
   if (activated) { setTopView('solver'); toast('Catalog profile activated for accelerated search'); }
 }
 function wireBestiary() {
@@ -1076,6 +1135,9 @@ function wireBestiary() {
   for (const id of ['bestiaryArea', 'bestiaryLimit', 'bestiaryYang', 'bestiaryYin', 'bestiaryStrategy']) document.querySelector(`#${id}`)?.addEventListener('change', ensureBestiaryProfileCopy);
   document.querySelector('#bestiaryOrientation')?.addEventListener('change', event => { app.bestiarySelectedTransform = event.target.value; renderBestiarySelection(); });
   document.querySelector('#bestiaryAddButton')?.addEventListener('click', addBestiarySelection);
+  document.querySelector('#bestiarySort')?.addEventListener('change', event => { app.bestiarySort = event.target.value; renderBestiaryView(); });
+  document.querySelector('#bestiaryNeighborhoodButton')?.addEventListener('click', useBestiaryNeighborhood);
+  document.querySelector('#bestiaryNextBatchButton')?.addEventListener('click', loadNextBestiaryBatch);
   document.querySelector('#bestiaryActivateButton')?.addEventListener('click', activateBestiaryDraft);
   document.querySelector('#bestiaryClearButton')?.addEventListener('click', () => { app.bestiaryDraft = []; app.bestiaryCentroidId = null; renderBestiaryView(); });
 }
