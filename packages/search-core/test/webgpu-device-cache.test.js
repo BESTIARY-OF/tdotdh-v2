@@ -1,0 +1,34 @@
+import assert from 'node:assert/strict';
+import { createWebGpuDeviceCache, WEBGPU_DEVICE_CACHE_SCHEMA } from '../src/webgpu-device-cache.js';
+
+let adapterRequests = 0;
+let deviceRequests = 0;
+let deviceOptions = [];
+const devices = [{ id: 1 }, { id: 2 }];
+const gpu = { requestAdapter: async () => { adapterRequests += 1; return { requestDevice: async options => { deviceOptions.push(options); deviceRequests += 1; return devices[deviceRequests - 1]; } }; } };
+const cache = createWebGpuDeviceCache({ gpu });
+assert.equal(cache.schema, WEBGPU_DEVICE_CACHE_SCHEMA);
+const first = await cache.getDevice();
+const second = await cache.getDevice();
+assert.equal(first, second);
+assert.equal(adapterRequests, 1);
+assert.equal(deviceRequests, 1);
+assert.equal(deviceOptions[0], undefined);
+cache.reset();
+assert.equal(await cache.getDevice(), devices[1]);
+assert.equal(adapterRequests, 2);
+assert.equal(deviceRequests, 2);
+const limitedGpu = { requestAdapter: async () => ({ requestDevice: async options => ({ options }) }) };
+const limited = createWebGpuDeviceCache({ gpu: limitedGpu, requiredLimits: { maxStorageBuffersPerShaderStage: 14 } });
+assert.deepEqual((await limited.getDevice()).options, { requiredLimits: { maxStorageBuffersPerShaderStage: 14 } });
+
+let loseDevice;
+let lostRequests = 0;
+const lossAware = createWebGpuDeviceCache({ gpu: { requestAdapter: async () => ({ requestDevice: async () => { lostRequests += 1; if (lostRequests === 1) return { id: 'lossy', lost: new Promise(resolve => { loseDevice = resolve; }) }; return { id: 'replacement' }; } }) } });
+const lossy = await lossAware.getDevice();
+assert.equal(lossy.id, 'lossy');
+loseDevice();
+await Promise.resolve();
+await Promise.resolve();
+assert.equal((await lossAware.getDevice()).id, 'replacement', 'device loss invalidates the cached device');
+console.log('WebGPU device cache tests passed');

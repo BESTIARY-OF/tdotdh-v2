@@ -33,4 +33,5 @@ for (const entry of catalog.packages) {
 }
 
 assert.equal(catalog.packages.find((entry) => entry.id === 'packages/interchange').provides[0], 'tdotdh.package-catalog.v0');
+assert.equal(catalog.packages.find((entry) => entry.id === 'packages/search-worker').status, 'implemented');
 console.log(`package catalog v${catalog.catalog_version} valid: ${catalog.packages.length} entries`);

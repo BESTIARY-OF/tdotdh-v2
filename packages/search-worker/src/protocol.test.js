@@ -1,0 +1,108 @@
+import assert from "node:assert/strict";
+import {
+  MAX_SIGNATURE_HINTS,
+  DEFAULT_SEARCH_MODE,
+  SEARCH_MODES,
+  WORKER_PROTOCOL_VERSION,
+  WorkerProtocolError,
+  createSearchRequest,
+  createWorkerRuntime,
+} from "./protocol.js";
+
+const baseCommand = {
+  type: "start",
+  protocolVersion: WORKER_PROTOCOL_VERSION,
+  requestId: "search-1",
+  presetFingerprint: "preset-a",
+  catalogRevision: "catalog-1",
+  seed: "seed-a",
+  ticket: { presetFingerprint: "preset-a", familyId: "family-a", pass: 4, threadId: 2 },
+  cursor: { depth: 0, nodeOffset: 0, rootChoice: 2 },
+  budget: { maxNodes: 1000, maxMilliseconds: 1000 },
+  pieces: [{ id: 3, cells: [{ x: 0, y: 0 }] }],
+  constraints: { centroidId: 3 },
+  steering: {},
+  knownSignatureHints: ["known-a", "known-a", "known-b"],
+};
+
+const request = createSearchRequest(baseCommand);
+assert.deepEqual(request.ticket, baseCommand.ticket);
+assert.deepEqual(request.cursor, baseCommand.cursor);
+assert.equal(request.mode, DEFAULT_SEARCH_MODE);
+assert.equal(request.knownSignatureHints.length, 2);
+assert.equal(request.payloadBytes > 0, true);
+
+const breadthRequest = createSearchRequest({ ...baseCommand, requestId: "search-breadth", mode: SEARCH_MODES.breadth });
+assert.equal(breadthRequest.mode, SEARCH_MODES.breadth);
+assert.throws(
+  () => createSearchRequest({ ...baseCommand, mode: "balanced" }),
+  (error) => error instanceof WorkerProtocolError && error.code === "INVALID_MODE",
+);
+
+assert.throws(
+  () => createSearchRequest({ ...baseCommand, knownSignatureHints: Array.from({ length: MAX_SIGNATURE_HINTS + 1 }, (_, index) => `sig-${index}`) }),
+  (error) => error instanceof WorkerProtocolError && error.code === "SIGNATURE_HINT_LIMIT",
+);
+
+const events = [];
+let release;
+const gate = new Promise((resolve) => { release = resolve; });
+const runtime = createWorkerRuntime({
+  postMessage: (event) => events.push(event),
+  execute: async (_input, context) => {
+    context.reportProgress({ nodes: 1, depth: 1, frontier: 2, families: 1, cursor: { depth: 1, nodeOffset: 1, rootChoice: 2, checkpoint: { schema: 'test.checkpoint.v0', depth: 1, beam: [{ placements: [{ id: 3, cells: [{ x: 0, y: 0 }] }] }] } } });
+    await gate;
+    return context.isCancelled() ? null : { placements: [{ id: 3, cells: [{ x: 0, y: 0 }] }], nodes: 1 };
+  },
+});
+
+const running = runtime.handleMessage(baseCommand);
+await Promise.resolve();
+assert.equal(runtime.getActiveRequestId(), "search-1");
+await runtime.handleMessage({ type: "cancel", requestId: "search-1", reason: "test" });
+release();
+await running;
+
+assert.deepEqual(events.map((event) => event.type), ["started", "progress", "cancelled"]);
+assert.deepEqual(events.map((event) => event.sequence), [1, 2, 3]);
+assert.deepEqual(events.map((event) => event.mode), [DEFAULT_SEARCH_MODE, DEFAULT_SEARCH_MODE, DEFAULT_SEARCH_MODE]);
+assert.deepEqual(events[1].ticket, baseCommand.ticket);
+assert.deepEqual(events[1].cursor, { depth: 1, nodeOffset: 1, rootChoice: 2, checkpoint: { schema: 'test.checkpoint.v0', depth: 1, beam: [{ placements: [{ id: 3, cells: [{ x: 0, y: 0 }] }] }] } });
+assert.deepEqual(events[2].cursor, { depth: 1, nodeOffset: 1, rootChoice: 2, checkpoint: { schema: 'test.checkpoint.v0', depth: 1, beam: [{ placements: [{ id: 3, cells: [{ x: 0, y: 0 }] }] }] } });
+assert.equal(runtime.getActiveRequestId(), null);
+
+const returnedCursorEvents = [];
+let releaseReturnedCursor;
+const returnedCursorGate = new Promise(resolve => { releaseReturnedCursor = resolve; });
+const returnedCursorRuntime = createWorkerRuntime({
+  postMessage: event => returnedCursorEvents.push(event),
+  execute: async () => {
+    await returnedCursorGate;
+    return { placements: [], nodes: 17, cursor: { depth: 4, nodeOffset: 99, rootChoice: 2, checkpoint: { schema: 'test.checkpoint.v1', depth: 4, beam: [] } }, gpuExecution: { deviceAvailable: true }, frontierTargetGeneration: { status: 'completed', backend: 'resident-webgpu', parity: 'verified', candidateCount: 12 } };
+  },
+});
+const returnedCursorRun = returnedCursorRuntime.handleMessage({ ...baseCommand, requestId: 'search-returned-cursor' });
+await Promise.resolve();
+await returnedCursorRuntime.handleMessage({ type: 'cancel', requestId: 'search-returned-cursor', reason: 'returned-cursor-test' });
+releaseReturnedCursor();
+await returnedCursorRun;
+assert.deepEqual(returnedCursorEvents.at(-1).cursor, { depth: 4, nodeOffset: 99, rootChoice: 2, checkpoint: { schema: 'test.checkpoint.v1', depth: 4, beam: [] } });
+assert.equal(returnedCursorEvents.at(-1).searchReceipt.nodes, 17);
+assert.deepEqual(returnedCursorEvents.at(-1).searchReceipt.stages.frontierTargetGeneration, { status: 'completed', backend: 'resident-webgpu', parity: 'verified', candidateCount: 12 });
+
+const failed = [];
+const idleRuntime = createWorkerRuntime({ postMessage: (event) => failed.push(event), execute: async () => null });
+await idleRuntime.handleMessage({ type: "cancel", requestId: "missing" });
+assert.equal(failed[0].type, "failed");
+assert.equal(failed[0].error.code, "NO_ACTIVE_REQUEST");
+
+const breadthEvents = [];
+const breadthRuntime = createWorkerRuntime({
+  postMessage: (event) => breadthEvents.push(event),
+  execute: async () => ({ type: "done", placements: [{ id: 3, cells: [{ x: 0, y: 0 }] }], nodes: 1 }),
+});
+await breadthRuntime.handleMessage({ ...baseCommand, requestId: "search-breadth-runtime", mode: SEARCH_MODES.breadth });
+assert.deepEqual(breadthEvents.map((event) => event.type), ["started", "result", "completed"]);
+assert.equal(breadthEvents.every((event) => event.mode === SEARCH_MODES.breadth), true);
+
+console.log("search-worker protocol smoke test passed");

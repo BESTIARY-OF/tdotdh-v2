@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>TDOTDH v2 performance gate</title>
+<style>
+  body { margin: 2rem; max-width: 72rem; font: 16px/1.45 system-ui, sans-serif; color: #17202a; background: #f6f1e8; }
+  button { padding: .65rem 1rem; font-weight: 700; cursor: pointer; }
+  pre { white-space: pre-wrap; background: #fff; padding: 1rem; border: 1px solid #c9bda9; min-height: 12rem; }
+  .note { color: #5f5548; }
+</style>
+<h1>SEDLEC performance gate</h1>
+<p class="note">Runs the published 15-piece SEDLEC fixture through the live WebGPU worker and the forced CPU oracle with canonical-signature parity and stage timings.</p>
+<button id="run" type="button">Run matched performance gate</button>
+<pre id="output">Ready. No performance run has started.</pre>
+<script type="module" src="./benchmark.js?v=20260811-regression11"></script>

@@ -1,12 +1,18 @@
 export function allocateWeightedTickets(families, pass) {
-  const tickets = [];
+  const normalized = [];
   for (const family of families) {
     const weight = Math.max(0, Math.floor(Number(family.weight) || 0));
-    for (let thread = 0; thread < weight; thread += 1) {
-      tickets.push({ presetFingerprint: family.presetFingerprint, familyId: family.familyId, pass, threadId: thread });
+    if (weight > 0) normalized.push({ family, weight });
+  }
+  normalized.sort((a, b) => String(a.family.familyId).localeCompare(String(b.family.familyId)));
+  const tickets = [];
+  const maxWeight = Math.max(0, ...normalized.map(entry => entry.weight));
+  for (let thread = 0; thread < maxWeight; thread += 1) {
+    for (const { family, weight } of normalized) {
+      if (thread < weight) tickets.push({ presetFingerprint: family.presetFingerprint, familyId: family.familyId, pass, threadId: thread });
     }
   }
-  return tickets.sort((a, b) => a.familyId.localeCompare(b.familyId) || a.threadId - b.threadId);
+  return tickets;
 }
 
 export function ticketKey(ticket) {
